@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "BuildBook",
-  "version": "0.3.10",
+  "version": "0.3.66",
   "identifier": "com.buildbook.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -26,6 +26,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../dist"
+    ],
     "icon": [
       "icons/icon.ico"
     ]

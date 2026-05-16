@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import QRCode from 'qrcode';
 import {
   APP_VERSION,
   STATUSES,
@@ -14,22 +15,25 @@ import {
   downloadUrlFile,
   extensionAllowed,
   linkedLocalFile,
+  lanServerStatus,
   openExternalUrl,
   openStoredFile,
   openWithProgram,
+  overwriteBytesFile,
   prepareEditableFile,
   readStoredFile,
   saveBytesFile,
   savePickedFile,
+  startLanServer,
+  stopLanServer,
 } from './desktop';
 import { loadAppState, saveAppState } from './storage';
 import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
   ['projects', 'Projects'],
-  ['completed-projects', 'Completed Projects', 'child'],
-  ['archived-projects', 'Archived Projects', 'child'],
   ['parts', 'Parts Library'],
+  ['search', 'Search'],
   ['imports', 'Imports'],
   ['settings', 'Settings'],
 ];
@@ -58,10 +62,13 @@ function flattenCategoryOptions(categories) {
     return order || a.name.localeCompare(b.name);
   });
 
-  const walk = (parentId = '', depth = 0) => sort(children.get(parentId) || []).flatMap((category) => [
-    { ...category, depth, label: `${'  '.repeat(depth)}${category.name}` },
-    ...walk(category.id, depth + 1),
-  ]);
+  const walk = (parentId = '', depth = 0, path = []) => sort(children.get(parentId) || []).flatMap((category) => {
+    const nextPath = [...path, category.name];
+    return [
+      { ...category, depth, label: `${'  '.repeat(depth)}${category.name}`, fullLabel: nextPath.join(' / ') },
+      ...walk(category.id, depth + 1, nextPath),
+    ];
+  });
 
   return walk();
 }
@@ -79,8 +86,12 @@ function suggestCategoryId(name, categories) {
     ['cat-power', ['battery', 'charger', 'buck', 'boost', 'regulator', 'power', 'voltage', 'current', 'dc-dc']],
     ['cat-connectors', ['connector', 'terminal', 'header', 'socket', 'plug', 'jack', 'usb', 'wire']],
     ['cat-displays', ['display', 'oled', 'lcd', 'screen', 'tft', 'led matrix']],
-    ['cat-passives', ['resistor', 'capacitor', 'inductor', 'diode', 'transistor', 'mosfet']],
-    ['cat-mechanical', ['screw', 'standoff', 'enclosure', 'case', 'bracket', 'bearing', 'gear']],
+    ['cat-capacitors', ['capacitor', 'capacitance']],
+    ['cat-resistors', ['resistor', 'ohm']],
+    ['cat-switches', ['relay', 'switch']],
+    ['cat-motors', ['motor', 'servo', 'stepper', 'bearing', 'gear']],
+    ['cat-tools', ['tool', 'prototype', 'breadboard', 'crimper', 'solder']],
+    ['cat-mechanical', ['screw', 'bolt', 'nut', 'standoff', 'enclosure', 'case', 'bracket', 'hardware']],
   ];
   const hit = rules.find(([, terms]) => terms.some((term) => text.includes(term)));
   return categories.some((category) => category.id === hit?.[0]) ? hit[0] : 'cat-unassigned';
@@ -353,6 +364,845 @@ async function addFileEntry(entries, path, packagePath) {
   }
 }
 
+async function saveZipAsset(entries, packagePath, name, library) {
+  if (!packagePath || !entries.has(packagePath)) return '';
+  const stored = await saveBytesFile(name || packagePath.split('/').pop(), library, entries.get(packagePath));
+  return stored.path;
+}
+
+function webUploadPath(folder, name) {
+  return name ? `uploads/${folder}/${name}` : '';
+}
+
+function webId(prefix, id) {
+  return `${prefix}-web-${id}`;
+}
+
+function webDate(value) {
+  return value || new Date().toISOString();
+}
+
+function webTrackerId(key = '') {
+  return key ? `tracker-web-${key}` : 'tracker-web-other';
+}
+
+function webTrackerKey(trackerId = '') {
+  if (trackerId.startsWith('tracker-web-')) return trackerId.replace(/^tracker-web-/, '') || 'other';
+  const map = {
+    'tracker-datasheets': 'datasheet',
+    'tracker-firmware': 'firmware',
+    'tracker-drawings': 'drawing',
+    'tracker-models': 'enclosure',
+    'tracker-bom': 'bom',
+  };
+  return map[trackerId] || String(trackerId || 'other').replace(/^tracker-/, '') || 'other';
+}
+
+function guessWebFileType(name = '') {
+  const extension = fileExtension(name);
+  if (extension === '.pdf') return 'pdf';
+  if (IMAGE_EXTENSIONS.includes(extension)) return 'image';
+  return 'file';
+}
+
+function stripHtml(value) {
+  return String(value || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .trim();
+}
+
+function webUploadName(prefix, id, name, fallbackExtension = '') {
+  const extension = fileExtension(name) || fallbackExtension;
+  const baseName = String(name || id || prefix).split(/[\\/]/).pop() || String(id || prefix);
+  const base = safeName(baseName).replace(/\.[^.]+$/, '').slice(0, 70);
+  return `${safeName(prefix)}-${safeName(id)}-${base}${extension}`;
+}
+
+async function addWebUploadEntry(entries, path, folder, fileName) {
+  const packagePath = `uploads/${folder}/${fileName}`;
+  return addFileEntry(entries, path, packagePath);
+}
+
+async function rewriteNotesForWeb(entries, html, projectId, tableRows = []) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-path="([^"]+)"[^>]*>/g)];
+  for (const [index, match] of matches.entries()) {
+    const tag = match[0];
+    const path = match[1];
+    const fileName = webUploadName('note', `${projectId}-${index + 1}`, path, fileExtension(path) || '.image');
+    const added = await addWebUploadEntry(entries, path, 'images', fileName);
+    if (!added) continue;
+    tableRows.push({ image_path: fileName, archive_path: `note-images/${fileName}` });
+    const exportPath = await addFileEntry(entries, path, `note-images/${fileName}`);
+    const src = `/files/images/${fileName}`;
+    nextHtml = nextHtml.replace(tag, tag.replace(/src="[^"]*"/, `src="${escapeHtml(src)}"`));
+    if (!exportPath) tableRows[tableRows.length - 1].archive_path = '';
+  }
+  return nextHtml;
+}
+
+function parseWebMetadataValue(metadata, key, fallback) {
+  const item = (metadata || []).find((entry) => entry.key === key);
+  if (!item?.value) return fallback;
+  try {
+    return JSON.parse(item.value);
+  } catch {
+    return fallback;
+  }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function parseWebMetadataArray(metadata, key) {
+  return asArray(parseWebMetadataValue(metadata, key, []));
+}
+
+async function restoreWebNoteImages(entries, html, projectId) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*src="\/files\/images\/([^"]+)"[^>]*>/g)];
+  for (const match of matches) {
+    const tag = match[0];
+    const fileName = decodeURIComponent(match[1].split(/[?#]/)[0]);
+    const path = await saveZipAsset(entries, webUploadPath('images', fileName), fileName, `project-note-images/${projectId}`);
+    if (!path) continue;
+    const restoredTag = tag
+      .replace(/src="[^"]*"/, `src="${escapeHtml(assetUrl(path))}"`)
+      .replace(/<img\b/, `<img data-project-image-path="${escapeHtml(path)}"`);
+    nextHtml = nextHtml.replace(tag, restoredTag);
+  }
+  return nextHtml;
+}
+
+async function packageInlineNoteImages(entries, html, projectId) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/data-project-image-path="([^"]+)"/g)];
+  for (const [index, match] of matches.entries()) {
+    const path = match[1];
+    const packagePath = await addFileEntry(entries, path, `projects/${safeName(projectId)}/note-images/inline-${index}${fileExtension(path) || '.image'}`);
+    if (packagePath) {
+      nextHtml = nextHtml.replace(match[0], `${match[0]} data-project-image-package-path="${escapeHtml(packagePath)}"`);
+    }
+  }
+  return nextHtml;
+}
+
+async function restoreInlineNoteImages(entries, html, projectId) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-package-path="([^"]+)"[^>]*>/g)];
+  for (const match of matches) {
+    const tag = match[0];
+    const packagePath = match[1];
+    const restoredPath = await saveZipAsset(entries, packagePath, packagePath.split('/').pop(), `project-note-images/${projectId}`);
+    if (!restoredPath) continue;
+    let restoredTag = tag.replace(/src="[^"]*"/, `src="${escapeHtml(assetUrl(restoredPath))}"`);
+    restoredTag = /data-project-image-path="/.test(restoredTag)
+      ? restoredTag.replace(/data-project-image-path="[^"]*"/, `data-project-image-path="${escapeHtml(restoredPath)}"`)
+      : restoredTag.replace(/<img\b/, `<img data-project-image-path="${escapeHtml(restoredPath)}"`);
+    restoredTag = restoredTag.replace(/\sdata-project-image-package-path="[^"]*"/, '');
+    nextHtml = nextHtml.replace(tag, restoredTag);
+  }
+  return nextHtml;
+}
+
+async function buildFullBackupPackage(state) {
+  const entries = [];
+  const backupState = JSON.parse(JSON.stringify(state));
+
+  for (const project of backupState.projects || []) {
+    project.imagePackagePath = await addFileEntry(entries, project.image, `projects/${safeName(project.id)}/image/${safeName(project.name)}${fileExtension(project.image) || '.image'}`);
+    if (project.imagePackagePath) project.image = '';
+    project.notes = await packageInlineNoteImages(entries, project.notes, project.id);
+
+    project.noteImages = await Promise.all((project.noteImages || []).map(async (image) => {
+      const packagePath = await addFileEntry(entries, image.path, `projects/${safeName(project.id)}/note-images/${safeName(image.name || image.id)}${fileExtension(image.path) || ''}`);
+      return packagePath ? { ...image, path: '', packagePath } : image;
+    }));
+
+    project.files = await Promise.all((project.files || []).map(async (file) => {
+      if (file.type === 'folder') {
+        const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
+          const packagePath = await addFileEntry(entries, child.path, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/${safeName(file.id)}/${safeName(child.relativePath || child.name)}`);
+          return packagePath ? { ...child, path: '', packagePath } : child;
+        }));
+        return { ...file, folderFiles, path: '', sourcePath: '', storageMode: 'copy' };
+      }
+      const packagePath = await addFileEntry(entries, file.path, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/${safeName(file.id)}-${safeName(file.name)}`);
+      return packagePath ? { ...file, path: '', sourcePath: '', storageMode: 'copy', packagePath } : file;
+    }));
+  }
+
+  for (const part of backupState.parts || []) {
+    part.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.id)}/image/${safeName(part.name)}${fileExtension(part.image) || '.image'}`);
+    if (part.imagePackagePath) part.image = '';
+    part.documents = await Promise.all((part.documents || []).map(async (doc) => {
+      const packagePath = await addFileEntry(entries, doc.path, `parts/${safeName(part.id)}/documents/${safeName(doc.id)}-${safeName(doc.name)}`);
+      return packagePath ? { ...doc, path: '', sourcePath: '', storageMode: 'copy', packagePath } : doc;
+    }));
+  }
+
+  for (const batch of backupState.importBatches || []) {
+    batch.items = await Promise.all((batch.items || []).map(async (item) => {
+      const packagePath = await addFileEntry(entries, item.imagePath, `imports/${safeName(batch.id)}/images/${safeName(item.id)}${fileExtension(item.imagePath) || '.image'}`);
+      return packagePath ? { ...item, imagePath: '', imagePackagePath: packagePath } : item;
+    }));
+  }
+
+  const manifest = {
+    kind: 'buildbook-full-backup',
+    version: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    state: backupState,
+  };
+  entries.unshift({ name: 'buildbook-backup.json', data: JSON.stringify(manifest, null, 2) });
+  return createZip(entries);
+}
+
+async function readFullBackupPackage(file) {
+  const entries = await readZip(file);
+  if (!entries.has('buildbook-backup.json') && entries.has('backup.json')) return readWebBackupPackage(entries);
+  const manifest = JSON.parse(zipText(entries, 'buildbook-backup.json'));
+  if (manifest.kind !== 'buildbook-full-backup') throw new Error('This is not a BuildBook full backup.');
+  const restoredState = manifest.state;
+
+  for (const project of restoredState.projects || []) {
+    project.image = await saveZipAsset(entries, project.imagePackagePath, `${project.name}-image`, `project-images/${project.id}`) || project.image || '';
+    delete project.imagePackagePath;
+    project.notes = await restoreInlineNoteImages(entries, project.notes, project.id);
+
+    project.noteImages = await Promise.all((project.noteImages || []).map(async (image) => {
+      const path = await saveZipAsset(entries, image.packagePath, image.name, `project-note-images/${project.id}`);
+      const restored = path ? { ...image, path } : image;
+      delete restored.packagePath;
+      return restored;
+    }));
+
+    project.files = await Promise.all((project.files || []).map(async (file) => {
+      if (file.type === 'folder') {
+        const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
+          const path = await saveZipAsset(entries, child.packagePath, child.name, `project-files/${project.id}/${file.trackerId}/${file.name}`);
+          const restoredChild = path ? { ...child, path } : child;
+          delete restoredChild.packagePath;
+          return restoredChild;
+        }));
+        return { ...file, folderFiles, path: '', sourcePath: '', storageMode: 'copy' };
+      }
+      const path = await saveZipAsset(entries, file.packagePath, file.name, `project-files/${project.id}/${file.trackerId}`);
+      const restored = path ? { ...file, path, sourcePath: '', storageMode: 'copy' } : file;
+      delete restored.packagePath;
+      return restored;
+    }));
+  }
+
+  for (const part of restoredState.parts || []) {
+    part.image = await saveZipAsset(entries, part.imagePackagePath, `${part.name}-image`, `part-images/${part.id}`) || part.image || '';
+    delete part.imagePackagePath;
+    part.documents = await Promise.all((part.documents || []).map(async (doc) => {
+      const path = await saveZipAsset(entries, doc.packagePath, doc.name, `part-documents/${part.id}`);
+      const restored = path ? { ...doc, path, sourcePath: '', storageMode: 'copy' } : doc;
+      delete restored.packagePath;
+      return restored;
+    }));
+  }
+
+  for (const batch of restoredState.importBatches || []) {
+    batch.items = await Promise.all((batch.items || []).map(async (item) => {
+      const imagePath = await saveZipAsset(entries, item.imagePackagePath, `${item.name || item.id}-image`, `import-images/${batch.id}`);
+      const restored = imagePath ? { ...item, imagePath } : item;
+      delete restored.imagePackagePath;
+      return restored;
+    }));
+  }
+
+  return normalizeState(restoredState);
+}
+
+async function readWebBackupPackage(entries) {
+  const backup = JSON.parse(zipText(entries, 'backup.json'));
+  if (backup.type !== 'buildbook-web-backup') throw new Error('This is not a supported BuildBook backup.');
+
+  const webTrackers = parseWebMetadataArray(backup.app_metadata, 'file_trackers');
+  const fileTrackers = (webTrackers.length ? webTrackers : [
+    { key: 'datasheet', label: 'Datasheets', extensions: '.pdf' },
+    { key: 'firmware', label: 'Firmware', extensions: '.ino,.cpp,.h' },
+    { key: 'drawing', label: 'Drawings', extensions: '.dwg,.dxf' },
+    { key: 'enclosure', label: 'Enclosure', extensions: '.stl,.step,.3mf' },
+    { key: 'bom', label: 'PCB BOM', extensions: '.xlsx,.xls,.csv,.tsv' },
+    { key: 'other', label: 'Other', extensions: '' },
+  ]).map((tracker) => ({
+    id: webTrackerId(tracker.key),
+    name: tracker.label || tracker.key || 'Files',
+    extensions: tracker.extensions || '',
+    programPath: '',
+  }));
+  const trackerIds = new Set(fileTrackers.map((tracker) => tracker.id));
+
+  const categories = [
+    { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
+    ...asArray(backup.category)
+      .slice()
+      .sort((a, b) => (a.order_index || 0) - (b.order_index || 0) || String(a.name).localeCompare(String(b.name)))
+      .map((category, index) => ({
+        id: webId('cat', category.id),
+        name: category.name || 'Category',
+        parentId: category.parent_id ? webId('cat', category.parent_id) : null,
+        sortOrder: index + 1,
+      })),
+  ];
+  const categoryIds = new Set(categories.map((category) => category.id));
+
+  const documentsByPart = new Map();
+  for (const doc of asArray(backup.part_document)) {
+    const partId = webId('part', doc.part_id);
+    const path = await saveZipAsset(entries, webUploadPath('documents', doc.file_path), doc.original_filename || doc.file_path, `part-documents/${partId}`);
+    const nextDoc = {
+      id: webId('doc', doc.id),
+      name: doc.original_filename || doc.file_path || 'Document',
+      path,
+      type: doc.file_type || 'document',
+      storageMode: 'copy',
+      sourcePath: '',
+      createdAt: webDate(doc.uploaded_at),
+    };
+    documentsByPart.set(partId, [...(documentsByPart.get(partId) || []), nextDoc]);
+  }
+
+  const parts = await Promise.all(asArray(backup.part).map(async (part) => {
+    const id = webId('part', part.id);
+    const categoryId = part.category_id ? webId('cat', part.category_id) : 'cat-unassigned';
+    const image = await saveZipAsset(entries, webUploadPath('images', part.image_path), `${part.name || id}-image`, `part-images/${id}`);
+    return {
+      id,
+      name: part.name || 'Imported Part',
+      categoryId: categoryIds.has(categoryId) ? categoryId : 'cat-unassigned',
+      image,
+      productUrl: part.product_url || '',
+      storageLocation: part.storage_location || '',
+      specSummary: part.spec_summary || '',
+      notes: part.notes || '',
+      documents: documentsByPart.get(id) || [],
+      createdAt: webDate(part.created_at),
+      updatedAt: webDate(part.updated_at),
+    };
+  }));
+
+  const checklistByProject = new Map();
+  for (const item of asArray(backup.project_checklist_item)) {
+    const projectId = webId('project', item.project_id);
+    checklistByProject.set(projectId, [...(checklistByProject.get(projectId) || []), {
+      id: webId('check', item.id),
+      text: item.text || '',
+      completedAt: item.is_completed ? webDate(item.completed_at) : '',
+    }]);
+  }
+
+  const stepNameById = new Map(asArray(backup.step_definition).map((step) => [step.id, step.name]));
+  const activeStepsByProject = new Map();
+  for (const step of asArray(backup.project_step)) {
+    const projectId = webId('project', step.project_id);
+    const name = stepNameById.get(step.step_definition_id);
+    if (name) activeStepsByProject.set(projectId, [...(activeStepsByProject.get(projectId) || []), name]);
+  }
+
+  const filesByProject = new Map();
+  for (const file of asArray(backup.project_file)) {
+    const projectId = webId('project', file.project_id);
+    const trackerId = trackerIds.has(webTrackerId(file.tracker_key)) ? webTrackerId(file.tracker_key) : webTrackerId('other');
+    const path = await saveZipAsset(entries, webUploadPath('projects', file.file_path), file.original_filename || file.file_path, `project-files/${projectId}/${trackerId}`);
+    filesByProject.set(projectId, [...(filesByProject.get(projectId) || []), {
+      id: webId('file', file.id),
+      trackerId,
+      name: file.original_filename || file.file_path || 'File',
+      path,
+      sourcePath: '',
+      storageMode: 'copy',
+      size: 0,
+      contentHash: '',
+      latest: Boolean(file.is_latest),
+      notes: file.version_note || '',
+      createdAt: webDate(file.uploaded_at),
+    }]);
+  }
+
+  const linksByProject = new Map();
+  for (const link of asArray(backup.project_part)) {
+    const projectId = webId('project', link.project_id);
+    const partId = webId('part', link.part_id);
+    linksByProject.set(projectId, [...(linksByProject.get(projectId) || []), { partId, quantity: Number(link.quantity) || 1 }]);
+  }
+
+  const projects = await Promise.all(asArray(backup.project).map(async (project) => {
+    const id = webId('project', project.id);
+    const image = await saveZipAsset(entries, webUploadPath('images', project.image_path), `${project.name || id}-image`, `project-images/${id}`);
+    const links = linksByProject.get(id) || [];
+    return {
+      id,
+      name: project.name || 'Imported Project',
+      status: project.status || 'active',
+      image,
+      activeSteps: activeStepsByProject.get(id) || [],
+      notes: await restoreWebNoteImages(entries, project.notes, id),
+      checklist: checklistByProject.get(id) || [],
+      nextSteps: [],
+      partIds: links.map((link) => link.partId).filter((partId) => parts.some((part) => part.id === partId)),
+      partQuantities: Object.fromEntries(links.map((link) => [link.partId, link.quantity])),
+      files: filesByProject.get(id) || [],
+      noteImages: [],
+      createdAt: webDate(project.created_at),
+      updatedAt: webDate(project.updated_at),
+    };
+  }));
+
+  const itemsByBatch = new Map();
+  for (const item of asArray(backup.import_item)) {
+    const batchId = webId('batch', item.import_batch_id);
+    itemsByBatch.set(batchId, [...(itemsByBatch.get(batchId) || []), {
+      id: webId('import', item.id),
+      name: item.raw_name || 'Import item',
+      sku: '',
+      productUrl: item.product_url || '',
+      imageUrl: item.product_image_url || '',
+      imagePath: '',
+      categoryId: 'cat-unassigned',
+      action: item.status === 'draft' ? 'create' : 'merge',
+      status: item.status === 'draft' ? 'draft' : 'imported',
+      matchId: item.resolved_part_id ? webId('part', item.resolved_part_id) : '',
+      matchQuality: item.suggested_part_id || item.resolved_part_id ? 'recommended' : 'none',
+      notes: [item.attributes, item.store, item.ordered_at ? `Ordered: ${item.ordered_at}` : ''].filter(Boolean).join('\n'),
+      raw: item,
+    }]);
+  }
+
+  const importBatches = asArray(backup.import_batch).map((batch) => {
+    const id = webId('batch', batch.id);
+    return {
+      id,
+      name: batch.original_filename || `Import ${batch.id}`,
+      fileName: batch.original_filename || '',
+      source: batch.source || 'web backup',
+      createdAt: webDate(batch.imported_at),
+      items: itemsByBatch.get(id) || [],
+    };
+  });
+
+  return normalizeState({
+    version: APP_VERSION,
+    lanServer: { enabled: false, port: 8787, token: '' },
+    categories,
+    template: {
+      steps: asArray(backup.step_definition).slice().sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map((step) => step.name).filter(Boolean),
+      checklist: parseWebMetadataArray(backup.app_metadata, 'template_checklist'),
+      fileTrackers,
+    },
+    projects,
+    parts,
+    importBatches,
+  });
+}
+
+function webFileTrackersFromProjectManifest(manifest) {
+  const byKey = new Map([
+    ['datasheet', { id: webTrackerId('datasheet'), name: 'Datasheets', extensions: '.pdf', programPath: '' }],
+    ['firmware', { id: webTrackerId('firmware'), name: 'Firmware', extensions: '.ino,.cpp,.h', programPath: '' }],
+    ['drawing', { id: webTrackerId('drawing'), name: 'Drawings', extensions: '.dwg,.dxf', programPath: '' }],
+    ['enclosure', { id: webTrackerId('enclosure'), name: 'Enclosure', extensions: '.stl,.step,.3mf', programPath: '' }],
+    ['bom', { id: webTrackerId('bom'), name: 'PCB BOM', extensions: '.xlsx,.xls,.csv,.tsv', programPath: '' }],
+    ['other', { id: webTrackerId('other'), name: 'Other', extensions: '', programPath: '' }],
+  ]);
+  for (const file of manifest.files || []) {
+    const key = file.tracker_key || 'other';
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        id: webTrackerId(key),
+        name: file.file_category?.split('-')[0]?.trim() || key,
+        extensions: '',
+        programPath: '',
+      });
+    }
+  }
+  return [...byKey.values()];
+}
+
+async function readWebProjectPackage(entries) {
+  const webManifest = JSON.parse(zipText(entries, 'project-manifest.json'));
+  if (webManifest.type !== 'buildbook-web-project-export') throw new Error('This is not a BuildBook_Web project export.');
+  const now = new Date().toISOString();
+  const fileTrackers = webFileTrackersFromProjectManifest(webManifest);
+  const noteImages = (webManifest.note_images || []).map((image, index) => ({
+    id: webId('note-img', index + 1),
+    name: image.image_path || `note-image-${index + 1}`,
+    path: '',
+    packagePath: image.archive_path || '',
+  }));
+  let notes = String(webManifest.project?.notes || '');
+  for (const image of webManifest.note_images || []) {
+    if (!image.archive_path || !image.image_path) continue;
+    const source = `/files/images/${image.image_path}`;
+    notes = notes.split(source).join(source);
+    notes = notes.replace(
+      new RegExp(`(<img\\b(?=[^>]*${image.image_path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})[^>]*)>`, 'g'),
+      `$1 data-project-image-package-path="${escapeHtml(image.archive_path)}">`,
+    );
+  }
+
+  const files = (webManifest.files || []).map((file, index) => ({
+    id: webId('file', file.id || index + 1),
+    trackerId: webTrackerId(file.tracker_key || 'other'),
+    name: file.original_filename || file.archive_path?.split('/').pop() || 'File',
+    path: '',
+    sourcePath: '',
+    storageMode: 'copy',
+    size: 0,
+    contentHash: '',
+    latest: file.is_latest !== false,
+    notes: file.version_note || '',
+    createdAt: webDate(file.uploaded_at),
+    packagePath: file.archive_path || '',
+  }));
+
+  const parts = (webManifest.parts || []).map((part, index) => ({
+    id: webId('part', index + 1),
+    name: part.name || 'Imported Part',
+    categoryId: 'cat-unassigned',
+    categoryPath: Array.isArray(part.category_path) ? part.category_path : String(part.category_label || '').split('/').map((item) => item.trim()).filter(Boolean),
+    image: '',
+    imagePackagePath: part.image_archive_path || '',
+    productUrl: part.product_url || '',
+    storageLocation: part.storage_location || '',
+    specSummary: part.spec_summary || '',
+    notes: part.notes || '',
+    quantity: Number(part.quantity) || 1,
+    documents: (part.documents || []).map((doc, docIndex) => ({
+      id: webId('doc', `${index + 1}-${doc.id || docIndex + 1}`),
+      name: doc.original_filename || doc.archive_path?.split('/').pop() || 'Document',
+      path: '',
+      type: doc.file_type || guessWebFileType(doc.original_filename),
+      storageMode: 'copy',
+      sourcePath: '',
+      createdAt: webDate(doc.uploaded_at),
+      packagePath: doc.archive_path || '',
+    })),
+    createdAt: now,
+    updatedAt: now,
+  }));
+
+  return {
+    manifest: {
+      kind: 'buildbook-project-package',
+      version: webManifest.version || APP_VERSION,
+      exportedAt: webManifest.exported_at || now,
+      categories: [],
+      fileTrackers,
+      project: {
+        id: webId('project', 1),
+        name: webManifest.project?.name || 'Imported Project',
+        status: webManifest.project?.status || 'active',
+        image: '',
+        imagePackagePath: webManifest.project?.image_archive_path || '',
+        activeSteps: (webManifest.steps || []).sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map((step) => step.name).filter(Boolean),
+        notes,
+        noteImages,
+        checklist: (webManifest.checklist || []).sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map((item, index) => ({
+          id: webId('check', index + 1),
+          text: item.text || '',
+          completedAt: item.is_completed ? webDate(item.completed_at) : '',
+        })),
+        nextSteps: [],
+        partIds: parts.map((part) => part.id),
+        partQuantities: Object.fromEntries(parts.map((part) => [part.id, part.quantity])),
+        files,
+        createdAt: now,
+        updatedAt: now,
+      },
+      parts,
+    },
+    entries,
+  };
+}
+
+async function buildWebProjectPackage(state, project) {
+  const entries = [];
+  const now = new Date().toISOString();
+  const linkedParts = project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean);
+  const noteImages = [];
+  const notes = await rewriteNotesForWeb(entries, project.notes, project.id, noteImages);
+  const projectImageName = project.image ? webUploadName('project', project.id, `${project.name}${fileExtension(project.image) || '.image'}`) : '';
+  const projectImageArchive = projectImageName ? `project-image/${projectImageName}` : '';
+  if (project.image && projectImageName) await addFileEntry(entries, project.image, projectImageArchive);
+
+  const files = [];
+  let fileIndex = 1;
+  for (const file of project.files.filter((item) => item.latest)) {
+    const addManifestFile = async (sourcePath, originalName, notesText, createdAt, trackerId) => {
+      if (!sourcePath) return;
+      const archivePath = `latest-files/${fileIndex}-${safeName(originalName)}`;
+      await addFileEntry(entries, sourcePath, archivePath);
+      const tracker = state.template.fileTrackers.find((item) => item.id === trackerId);
+      files.push({
+        id: fileIndex,
+        original_filename: originalName,
+        file_type: guessWebFileType(originalName),
+        tracker_key: webTrackerKey(trackerId),
+        file_category: `${tracker?.name || 'Imported'}-${tracker?.extensions || ''}`,
+        version_note: notesText || null,
+        is_latest: true,
+        uploaded_at: createdAt || now,
+        archive_path: archivePath,
+      });
+      fileIndex += 1;
+    };
+    if (file.type === 'folder') {
+      for (const child of file.folderFiles || []) {
+        await addManifestFile(child.path, child.relativePath || child.name, file.notes, child.createdAt || file.createdAt, file.trackerId);
+      }
+    } else {
+      await addManifestFile(file.path, file.name, file.notes, file.createdAt, file.trackerId);
+    }
+  }
+
+  const parts = [];
+  for (const [partIndex, part] of linkedParts.entries()) {
+    const partImageName = part.image ? webUploadName('part', part.id, `${part.name}${fileExtension(part.image) || '.image'}`) : '';
+    const partImageArchive = partImageName ? `part-images/${partImageName}` : '';
+    if (part.image && partImageArchive) await addFileEntry(entries, part.image, partImageArchive);
+    const documents = [];
+    for (const [docIndex, doc] of (part.documents || []).entries()) {
+      const archivePath = `part-documents/${partIndex + 1}/${docIndex + 1}-${safeName(doc.name)}`;
+      await addFileEntry(entries, doc.path, archivePath);
+      documents.push({
+        id: docIndex + 1,
+        file_type: doc.type || guessWebFileType(doc.name),
+        file_path: '',
+        text_content: null,
+        original_filename: doc.name,
+        is_primary: docIndex === 0,
+        uploaded_at: doc.createdAt || now,
+        archive_path: archivePath,
+      });
+    }
+    parts.push({
+      name: part.name,
+      quantity: Number(project.partQuantities?.[part.id]) || 1,
+      category_path: categoryPath(state.categories, part.categoryId),
+      category_label: categoryLabel(state.categories, part.categoryId),
+      product_url: part.productUrl || null,
+      storage_location: part.storageLocation || null,
+      notes: part.notes || null,
+      spec_summary: part.specSummary || null,
+      image_archive_path: partImageArchive,
+      documents,
+    });
+  }
+
+  const manifest = {
+    type: 'buildbook-web-project-export',
+    version: APP_VERSION,
+    exported_at: now,
+    project: {
+      name: project.name,
+      status: project.status,
+      notes,
+      image_path: projectImageName,
+      image_archive_path: projectImageArchive,
+    },
+    note_images: noteImages.map((image) => ({ image_path: image.image_path, archive_path: image.archive_path })),
+    steps: (project.activeSteps || []).map((name, index) => ({ name, order_index: (index + 1) * 10 })),
+    checklist: (project.checklist || []).map((item, index) => ({
+      text: item.text,
+      is_completed: Boolean(item.completedAt),
+      completed_at: item.completedAt || null,
+      order_index: index,
+    })),
+    files,
+    parts,
+  };
+
+  entries.unshift({ name: 'project-summary.html', data: buildGuideHtml(project, linkedParts, state.categories, state.template.fileTrackers) });
+  entries.push({ name: 'notes.txt', data: stripHtml(notes) });
+  entries.push({ name: 'project-manifest.json', data: JSON.stringify(manifest, null, 2) });
+  entries.push({ name: 'project-data.json', data: JSON.stringify(manifest, null, 2) });
+  return createZip(entries);
+}
+
+async function buildWebFullBackupPackage(state) {
+  const entries = [];
+  const now = new Date().toISOString();
+  let nextId = 1;
+  const alloc = () => nextId++;
+  const categoryIds = new Map();
+  const partIds = new Map();
+  const projectIds = new Map();
+  const stepIds = new Map();
+  const backup = {
+    type: 'buildbook-web-backup',
+    version: 3,
+    app_version: APP_VERSION,
+    exported_at: now,
+    includes_uploads: true,
+    app_metadata: [
+      { key: 'file_trackers', value: JSON.stringify(state.template.fileTrackers.map((tracker) => ({ key: webTrackerKey(tracker.id), label: tracker.name, extensions: tracker.extensions || '' }))) },
+      { key: 'template_checklist', value: JSON.stringify(state.template.checklist || []) },
+    ],
+    category: [],
+    part: [],
+    part_document: [],
+    project: [],
+    project_part: [],
+    project_file: [],
+    project_checklist_item: [],
+    step_definition: [],
+    project_step: [],
+    import_batch: [],
+    import_item: [],
+  };
+
+  for (const category of state.categories.filter((item) => item.id !== 'cat-unassigned')) categoryIds.set(category.id, alloc());
+  for (const category of state.categories.filter((item) => item.id !== 'cat-unassigned')) {
+    backup.category.push({
+      id: categoryIds.get(category.id),
+      name: category.name,
+      description: null,
+      parent_id: category.parentId ? categoryIds.get(category.parentId) || null : null,
+      image_path: null,
+      order_index: category.sortOrder || 0,
+      created_at: now,
+      updated_at: now,
+    });
+  }
+
+  for (const [index, step] of (state.template.steps || []).entries()) {
+    const id = alloc();
+    stepIds.set(step, id);
+    backup.step_definition.push({ id, name: step, order_index: (index + 1) * 10 });
+  }
+
+  for (const part of state.parts) partIds.set(part.id, alloc());
+  for (const part of state.parts) {
+    const id = partIds.get(part.id);
+    const imageName = part.image ? webUploadName('part', id, `${part.name}${fileExtension(part.image) || '.image'}`) : null;
+    if (part.image && imageName) await addWebUploadEntry(entries, part.image, 'images', imageName);
+    backup.part.push({
+      id,
+      category_id: part.categoryId === 'cat-unassigned' ? null : categoryIds.get(part.categoryId) || null,
+      name: part.name,
+      product_url: part.productUrl || null,
+      storage_location: part.storageLocation || null,
+      notes: part.notes || null,
+      spec_summary: part.specSummary || null,
+      image_path: imageName,
+      created_at: part.createdAt || now,
+      updated_at: part.updatedAt || now,
+    });
+    for (const [docIndex, doc] of (part.documents || []).entries()) {
+      const docId = alloc();
+      const docName = webUploadName('doc', docId, doc.name);
+      if (doc.path && docName) await addWebUploadEntry(entries, doc.path, 'documents', docName);
+      backup.part_document.push({
+        id: docId,
+        part_id: id,
+        file_type: doc.type || guessWebFileType(doc.name),
+        file_path: doc.path ? docName : null,
+        text_content: null,
+        original_filename: doc.name,
+        is_primary: docIndex === 0,
+        uploaded_at: doc.createdAt || now,
+      });
+    }
+  }
+
+  for (const project of state.projects) projectIds.set(project.id, alloc());
+  for (const project of state.projects) {
+    const id = projectIds.get(project.id);
+    const imageName = project.image ? webUploadName('project', id, `${project.name}${fileExtension(project.image) || '.image'}`) : null;
+    if (project.image && imageName) await addWebUploadEntry(entries, project.image, 'images', imageName);
+    const notes = await rewriteNotesForWeb(entries, project.notes, id, []);
+    backup.project.push({
+      id,
+      name: project.name,
+      status: project.status || 'active',
+      notes,
+      image_path: imageName,
+      created_at: project.createdAt || now,
+      updated_at: project.updatedAt || now,
+    });
+    for (const [index, item] of (project.checklist || []).entries()) {
+      backup.project_checklist_item.push({
+        id: alloc(),
+        project_id: id,
+        text: item.text,
+        is_completed: Boolean(item.completedAt),
+        completed_at: item.completedAt || null,
+        order_index: index,
+      });
+    }
+    for (const stepName of project.activeSteps || []) {
+      if (stepIds.has(stepName)) backup.project_step.push({ project_id: id, step_definition_id: stepIds.get(stepName), created_at: project.createdAt || now });
+    }
+    for (const partId of project.partIds || []) {
+      if (!partIds.has(partId)) continue;
+      backup.project_part.push({ id: alloc(), project_id: id, part_id: partIds.get(partId), added_at: project.createdAt || now, quantity: Number(project.partQuantities?.[partId]) || 1 });
+    }
+    for (const file of project.files || []) {
+      const addProjectFile = async (sourcePath, originalName, item) => {
+        if (!sourcePath) return;
+        const fileId = alloc();
+        const uploadName = webUploadName('project-file', fileId, originalName);
+        if (sourcePath && uploadName) await addWebUploadEntry(entries, sourcePath, 'projects', uploadName);
+        const tracker = state.template.fileTrackers.find((current) => current.id === item.trackerId);
+        backup.project_file.push({
+          id: fileId,
+          project_id: id,
+          file_path: uploadName,
+          original_filename: originalName,
+          file_type: guessWebFileType(originalName),
+          tracker_key: webTrackerKey(item.trackerId),
+          file_category: `${tracker?.name || 'Imported'}-${tracker?.extensions || ''}`,
+          version_note: item.notes || null,
+          is_latest: Boolean(item.latest),
+          uploaded_at: item.createdAt || now,
+        });
+      };
+      if (file.type === 'folder') {
+        for (const child of file.folderFiles || []) await addProjectFile(child.path, child.relativePath || child.name, file);
+      } else {
+        await addProjectFile(file.path, file.name, file);
+      }
+    }
+  }
+
+  for (const batch of state.importBatches || []) {
+    const batchId = alloc();
+    backup.import_batch.push({ id: batchId, source: batch.source || 'desktop', original_filename: batch.fileName || batch.name || 'Import', imported_at: batch.createdAt || now });
+    for (const item of batch.items || []) {
+      backup.import_item.push({
+        id: alloc(),
+        import_batch_id: batchId,
+        status: item.status || 'draft',
+        raw_name: item.name || '',
+        product_url: item.productUrl || null,
+        product_image_url: item.imageUrl || null,
+        attributes: item.notes || null,
+        store: null,
+        ordered_at: null,
+        suggested_part_id: item.matchId && partIds.has(item.matchId) ? partIds.get(item.matchId) : null,
+        resolved_part_id: item.status === 'imported' && item.matchId && partIds.has(item.matchId) ? partIds.get(item.matchId) : null,
+        created_at: item.createdAt || batch.createdAt || now,
+        updated_at: item.updatedAt || batch.createdAt || now,
+      });
+    }
+  }
+
+  entries.unshift({ name: 'backup.json', data: JSON.stringify(backup, null, 2) });
+  return createZip(entries);
+}
+
 async function buildProjectPackage(state, project) {
   const entries = [];
   const linkedParts = project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean);
@@ -371,6 +1221,15 @@ async function buildProjectPackage(state, project) {
   }
 
   for (const file of project.files.filter((item) => item.latest)) {
+    if (file.type === 'folder') {
+      const folderFiles = [];
+      for (const child of file.folderFiles || []) {
+        const packagePath = await addFileEntry(entries, child.path, `project/latest-files/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}/${safeName(child.relativePath || child.name)}`);
+        folderFiles.push({ ...child, path: '', sourcePath: '', packagePath });
+      }
+      exportedProject.files.push({ ...file, path: '', sourcePath: '', folderFiles });
+      continue;
+    }
     const packagePath = await addFileEntry(entries, file.path, `project/latest-files/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}`);
     exportedProject.files.push({ ...file, path: '', sourcePath: '', packagePath });
   }
@@ -379,6 +1238,7 @@ async function buildProjectPackage(state, project) {
   for (const part of linkedParts) {
     const exportedPart = {
       ...part,
+      quantity: Number(project.partQuantities?.[part.id]) || 1,
       image: '',
       imagePackagePath: '',
       categoryPath: categoryPath(state.categories, part.categoryId),
@@ -413,6 +1273,7 @@ async function buildProjectPackage(state, project) {
 
 async function readProjectPackage(file) {
   const entries = await readZip(file);
+  if (!entries.has('buildbook-package.json') && entries.has('project-manifest.json')) return readWebProjectPackage(entries);
   const manifest = JSON.parse(zipText(entries, 'buildbook-package.json'));
   if (manifest.kind !== 'buildbook-project-package') throw new Error('This is not a BuildBook project package.');
   return { manifest, entries };
@@ -458,6 +1319,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
     try {
       const projectId = makeId('project');
       const importedPartIds = [];
+      const importedPartQuantities = {};
       const createdParts = [];
       const updatedParts = [...state.parts];
       const importedTrackers = (manifest.fileTrackers || []).filter((tracker) => !state.template.fileTrackers.some((current) => current.id === tracker.id));
@@ -471,6 +1333,15 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
 
       const importedFiles = [];
       for (const file of manifest.project.files || []) {
+        if (file.type === 'folder') {
+          const folderFiles = [];
+          for (const child of file.folderFiles || []) {
+            const path = await savePackagedAsset(child.packagePath, child.name, `project-files/${projectId}/${file.trackerId}/${file.name}`);
+            folderFiles.push({ ...child, path, packagePath: '' });
+          }
+          importedFiles.push({ ...file, id: makeId('file'), folderFiles, path: '', sourcePath: '', packagePath: '', latest: true, createdAt: new Date().toISOString() });
+          continue;
+        }
         const path = await savePackagedAsset(file.packagePath, file.name, `project-files/${projectId}/${file.trackerId}`);
         importedFiles.push({ ...file, id: makeId('file'), path, sourcePath: '', packagePath: '', latest: true, createdAt: new Date().toISOString() });
       }
@@ -481,6 +1352,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
 
         if (existing) {
           importedPartIds.push(existing.id);
+          importedPartQuantities[existing.id] = Number(part.quantity) || Number(manifest.project.partQuantities?.[part.id]) || 1;
           continue;
         }
 
@@ -504,6 +1376,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         delete createdPart.imagePackagePath;
         createdParts.push(createdPart);
         importedPartIds.push(newPartId);
+        importedPartQuantities[newPartId] = Number(part.quantity) || Number(manifest.project.partQuantities?.[part.id]) || 1;
       }
 
       const importedProject = {
@@ -513,8 +1386,10 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         image: projectImage,
         imagePackagePath: '',
         partIds: importedPartIds,
+        partQuantities: importedPartQuantities,
         files: importedFiles,
         noteImages: importedNoteImages,
+        notes: await restoreInlineNoteImages(entries, manifest.project.notes, projectId),
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -616,6 +1491,21 @@ export default function App() {
     });
   };
 
+  useEffect(() => {
+    if (!state) return;
+    const lan = state.lanServer || {};
+    if (lan.enabled && !lan.token) {
+      const token = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), token } }));
+      return;
+    }
+    if (lan.enabled && lan.token) {
+      startLanServer(lan.port || 8787, lan.token).catch((error) => console.error(error));
+      return;
+    }
+    stopLanServer().catch(() => {});
+  }, [state?.lanServer?.enabled, state?.lanServer?.port, state?.lanServer?.token]);
+
   if (!state) return <div className="loading">Loading BuildBook...</div>;
 
   return (
@@ -625,18 +1515,17 @@ export default function App() {
           <strong>BuildBook</strong>
           <span>v{APP_VERSION}</span>
         </div>
-        {TABS.map(([key, label, kind]) => (
-          <button key={key} className={`${tab === key ? 'active' : ''} ${kind === 'child' ? 'sub-nav' : ''}`} onClick={() => setTab(key)}>
+        {TABS.map(([key, label]) => (
+          <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
             {label}
           </button>
         ))}
         <div className={`save-state ${saveState}`}>{saveState}</div>
       </aside>
       <main className="workspace">
-        {tab === 'projects' && <Projects state={state} updateState={updateState} mode="open" />}
-        {tab === 'completed-projects' && <Projects state={state} updateState={updateState} mode="completed" />}
-        {tab === 'archived-projects' && <Projects state={state} updateState={updateState} mode="archived" />}
+        {tab === 'projects' && <Projects state={state} updateState={updateState} />}
         {tab === 'parts' && <Parts state={state} updateState={updateState} />}
+        {tab === 'search' && <Search state={state} setTab={setTab} />}
         {tab === 'imports' && <Imports state={state} updateState={updateState} />}
         {tab === 'settings' && <Settings state={state} updateState={updateState} />}
       </main>
@@ -644,31 +1533,42 @@ export default function App() {
   );
 }
 
-function Projects({ state, updateState, mode }) {
+function Projects({ state, updateState }) {
   const [selectedId, setSelectedId] = useState('');
   const [pendingImport, setPendingImport] = useState(null);
   const [importError, setImportError] = useState('');
+  const [filter, setFilter] = useState('open');
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [newProjectError, setNewProjectError] = useState('');
   const selected = state.projects.find((project) => project.id === selectedId);
-  const showingCompleted = mode === 'completed';
-  const showingArchived = mode === 'archived';
   const visibleProjects = state.projects.filter((project) => (
-    showingArchived ? project.status === 'archived'
-      : showingCompleted
-        ? project.status === 'completed'
-        : project.status !== 'completed' && project.status !== 'archived'
+    filter === 'all' ? true
+      : filter === 'open' ? project.status !== 'archived'
+        : project.status === filter
   ));
 
   useEffect(() => {
     if (selected && !visibleProjects.some((project) => project.id === selected.id)) setSelectedId('');
   }, [selected, visibleProjects]);
 
-  const createProject = () => {
-    const name = window.prompt('Project name');
-    if (!name?.trim()) return;
+  const openNewProjectDialog = () => {
+    setNewProjectName('');
+    setNewProjectError('');
+    setNewProjectOpen(true);
+  };
+
+  const createProject = (event) => {
+    event?.preventDefault();
+    const name = newProjectName.trim();
+    if (!name) {
+      setNewProjectError('Project name is required.');
+      return;
+    }
 
     const project = {
       id: makeId('project'),
-      name: name.trim(),
+      name,
       status: 'active',
       image: '',
       activeSteps: [],
@@ -677,12 +1577,16 @@ function Projects({ state, updateState, mode }) {
       checklist: state.template.checklist.map((text) => ({ id: makeId('check'), text, completedAt: '' })),
       nextSteps: [],
       partIds: [],
+      partQuantities: {},
       files: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
 
     updateState((current) => ({ ...current, projects: [project, ...current.projects] }));
+    setNewProjectOpen(false);
+    setNewProjectName('');
+    setNewProjectError('');
     setSelectedId(project.id);
   };
 
@@ -691,6 +1595,15 @@ function Projects({ state, updateState, mode }) {
       ...current,
       projects: current.projects.map((project) =>
         project.id === projectId ? { ...project, ...patch, updatedAt: new Date().toISOString() } : project,
+      ),
+    }));
+  };
+
+  const updatePart = (partId, patch) => {
+    updateState((current) => ({
+      ...current,
+      parts: current.parts.map((part) =>
+        part.id === partId ? { ...part, ...patch, updatedAt: new Date().toISOString() } : part,
       ),
     }));
   };
@@ -705,6 +1618,7 @@ function Projects({ state, updateState, mode }) {
       checklist: project.checklist.map((item) => ({ ...item, id: makeId('check') })),
       files: project.files.map((file) => ({ ...file, id: makeId('file') })),
       noteImages: (project.noteImages || []).map((image) => ({ ...image, id: makeId('note-img') })),
+      partQuantities: { ...(project.partQuantities || {}) },
       createdAt: now,
       updatedAt: now,
     };
@@ -738,6 +1652,7 @@ function Projects({ state, updateState, mode }) {
         categories={state.categories}
         onBack={() => setSelectedId('')}
         onUpdate={(patch) => updateProject(selected.id, patch)}
+        onUpdatePart={updatePart}
         onDuplicate={() => duplicateProject(selected)}
         onDelete={() => deleteProject(selected.id)}
       />
@@ -747,29 +1662,38 @@ function Projects({ state, updateState, mode }) {
   return (
     <div>
       <Header
-        title={showingArchived ? 'Archived Projects' : showingCompleted ? 'Completed Projects' : 'Projects'}
-        subtitle={showingArchived ? 'Paused reference projects kept out of the active workspace.' : showingCompleted ? 'Finished builds and reference projects.' : 'Pick a project to open its overview, parts, and files.'}
+        title="Projects"
+        subtitle="Your build notebook: notes, parts, files, checklist, and the next thing to do."
       >
-        {!showingCompleted && !showingArchived && (
-          <label className="file-picker header-picker">
-            <input
-              type="file"
-              accept=".zip,.buildbook.zip"
-              onChange={(event) => {
-                importProjectPackage(event.target.files?.[0]);
-                event.target.value = '';
-              }}
-            />
-            Import Project
-          </label>
-        )}
-        {!showingCompleted && !showingArchived && <button onClick={createProject}>New Project</button>}
+        <label className="file-picker header-picker">
+          <input
+            type="file"
+            accept=".zip,.buildbook.zip"
+            onChange={(event) => {
+              importProjectPackage(event.target.files?.[0]);
+              event.target.value = '';
+            }}
+          />
+          Import Project
+        </label>
+        <button onClick={openNewProjectDialog}>New Project</button>
       </Header>
+      <div className="filters">
+        {['open', 'all', 'active', 'waiting', 'paused', 'completed', 'archived'].map((key) => (
+          <button
+            key={key}
+            className={filter === key ? '' : 'secondary'}
+            onClick={() => setFilter(key)}
+          >
+            {key === 'open' ? 'Open' : key === 'all' ? 'All' : key}
+          </button>
+        ))}
+      </div>
       {importError && <section className="panel error-text">{importError}</section>}
 
       {visibleProjects.length === 0 ? (
         <section className="panel empty-panel">
-          {showingArchived ? 'No archived projects yet.' : showingCompleted ? 'No completed projects yet.' : 'No open projects yet.'}
+          No projects found.
         </section>
       ) : (
         <div className="project-grid">
@@ -777,7 +1701,6 @@ function Projects({ state, updateState, mode }) {
             <ProjectCard
               key={project.id}
               project={project}
-              template={state.template}
               onOpen={() => setSelectedId(project.id)}
             />
           ))}
@@ -795,11 +1718,38 @@ function Projects({ state, updateState, mode }) {
           }}
         />
       )}
+      {newProjectOpen && (
+        <div className="modal-overlay">
+          <form className="modal compact-modal" onSubmit={createProject}>
+            <div className="section-title">
+              <h2>New Project</h2>
+              <button type="button" className="ghost modal-x" onClick={() => setNewProjectOpen(false)}>x</button>
+            </div>
+            <label>
+              Project name
+              <input
+                autoFocus
+                value={newProjectName}
+                onChange={(event) => {
+                  setNewProjectName(event.target.value);
+                  if (newProjectError) setNewProjectError('');
+                }}
+                placeholder="Project name"
+              />
+            </label>
+            {newProjectError && <p className="error-text">{newProjectError}</p>}
+            <div className="modal-footer">
+              <button type="button" className="secondary" onClick={() => setNewProjectOpen(false)}>Cancel</button>
+              <button type="submit">Create</button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 }
 
-function ProjectCard({ project, template, onOpen }) {
+function ProjectCard({ project, onOpen }) {
   const totalTasks = project.checklist.length;
   const doneTasks = project.checklist.filter((item) => item.completedAt).length;
   const progress = totalTasks ? Math.round((doneTasks / totalTasks) * 100) : 0;
@@ -822,16 +1772,337 @@ function ProjectCard({ project, template, onOpen }) {
           <span>{doneTasks}/{totalTasks} tasks</span>
           <span>{latestFiles.length} latest files</span>
         </div>
-        {latestFiles.slice(0, 2).map((file) => (
-          <small key={file.id}>{fileTrackerLabel(template.fileTrackers, file.trackerId)}: {file.name}</small>
-        ))}
         {totalTasks > 0 && <div className="progress-bar"><div style={{ width: `${progress}%` }} /></div>}
       </div>
     </button>
   );
 }
 
-function ProjectWorkspace({ state, project, parts, template, categories, onBack, onUpdate, onDuplicate, onDelete }) {
+function Search({ state, setTab }) {
+  const [query, setQuery] = useState('');
+  const trimmed = query.trim().toLowerCase();
+  const results = useMemo(() => {
+    if (!trimmed) return null;
+    const match = (...values) => values.some((value) => String(value || '').toLowerCase().includes(trimmed));
+    return {
+      projects: state.projects.filter((project) => match(project.name, project.status, project.notes, ...(project.nextSteps || []))),
+      parts: state.parts.filter((part) => match(part.name, categoryLabel(state.categories, part.categoryId), part.storageLocation, part.specSummary, part.notes)),
+      files: state.projects.flatMap((project) => project.files.map((file) => ({ ...file, projectName: project.name, projectId: project.id })))
+        .filter((file) => match(file.name, file.notes, fileTrackerLabel(state.template.fileTrackers, file.trackerId), file.projectName)),
+      documents: state.parts.flatMap((part) => part.documents.map((doc) => ({ ...doc, partName: part.name, partId: part.id })))
+        .filter((doc) => match(doc.name, doc.type, doc.partName)),
+      imports: state.importBatches.flatMap((batch) => (batch.items || []).map((item) => ({ ...item, batchName: batch.name || batch.fileName || batch.id })))
+        .filter((item) => match(item.raw?.name, item.name, item.batchName, item.status)),
+    };
+  }, [trimmed, state]);
+  const total = results ? Object.values(results).reduce((sum, rows) => sum + rows.length, 0) : 0;
+
+  const ResultSection = ({ title, rows, children }) => (
+    <section className="panel search-section">
+      <div className="section-title">
+        <h3>{title}</h3>
+        <span className="muted-count">{rows.length}</span>
+      </div>
+      {rows.length ? children : <p>No matches.</p>}
+    </section>
+  );
+
+  return (
+    <div>
+      <Header title="Search" subtitle="Find projects, parts, datasheets, project files, and import drafts." />
+      <div className="search-hero">
+        <input
+          autoFocus
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search by part, project, file, datasheet, storage location..."
+        />
+        {query && <button className="secondary" onClick={() => setQuery('')}>Clear</button>}
+      </div>
+      {!trimmed && <section className="panel empty-panel">Start typing to search across the app.</section>}
+      {trimmed && results && <p className="muted-count">{total} result(s) for "{query.trim()}"</p>}
+      {results && (
+        <div className="search-grid">
+          <ResultSection title="Projects" rows={results.projects}>
+            <div className="search-list">
+              {results.projects.map((project) => (
+                <button key={project.id} onClick={() => setTab('projects')}>
+                  <strong>{project.name}</strong>
+                  <span>{project.status} project</span>
+                </button>
+              ))}
+            </div>
+          </ResultSection>
+          <ResultSection title="Parts" rows={results.parts}>
+            <div className="search-list">
+              {results.parts.map((part) => (
+                <button key={part.id} onClick={() => setTab('parts')}>
+                  <strong>{part.name}</strong>
+                  <span>{categoryLabel(state.categories, part.categoryId)}{part.storageLocation ? ` - ${part.storageLocation}` : ''}</span>
+                </button>
+              ))}
+            </div>
+          </ResultSection>
+          <ResultSection title="Project Files" rows={results.files}>
+            <div className="search-list">
+              {results.files.map((file) => (
+                <button key={file.id} onClick={() => setTab('projects')}>
+                  <strong>{file.name}</strong>
+                  <span>{file.projectName} - {fileTrackerLabel(state.template.fileTrackers, file.trackerId)}{file.latest ? ' - latest' : ''}</span>
+                </button>
+              ))}
+            </div>
+          </ResultSection>
+          <ResultSection title="Part Documents" rows={results.documents}>
+            <div className="search-list">
+              {results.documents.map((doc) => (
+                <button key={doc.id} onClick={() => setTab('parts')}>
+                  <strong>{doc.name}</strong>
+                  <span>{doc.partName} - {doc.type || 'document'}</span>
+                </button>
+              ))}
+            </div>
+          </ResultSection>
+          <ResultSection title="Imports" rows={results.imports}>
+            <div className="search-list">
+              {results.imports.map((item, index) => (
+                <button key={`${item.id || item.name || item.batchName}-${index}`} onClick={() => setTab('imports')}>
+                  <strong>{item.raw?.name || item.name || 'Import item'}</strong>
+                  <span>{item.batchName}{item.status ? ` - ${item.status}` : ''}</span>
+                </button>
+              ))}
+            </div>
+          </ResultSection>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function normalizeRichText(value) {
+  const text = String(value || '');
+  if (!text.trim()) return '';
+  if (/<[a-z][\s\S]*>/i.test(text)) return text;
+  return text
+    .split(/\n{2,}/)
+    .map((block) => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
+    .join('');
+}
+
+function NoteImageMarkupModal({ source, onCancel, onSave }) {
+  const canvasRef = useRef(null);
+  const drawingRef = useRef(false);
+  const lastPointRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !source) return;
+    const image = new Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => {
+      const scale = Math.min(1, 1200 / image.naturalWidth, 800 / image.naturalHeight);
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext('2d');
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    };
+    image.src = source;
+  }, [source]);
+
+  const canvasPoint = (event) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (canvasRef.current.width / rect.width),
+      y: (event.clientY - rect.top) * (canvasRef.current.height / rect.height),
+    };
+  };
+
+  const draw = (event) => {
+    if (!drawingRef.current) return;
+    const point = canvasPoint(event);
+    const previous = lastPointRef.current || point;
+    const context = canvasRef.current.getContext('2d');
+    context.strokeStyle = '#f85149';
+    context.lineWidth = 5;
+    context.lineCap = 'round';
+    context.beginPath();
+    context.moveTo(previous.x, previous.y);
+    context.lineTo(point.x, point.y);
+    context.stroke();
+    lastPointRef.current = point;
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal markup-modal">
+        <div className="section-title">
+          <h2>Markup Image</h2>
+          <button className="ghost" onClick={onCancel}>Close</button>
+        </div>
+        <canvas
+          ref={canvasRef}
+          className="markup-canvas"
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            drawingRef.current = true;
+            lastPointRef.current = canvasPoint(event);
+          }}
+          onPointerMove={draw}
+          onPointerUp={() => {
+            drawingRef.current = false;
+            lastPointRef.current = null;
+          }}
+          onPointerCancel={() => {
+            drawingRef.current = false;
+            lastPointRef.current = null;
+          }}
+        />
+        <div className="modal-footer">
+          <button className="secondary" onClick={onCancel}>Cancel</button>
+          <button onClick={() => onSave(canvasRef.current.toDataURL('image/png'))}>Save Markup</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write notes...' }) {
+  const editorRef = useRef(null);
+  const selectionRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imageWidth, setImageWidth] = useState(100);
+  const [markupSource, setMarkupSource] = useState('');
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const normalized = normalizeRichText(value);
+    if (editor.innerHTML !== normalized) editor.innerHTML = normalized;
+  }, [value]);
+
+  const rememberSelection = () => {
+    const selection = window.getSelection();
+    if (!selection?.rangeCount) return;
+    selectionRef.current = selection.getRangeAt(0).cloneRange();
+  };
+
+  const restoreSelection = () => {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = selectionRef.current;
+    if (range) {
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+  };
+
+  const emitChange = () => {
+    onChange(editorRef.current?.innerHTML || '');
+  };
+
+  const selectImage = (image) => {
+    editorRef.current?.querySelectorAll('img.rich-image-selected').forEach((item) => item.classList.remove('rich-image-selected'));
+    image.classList.add('rich-image-selected');
+    setSelectedImage(image);
+    setImageWidth(Math.round(Number.parseFloat(image.style.width) || 100));
+  };
+
+  const updateImageWidth = (width) => {
+    if (!selectedImage) return;
+    selectedImage.style.width = `${width}%`;
+    selectedImage.style.maxWidth = '100%';
+    selectedImage.style.height = 'auto';
+    setImageWidth(width);
+    emitChange();
+  };
+
+  const exec = (command, commandValue = null) => {
+    editorRef.current?.focus();
+    restoreSelection();
+    document.execCommand(command, false, commandValue);
+    rememberSelection();
+    emitChange();
+  };
+
+  const insertImage = async (file) => {
+    if (!file) return;
+    const stored = await onUploadImage(file);
+    if (!stored?.path) return;
+    const previewUrl = URL.createObjectURL(file);
+    editorRef.current?.focus();
+    restoreSelection();
+    const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
+    document.execCommand('insertHTML', false, html);
+    rememberSelection();
+    emitChange();
+  };
+
+  return (
+    <div className="rich-editor">
+      <div className="rich-toolbar">
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('bold')}>B</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('italic')}>I</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('underline')}>U</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('insertUnorderedList')}>List</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<h2>')}>H2</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<p>')}>Text</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => fileInputRef.current?.click()}>Image</button>
+        {selectedImage && (
+          <div className="rich-image-tools">
+            <span>Image size</span>
+            <input type="range" min="20" max="100" value={imageWidth} onChange={(event) => updateImageWidth(Number(event.target.value))} />
+            <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => setMarkupSource(selectedImage.src)}>Markup</button>
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={async (event) => {
+            await insertImage(event.target.files?.[0]);
+            event.target.value = '';
+          }}
+        />
+      </div>
+      <div
+        ref={editorRef}
+        className="rich-area"
+        contentEditable
+        suppressContentEditableWarning
+        data-placeholder={placeholder}
+        onInput={emitChange}
+        onClick={(event) => {
+          if (event.target?.tagName === 'IMG') selectImage(event.target);
+        }}
+        onBlur={() => {
+          rememberSelection();
+          emitChange();
+        }}
+        onKeyUp={rememberSelection}
+        onMouseUp={rememberSelection}
+      />
+      {markupSource && (
+        <NoteImageMarkupModal
+          source={markupSource}
+          onCancel={() => setMarkupSource('')}
+          onSave={(dataUrl) => {
+            if (selectedImage) {
+              selectedImage.src = dataUrl;
+              selectedImage.removeAttribute('data-project-image-path');
+              emitChange();
+            }
+            setMarkupSource('');
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProjectWorkspace({ state, project, parts, template, categories, onBack, onUpdate, onUpdatePart, onDuplicate, onDelete }) {
   const [projectTab, setProjectTab] = useState('overview');
   const [imageBusy, setImageBusy] = useState(false);
   const [imagePreview, setImagePreview] = useState('');
@@ -858,8 +2129,8 @@ function ProjectWorkspace({ state, project, parts, template, categories, onBack,
   };
 
   const exportProject = async () => {
-    const bytes = await buildProjectPackage(state, project);
-    downloadBytes(`${safeName(project.name)}.buildbook.zip`, bytes, 'application/zip');
+    const bytes = await buildWebProjectPackage(state, project);
+    downloadBytes(`${safeName(project.name)}-export.zip`, bytes, 'application/zip');
     setExportNotice('Project exported.');
     window.clearTimeout(window.__buildBookExportNotice);
     window.__buildBookExportNotice = window.setTimeout(() => setExportNotice(''), 2600);
@@ -904,12 +2175,12 @@ function ProjectWorkspace({ state, project, parts, template, categories, onBack,
       </section>
       {exportNotice && <p className="export-notice">{exportNotice}</p>}
       <div className="tabs">
-        <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Project Overview</button>
+        <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Overview</button>
         <button className={`tab ${projectTab === 'parts' ? 'active' : ''}`} onClick={() => setProjectTab('parts')}>Parts ({linkedParts.length})</button>
         <button className={`tab ${projectTab === 'files' ? 'active' : ''}`} onClick={() => setProjectTab('files')}>Files ({project.files.length})</button>
       </div>
       {projectTab === 'overview' && <ProjectOverviewTab project={project} template={template} onUpdate={onUpdate} />}
-      {projectTab === 'parts' && <ProjectPartsTab project={project} parts={parts} categories={categories} template={template} onUpdate={onUpdate} />}
+      {projectTab === 'parts' && <ProjectPartsTab project={project} parts={parts} categories={categories} template={template} onUpdate={onUpdate} onUpdatePart={onUpdatePart} />}
       {projectTab === 'files' && <ProjectFilesTab project={project} template={template} onUpdate={onUpdate} />}
     </div>
   );
@@ -919,7 +2190,6 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
   const [newChecklist, setNewChecklist] = useState('');
   const [showCompleted, setShowCompleted] = useState(false);
   const [recentlyCompleted, setRecentlyCompleted] = useState([]);
-  const [noteImageBusy, setNoteImageBusy] = useState(false);
   const visibleChecklist = showCompleted
     ? [...project.checklist].sort((a, b) => (b.completedAt || '').localeCompare(a.completedAt || ''))
     : project.checklist.filter((item) => !item.completedAt || recentlyCompleted.includes(item.id));
@@ -952,22 +2222,7 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
 
   const addNoteImage = async (file) => {
     if (!file) return;
-    setNoteImageBusy(true);
-    try {
-      const stored = await savePickedFile(file, `project-note-images/${project.id}`);
-      onUpdate({
-        noteImages: [
-          ...(project.noteImages || []),
-          { id: makeId('note-img'), name: stored.name, path: stored.path, width: 60, markup: '', createdAt: new Date().toISOString() },
-        ],
-      });
-    } finally {
-      setNoteImageBusy(false);
-    }
-  };
-
-  const updateNoteImage = (imageId, patch) => {
-    onUpdate({ noteImages: (project.noteImages || []).map((image) => image.id === imageId ? { ...image, ...patch } : image) });
+    return savePickedFile(file, `project-note-images/${project.id}`);
   };
 
   return (
@@ -975,36 +2230,8 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
       <article className="notes-card">
         <div className="section-title">
           <h3>Project Notes</h3>
-          <label className="file-picker image-note-picker">
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(event) => {
-                addNoteImage(event.target.files?.[0]);
-                event.target.value = '';
-              }}
-            />
-            {noteImageBusy ? 'Adding...' : 'Add Image'}
-          </label>
         </div>
-        <textarea value={project.notes} onChange={(event) => onUpdate({ notes: event.target.value })} placeholder="Main project notes..." />
-        {(project.noteImages || []).length > 0 && (
-          <div className="note-image-grid">
-            {(project.noteImages || []).map((image) => (
-              <div key={image.id} className="note-image-card">
-                <StoredImage path={image.path} alt="" style={{ width: `${image.width || 60}%` }} />
-                <div className="note-image-controls">
-                  <label>
-                    Size
-                    <input type="range" min="25" max="100" value={image.width || 60} onChange={(event) => updateNoteImage(image.id, { width: Number(event.target.value) })} />
-                  </label>
-                  <input value={image.markup || ''} onChange={(event) => updateNoteImage(image.id, { markup: event.target.value })} placeholder="Markup / callout note" />
-                  <button className="ghost" onClick={() => onUpdate({ noteImages: (project.noteImages || []).filter((item) => item.id !== image.id) })}>Remove</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        <RichTextEditor value={project.notes} onChange={(notes) => onUpdate({ notes })} onUploadImage={addNoteImage} placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..." />
       </article>
       <div className="overview-side">
         <article>
@@ -1021,13 +2248,13 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
 
         <article>
           <h3>Checklist</h3>
-          <div className="inline-entry">
+          <div className="inline-entry checklist-toolbar">
             <input value={newChecklist} onChange={(event) => setNewChecklist(event.target.value)} placeholder="Add checklist item" />
             <button onClick={addChecklistItem}>Add</button>
+            <button className="secondary checklist-toggle" onClick={() => setShowCompleted((value) => !value)}>
+              {showCompleted ? 'Hide Completed' : 'Show Completed'}
+            </button>
           </div>
-          <button className="secondary narrow" onClick={() => setShowCompleted((value) => !value)}>
-            {showCompleted ? 'Hide Completed' : 'Show Completed'}
-          </button>
           {visibleChecklist.map((item) => (
             <label key={item.id} className={`check-line ${item.completedAt ? 'done' : ''}`}>
               <input type="checkbox" checked={Boolean(item.completedAt)} disabled={Boolean(item.completedAt)} onChange={() => completeChecklistItem(item.id)} />
@@ -1059,13 +2286,26 @@ const EXTERNAL_VIEWER_MESSAGES = {
   '.dwg': 'DWG preview is not available inline. Open this file in a CAD app.',
   '.step': 'STEP preview is not available inline yet. Open this file in your 3D/CAD app.',
   '.stp': 'STEP preview is not available inline yet. Open this file in your 3D/CAD app.',
-  '.xlsx': 'Excel preview is not available inline yet. Open this spreadsheet in Excel or export it as CSV for preview.',
   '.xls': 'Excel preview is not available inline yet. Open this spreadsheet in Excel or export it as CSV for preview.',
 };
 
 function fileExtension(fileName = '') {
-  const dot = fileName.lastIndexOf('.');
-  return dot >= 0 ? fileName.slice(dot).toLowerCase() : '';
+  const baseName = String(fileName || '').split(/[\\/]/).pop() || '';
+  const dot = baseName.lastIndexOf('.');
+  return dot > 0 ? baseName.slice(dot).toLowerCase() : '';
+}
+
+function withLatestVersionNote(notes = '', date = new Date()) {
+  const cleaned = String(notes || '').replace(/\n?Saved new version .+$/i, '').trimEnd();
+  const marker = `Saved new version ${date.toLocaleString()}`;
+  return cleaned ? `${cleaned}\n${marker}` : marker;
+}
+
+function integrityLabel(status) {
+  if (status === 'changed') return 'Changed';
+  if (status === 'missing') return 'Missing';
+  if (status === 'ok') return 'OK';
+  return '';
 }
 
 async function fileHash(path) {
@@ -1178,7 +2418,8 @@ function PdfPreview({ path, title, className = 'file-preview-frame' }) {
   }
 
   if (!src) return <div className="file-preview-empty">Loading PDF...</div>;
-  return <iframe className={className} title={title} src={src} />;
+  const separator = src.includes('#') ? '&' : '#';
+  return <iframe className={className} title={title} src={`${src}${separator}pagemode=bookmarks&navpanes=1`} />;
 }
 
 function TextFilePreview({ file }) {
@@ -1247,6 +2488,166 @@ function CsvPreview({ file }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+async function inflateZipEntry(data, method) {
+  if (method === 0) return data;
+  if (method !== 8) throw new Error('Unsupported XLSX compression.');
+  if (!('DecompressionStream' in window)) throw new Error('This system cannot decompress XLSX files inline.');
+
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function readZipEntries(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  for (let index = bytes.length - 22; index >= 0; index -= 1) {
+    if (view.getUint32(index, true) === 0x06054b50) {
+      eocd = index;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('Invalid XLSX file.');
+
+  const entryCount = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+  const entries = new Map();
+  const decoder = new TextDecoder();
+
+  for (let index = 0; index < entryCount; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) break;
+    const method = view.getUint16(offset + 10, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const nameLength = view.getUint16(offset + 28, true);
+    const extraLength = view.getUint16(offset + 30, true);
+    const commentLength = view.getUint16(offset + 32, true);
+    const localOffset = view.getUint32(offset + 42, true);
+    const name = decoder.decode(bytes.slice(offset + 46, offset + 46 + nameLength));
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+    entries.set(name, { method, data: compressed });
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+
+  return entries;
+}
+
+async function zipEntryText(entries, name) {
+  const entry = entries.get(name);
+  if (!entry) return '';
+  return new TextDecoder().decode(await inflateZipEntry(entry.data, entry.method));
+}
+
+function xmlDoc(text) {
+  return new DOMParser().parseFromString(text, 'application/xml');
+}
+
+function cellColumnIndex(reference = '') {
+  const letters = reference.match(/[A-Z]+/i)?.[0]?.toUpperCase() || 'A';
+  return [...letters].reduce((total, letter) => total * 26 + letter.charCodeAt(0) - 64, 0) - 1;
+}
+
+function parseSharedStrings(text) {
+  if (!text) return [];
+  return [...xmlDoc(text).getElementsByTagName('si')].map((item) =>
+    [...item.getElementsByTagName('t')].map((node) => node.textContent || '').join(''),
+  );
+}
+
+function firstWorksheetPath(workbookText, relsText) {
+  const workbook = xmlDoc(workbookText);
+  const firstSheet = workbook.getElementsByTagName('sheet')[0];
+  const relationshipId = firstSheet?.getAttribute('r:id');
+  const rel = [...xmlDoc(relsText).getElementsByTagName('Relationship')]
+    .find((item) => item.getAttribute('Id') === relationshipId);
+  const target = rel?.getAttribute('Target') || 'worksheets/sheet1.xml';
+  return `xl/${target.replace(/^\/?xl\//, '')}`;
+}
+
+function parseXlsxRows(sheetText, sharedStrings) {
+  const sheet = xmlDoc(sheetText);
+  return [...sheet.getElementsByTagName('row')].slice(0, 40).map((row) => {
+    const values = [];
+    [...row.getElementsByTagName('c')].slice(0, 80).forEach((cell) => {
+      const column = cellColumnIndex(cell.getAttribute('r') || '');
+      if (column > 11) return;
+      const type = cell.getAttribute('t');
+      const raw = cell.getElementsByTagName('v')[0]?.textContent || '';
+      const inline = cell.getElementsByTagName('t')[0]?.textContent || '';
+      values[column] = type === 's' ? sharedStrings[Number(raw)] || '' : type === 'inlineStr' ? inline : raw;
+    });
+    return Array.from({ length: Math.min(12, Math.max(1, values.length)) }, (_, index) => values[index] || '');
+  }).filter((row) => row.some((cell) => String(cell).trim()));
+}
+
+function XlsxPreview({ file }) {
+  const [rows, setRows] = useState([]);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    setRows([]);
+    setError('');
+
+    readStoredFile(file.path)
+      .then(async (bytes) => {
+        const entries = await readZipEntries(bytes);
+        const sharedStrings = parseSharedStrings(await zipEntryText(entries, 'xl/sharedStrings.xml'));
+        const sheetPath = firstWorksheetPath(
+          await zipEntryText(entries, 'xl/workbook.xml'),
+          await zipEntryText(entries, 'xl/_rels/workbook.xml.rels'),
+        );
+        return parseXlsxRows(await zipEntryText(entries, sheetPath), sharedStrings);
+      })
+      .then((nextRows) => {
+        if (active) setRows(nextRows);
+      })
+      .catch((nextError) => {
+        if (active) setError(String(nextError));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [file.path]);
+
+  if (error) return <div className="file-preview-empty">{error}</div>;
+  if (!rows.length) return <div className="file-preview-empty">Loading Excel preview...</div>;
+
+  return (
+    <div className="spreadsheet-preview">
+      <table>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={`${rowIndex}-${row.join('-')}`}>
+              {row.map((cell, cellIndex) => <td key={`${cellIndex}-${cell}`}>{cell}</td>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function FolderPreview({ file }) {
+  const files = file.folderFiles || [];
+  return (
+    <div className="folder-preview">
+      <div className="section-title">
+        <h3>{file.name}</h3>
+        <span>{files.length} files</span>
+      </div>
+      {files.length ? files.map((child) => (
+        <div key={child.id || child.relativePath || child.name} className="folder-preview-row">
+          <span>{child.relativePath || child.name}</span>
+          <button className="ghost" onClick={() => openStoredFile(child.path)}>Open</button>
+        </div>
+      )) : <p>No files found in this folder.</p>}
     </div>
   );
 }
@@ -1508,7 +2909,7 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#f7f5ef';
+  context.fillStyle = '#0d1117';
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!triangles.length) return;
 
@@ -1550,9 +2951,9 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
     context.lineTo(pts[1][0], pts[1][1]);
     context.lineTo(pts[2][0], pts[2][1]);
     context.closePath();
-    context.fillStyle = '#1d6f63';
+    context.fillStyle = '#58a6ff';
     context.fill();
-    context.strokeStyle = 'rgba(36,48,47,0.18)';
+    context.strokeStyle = 'rgba(201,209,217,0.16)';
     context.stroke();
   });
 }
@@ -1605,7 +3006,7 @@ function drawDxf(canvas, shapes) {
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#f7f5ef';
+  context.fillStyle = '#0d1117';
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!shapes.length) return;
 
@@ -1628,7 +3029,7 @@ function drawDxf(canvas, shapes) {
   const scale = Math.min((canvas.width - 56) / width, (canvas.height - 56) / height);
   const map = ([x, y]) => [28 + (x - minX) * scale, canvas.height - 28 - (y - minY) * scale];
 
-  context.strokeStyle = '#1d6f63';
+  context.strokeStyle = '#58a6ff';
   context.lineWidth = 2;
   shapes.forEach((shape) => {
     context.beginPath();
@@ -1652,6 +3053,7 @@ function drawDxf(canvas, shapes) {
 
 function FilePreview({ file }) {
   if (!file) return <div className="file-preview-empty">Choose a latest file to preview.</div>;
+  if (file.type === 'folder') return <FolderPreview file={file} />;
   if (!file.path) return <div className="file-preview-empty">This sample file does not have a local path yet.</div>;
 
   const extension = fileExtension(file.name);
@@ -1669,6 +3071,10 @@ function FilePreview({ file }) {
 
   if (extension === '.csv') {
     return <CsvPreview file={file} />;
+  }
+
+  if (extension === '.xlsx') {
+    return <XlsxPreview file={file} />;
   }
 
   if (extension === '.stl') {
@@ -1702,90 +3108,255 @@ function FilePreview({ file }) {
   );
 }
 
-function PartInfoModal({ part, categories, onClose, onUnlink }) {
-  const pdf = part.documents.find((doc) => doc.name.toLowerCase().endsWith('.pdf') && doc.path);
+function ExpandedPartFileModal({ file, onClose }) {
+  if (!file?.path) return null;
+  const extension = fileExtension(file.name);
+  const isImage = file.previewType === 'image' || IMAGE_EXTENSIONS.includes(extension);
 
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal detail-modal">
+      <div className={`modal expanded-preview-modal ${isImage ? 'image-preview-modal' : ''}`}>
         <div className="section-title">
-          <h2>{part.name}</h2>
+          <h2>{file.name}</h2>
           <button className="ghost" onClick={onClose}>Close</button>
         </div>
-        <div className="part-info-layout">
-          <div>
-            <div className="part-image detail-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
-            <p><strong>Category:</strong> {categoryLabel(categories, part.categoryId)}</p>
-            <p><strong>Storage:</strong> {part.storageLocation || 'No location set'}</p>
-            {part.productUrl && (
-              <p>
-                <strong>Product URL:</strong> {part.productUrl}
-                <button className="ghost inline-button" onClick={() => openExternalUrl(part.productUrl)}>Open</button>
-              </p>
-            )}
-            <h3>Spec Summary</h3>
-            <p>{part.specSummary || 'No spec summary yet.'}</p>
-            <h3>Notes</h3>
-            <p>{part.notes || 'No notes yet.'}</p>
-          </div>
-          <div>
-            <h3>Documents</h3>
-            {part.documents.length ? part.documents.map((doc) => (
-              <div key={doc.id} className="list-line">
-                <span>{doc.name}</span>
-                {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
-              </div>
-            )) : <p>No documents attached.</p>}
-            <div className="preview-box">
-              <h3>PDF Preview</h3>
-              {pdf ? <PdfPreview path={pdf.path} title={pdf.name} className="pdf-preview" /> : <p>No PDF attached yet.</p>}
+        {extension === '.pdf' ? (
+          <PdfPreview path={file.path} title={file.name} className="pdf-preview expanded" />
+        ) : isImage ? (
+          <StoredImage className="expanded-preview-image" path={file.path} alt="" />
+        ) : (
+          <FilePreview file={file} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ExpandablePdfPreview({ pdf, onExpand, className = 'pdf-preview compact', label = 'Click to expand' }) {
+  if (!pdf?.path) return null;
+  return (
+    <div className="pdf-preview-click-target" onClick={onExpand}>
+      <PdfPreview path={pdf.path} title={pdf.name} className={className} />
+      <div className="pdf-preview-overlay">{label}</div>
+    </div>
+  );
+}
+
+function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
+  const [expandedPreview, setExpandedPreview] = useState(null);
+  const [documentBusy, setDocumentBusy] = useState(false);
+  const [documentError, setDocumentError] = useState('');
+  const pdf = part.documents.find((doc) => doc.name.toLowerCase().endsWith('.pdf') && doc.path);
+
+  const attachDocument = async (pickedFile) => {
+    if (!pickedFile) return;
+    setDocumentBusy(true);
+    setDocumentError('');
+    try {
+      const stored = await savePickedFile(pickedFile, `part-documents/${part.id}`);
+      const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+      onUpdatePart(part.id, {
+        documents: [
+          ...part.documents,
+          {
+            id: makeId('doc'),
+            name: stored.name,
+            path: stored.path,
+            sourcePath: '',
+            storageMode: 'copy',
+            size: stored.size,
+            contentHash,
+            type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      });
+    } catch (error) {
+      setDocumentError(String(error));
+    } finally {
+      setDocumentBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal detail-modal project-part-detail-modal">
+        <div className="project-part-header">
+          <div className="project-part-summary">
+            <button
+              className="image-expand-button"
+              disabled={!part.image}
+              onClick={() => part.image && setExpandedPreview({ name: `${part.name} image`, path: part.image, previewType: 'image' })}
+            >
+              <div className="part-image detail-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+            </button>
+            <div>
+              <span>{categoryLabel(categories, part.categoryId)}</span>
+              <h2>{part.name}</h2>
+              <p>{part.storageLocation || 'No location set'}</p>
             </div>
           </div>
+          <div className="row-actions">
+            <button className="danger-fill" onClick={() => onUnlink(part.id)}>Unlink</button>
+            <button className="ghost" onClick={onClose}>Close</button>
+          </div>
+        </div>
+        <div className="project-part-content">
+          <section className="project-part-panel spec-panel">
+            <h3>Spec Summary</h3>
+            <p>{part.specSummary || 'No spec summary yet.'}</p>
+            <h3>Product URL</h3>
+            {part.productUrl ? (
+              <p>
+                {part.productUrl}
+                <button className="ghost inline-button" onClick={() => openExternalUrl(part.productUrl)}>Open</button>
+              </p>
+            ) : <p>No product URL set.</p>}
+          </section>
+          <section className="project-part-panel docs-panel">
+            <div className="section-title">
+              <h3>Part Documents</h3>
+              <label className="file-picker inline-doc-picker">
+                <input
+                  type="file"
+                  onChange={(event) => {
+                    attachDocument(event.target.files?.[0]);
+                    event.target.value = '';
+                  }}
+                />
+                {documentBusy ? 'Saving...' : 'Attach'}
+              </label>
+            </div>
+            {documentError && <p className="error-text">{documentError}</p>}
+            <div className="part-doc-list">
+              {part.documents.length ? part.documents.map((doc) => (
+                <div key={doc.id} className="part-doc-row">
+                  <span>{doc.name}</span>
+                  <small>{doc.type || 'Document'}</small>
+                  <div className="row-actions">
+                    {doc.path && (doc.name.toLowerCase().endsWith('.pdf') || IMAGE_EXTENSIONS.includes(fileExtension(doc.name))) && (
+                      <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
+                    )}
+                    {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
+                  </div>
+                </div>
+              )) : <p>No documents attached.</p>}
+            </div>
+          </section>
+          <section className="project-part-panel pdf-panel">
+            <div className="section-title">
+              <h3>PDF Preview</h3>
+              {pdf?.path && <button className="ghost" onClick={() => openStoredFile(pdf.path)}>Open</button>}
+            </div>
+            {pdf ? (
+              <ExpandablePdfPreview pdf={pdf} onExpand={() => setExpandedPreview(pdf)} />
+            ) : <p>No PDF attached yet.</p>}
+          </section>
+          <section className="project-part-panel notes-panel">
+            <h3>Notes</h3>
+            <p>{part.notes || 'No notes yet.'}</p>
+          </section>
+        </div>
+      </div>
+      {expandedPreview && <ExpandedPartFileModal file={expandedPreview} onClose={() => setExpandedPreview(null)} />}
+    </div>
+  );
+}
+
+function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
+  const [query, setQuery] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const categoryOptions = flattenCategoryOptions(categories);
+  const visibleParts = parts.filter((part) => {
+    if (categoryFilter && part.categoryId !== categoryFilter) return false;
+    if (!query.trim()) return true;
+    const text = query.trim().toLowerCase();
+    return [part.name, categoryLabel(categories, part.categoryId), part.storageLocation, part.specSummary, part.notes]
+      .some((value) => String(value || '').toLowerCase().includes(text));
+  });
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal link-part-modal">
+        <div className="section-title">
+          <h2>Link Part</h2>
+        </div>
+        <label>
+          Search parts
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Board, MCU, regulator..." />
+        </label>
+        <label>
+          Category
+          <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
+            <option value="">All categories</option>
+            {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
+              <option key={category.id} value={category.id}>{category.label}</option>
+            ))}
+          </select>
+        </label>
+        <div className="link-part-list">
+          {visibleParts.map((part) => {
+            const linked = linkedIds.includes(part.id);
+            return (
+              <div key={part.id} className="link-part-row">
+                <div className="link-part-thumb">
+                  {part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}
+                </div>
+                <div className="link-part-copy">
+                  <strong>{part.name}</strong>
+                  <span>{categoryLabel(categories, part.categoryId)} - {part.storageLocation || 'No location'}</span>
+                </div>
+                {linked ? <span className="link-part-status">Linked</span> : <button className="ghost" onClick={() => onLink(part.id)}>Link</button>}
+              </div>
+            );
+          })}
+          {!visibleParts.length && <p>No parts found.</p>}
         </div>
         <div className="modal-footer">
-          <button className="secondary" onClick={() => onUnlink(part.id)}>Unlink Part</button>
-          <button onClick={onClose}>Done</button>
+          <button className="secondary" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
   );
 }
 
-function ProjectPartsTab({ project, parts, categories, template, onUpdate }) {
+function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart }) {
   const [selectedPart, setSelectedPart] = useState(null);
-  const [selectedFileId, setSelectedFileId] = useState('');
-  const [partToLink, setPartToLink] = useState('');
+  const [linkingPart, setLinkingPart] = useState(false);
   const linkedParts = project.partIds.map((id) => parts.find((part) => part.id === id)).filter(Boolean);
-  const availableParts = parts.filter((part) => !project.partIds.includes(part.id));
-  const latestFiles = project.files.filter((file) => file.latest);
-  const selectedFile = latestFiles.find((file) => file.id === selectedFileId) || latestFiles[0];
-  const selectedFileTracker = selectedFile ? template.fileTrackers.find((tracker) => tracker.id === selectedFile.trackerId) : null;
 
   useEffect(() => {
-    if (!latestFiles.length) setSelectedFileId('');
-    else if (!selectedFileId || !latestFiles.some((file) => file.id === selectedFileId)) setSelectedFileId(latestFiles[0].id);
-  }, [latestFiles, selectedFileId]);
+    if (!selectedPart) return;
+    const refreshed = parts.find((part) => part.id === selectedPart.id);
+    if (refreshed && refreshed !== selectedPart) setSelectedPart(refreshed);
+  }, [parts, selectedPart]);
 
-  const linkPart = () => {
-    if (!partToLink) return;
-    onUpdate({ partIds: [...project.partIds, partToLink] });
-    setPartToLink('');
+  const linkPart = (partId) => {
+    if (!partId || project.partIds.includes(partId)) return;
+    onUpdate({
+      partIds: [...project.partIds, partId],
+      partQuantities: { ...(project.partQuantities || {}), [partId]: project.partQuantities?.[partId] || 1 },
+    });
+    setLinkingPart(false);
   };
 
   const unlinkPart = (partId) => {
-    onUpdate({ partIds: project.partIds.filter((id) => id !== partId) });
+    const nextQuantities = { ...(project.partQuantities || {}) };
+    delete nextQuantities[partId];
+    onUpdate({ partIds: project.partIds.filter((id) => id !== partId), partQuantities: nextQuantities });
     setSelectedPart((part) => part?.id === partId ? null : part);
+  };
+
+  const updatePartQuantity = (partId, quantity) => {
+    const safeQuantity = Math.max(0, Number(quantity) || 0);
+    onUpdate({ partQuantities: { ...(project.partQuantities || {}), [partId]: safeQuantity } });
   };
 
   return (
     <div className="parts-workspace">
       <div>
         <div className="section-toolbar">
-          <select value={partToLink} onChange={(event) => setPartToLink(event.target.value)}>
-            <option value="">Choose a part to link...</option>
-            {availableParts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
-          </select>
-          <button onClick={linkPart} disabled={!partToLink}>Link Part</button>
+          <button onClick={() => setLinkingPart(true)}>Link Part</button>
         </div>
         {linkedParts.length === 0 ? <section className="panel empty-panel">No parts linked yet.</section> : (
           <div className="linked-part-grid">
@@ -1800,30 +3371,27 @@ function ProjectPartsTab({ project, parts, categories, template, onUpdate }) {
           </div>
         )}
       </div>
-      <section className="panel file-viewer-card">
+      <section className="panel build-parts-card">
         <div className="section-title">
-          <h2>Latest File Viewer</h2>
-          {selectedFile?.path && <button className="ghost" onClick={() => openStoredFile(selectedFile.path)}>Open</button>}
-          {selectedFile?.path && selectedFileTracker?.programPath && <button className="ghost" onClick={() => openWithProgram(selectedFileTracker.programPath, selectedFile.path)}>Launch</button>}
+          <h2>Build Parts</h2>
         </div>
-        {latestFiles.length ? (
-          <>
-            <select value={selectedFile?.id || ''} onChange={(event) => setSelectedFileId(event.target.value)}>
-              {latestFiles.map((file) => (
-                <option key={file.id} value={file.id}>
-                  {fileTrackerLabel(template.fileTrackers, file.trackerId)} - {file.name}
-                </option>
-              ))}
-            </select>
-            {selectedFile && (
-              <div className="file-viewer-meta">
-                <strong>{fileTrackerLabel(template.fileTrackers, selectedFile.trackerId)}</strong>
-                <span>{selectedFile.name}</span>
+        {linkedParts.length ? (
+          <div className="project-part-qty-list">
+            {linkedParts.map((part) => (
+              <div key={part.id} className="project-part-qty-row">
+                <span className="project-part-qty-name">{part.name}</span>
+                <div className="qty-stepper">
+                  <input
+                    type="number"
+                    min="0"
+                    value={project.partQuantities?.[part.id] ?? 1}
+                    onChange={(event) => updatePartQuantity(part.id, event.target.value)}
+                  />
+                </div>
               </div>
-            )}
-            <FilePreview file={selectedFile} />
-          </>
-        ) : <p>No files are marked latest yet.</p>}
+            ))}
+          </div>
+        ) : <p>Link parts to set project-specific quantities.</p>}
       </section>
       {selectedPart && (
         <PartInfoModal
@@ -1831,6 +3399,16 @@ function ProjectPartsTab({ project, parts, categories, template, onUpdate }) {
           categories={categories}
           onClose={() => setSelectedPart(null)}
           onUnlink={unlinkPart}
+          onUpdatePart={onUpdatePart}
+        />
+      )}
+      {linkingPart && (
+        <LinkPartModal
+          parts={parts}
+          linkedIds={project.partIds}
+          categories={categories}
+          onLink={linkPart}
+          onClose={() => setLinkingPart(false)}
         />
       )}
     </div>
@@ -1840,10 +3418,14 @@ function ProjectPartsTab({ project, parts, categories, template, onUpdate }) {
 function ProjectFilesTab({ project, template, onUpdate }) {
   const [filePath, setFilePath] = useState('');
   const [fileTrackerId, setFileTrackerId] = useState(template.fileTrackers[0]?.id || '');
+  const [fileUploadNotes, setFileUploadNotes] = useState('');
   const [fileStorageMode, setFileStorageMode] = useState('copy');
   const [fileError, setFileError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
   const [editSessions, setEditSessions] = useState({});
+  const [selectedFileId, setSelectedFileId] = useState('');
+  const [viewerScope, setViewerScope] = useState('latest');
+  const [expandedFileGroups, setExpandedFileGroups] = useState({});
 
   const attachProjectFile = async (pickedFile = null) => {
     const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
@@ -1877,12 +3459,76 @@ function ProjectFilesTab({ project, template, onUpdate }) {
             size: stored.size,
             contentHash,
             latest: true,
-            notes: '',
+            notes: fileUploadNotes.trim(),
             createdAt: new Date().toISOString(),
           },
         ],
       });
       if (!pickedFile) setFilePath('');
+      setFileUploadNotes('');
+    } catch (error) {
+      setFileError(String(error));
+    } finally {
+      setFileBusy(false);
+    }
+  };
+
+  const attachProjectFolder = async (pickedFiles = []) => {
+    const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
+    const allPickedFiles = [...pickedFiles];
+    const hasExtensionFilter = Boolean((tracker?.extensions || '').split(',').map((item) => item.trim()).filter(Boolean).length);
+    const files = hasExtensionFilter ? allPickedFiles.filter((file) => extensionAllowed(file.name, tracker?.extensions || '')) : allPickedFiles;
+    if (!tracker || !files.length) {
+      setFileError(tracker?.extensions ? `No files in that folder match: ${tracker.extensions}` : 'No files found in that folder.');
+      return;
+    }
+
+    setFileBusy(true);
+    setFileError('');
+    try {
+      const now = new Date().toISOString();
+      const firstPath = files[0]?.webkitRelativePath || files[0]?.name || 'Folder upload';
+      const folderName = firstPath.split('/').filter(Boolean)[0] || 'Folder upload';
+      const storedFiles = await Promise.all(files.map(async (file) => {
+        const relativePath = file.webkitRelativePath || file.name;
+        const relativeParts = relativePath.split('/').filter(Boolean);
+        const childRelativePath = relativeParts.length > 1 ? relativeParts.slice(1).join('/') : file.name;
+        const folderParts = childRelativePath.split('/').slice(0, -1);
+        const library = ['project-files', project.id, tracker.id, folderName, ...folderParts].join('/');
+        const stored = await savePickedFile(file, library);
+        const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+        return {
+          id: makeId('folder-file'),
+          name: relativeParts.length > 1 ? relativePath : stored.name,
+          relativePath: childRelativePath,
+          path: stored.path,
+          size: stored.size,
+          contentHash,
+        };
+      }));
+      const folderRecord = {
+        id: makeId('file'),
+        trackerId: tracker.id,
+        type: 'folder',
+        name: folderName,
+        path: '',
+        sourcePath: '',
+        storageMode: 'copy',
+        size: storedFiles.reduce((total, file) => total + (file.size || 0), 0),
+        contentHash: '',
+        latest: true,
+        notes: fileUploadNotes.trim(),
+        folderFiles: storedFiles,
+        createdAt: now,
+      };
+      onUpdate({
+        files: [
+          ...project.files.map((file) => file.trackerId === tracker.id ? { ...file, latest: false } : file),
+          folderRecord,
+        ],
+      });
+      setFileUploadNotes('');
+      if (hasExtensionFilter && files.length !== allPickedFiles.length) setFileError(`Uploaded folder "${folderName}" with ${files.length} matching files. Some files did not match this file type.`);
     } catch (error) {
       setFileError(String(error));
     } finally {
@@ -1906,8 +3552,64 @@ function ProjectFilesTab({ project, template, onUpdate }) {
 
   const removeFile = (fileId) => onUpdate({ files: project.files.filter((file) => file.id !== fileId) });
   const updateFile = (fileId, patch) => onUpdate({ files: project.files.map((file) => file.id === fileId ? { ...file, ...patch } : file) });
+  const checkAttachmentIntegrity = async (file) => {
+    try {
+      if (file.type === 'folder') {
+        const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
+          try {
+            const currentHash = await fileHash(child.path);
+            return {
+              ...child,
+              contentHash: child.contentHash || currentHash,
+              integrityStatus: child.contentHash && currentHash !== child.contentHash ? 'changed' : 'ok',
+              integrityCheckedAt: new Date().toISOString(),
+            };
+          } catch {
+            return { ...child, integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() };
+          }
+        }));
+        const statuses = checkedChildren.map((child) => child.integrityStatus);
+        updateFile(file.id, {
+          folderFiles: checkedChildren,
+          integrityStatus: statuses.includes('missing') ? 'missing' : statuses.includes('changed') ? 'changed' : 'ok',
+          integrityCheckedAt: new Date().toISOString(),
+        });
+        return;
+      }
+
+      const currentHash = await fileHash(file.path);
+      updateFile(file.id, {
+        contentHash: file.contentHash || currentHash,
+        integrityStatus: file.contentHash && currentHash !== file.contentHash ? 'changed' : 'ok',
+        integrityCheckedAt: new Date().toISOString(),
+      });
+    } catch {
+      updateFile(file.id, { integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() });
+    }
+  };
+  const downloadProjectFile = async (file) => {
+    if (!file.path && file.type !== 'folder') return;
+    try {
+      if (file.type === 'folder') {
+        const entries = await Promise.all((file.folderFiles || []).map(async (child) => ({
+          name: child.relativePath || child.name,
+          data: await readStoredFile(child.path),
+        })));
+        downloadBytes(`${safeName(file.name)}.zip`, createZip(entries), 'application/zip');
+        return;
+      }
+      const bytes = await readStoredFile(file.path);
+      downloadBytes(file.name, bytes, 'application/octet-stream');
+    } catch (error) {
+      setFileError(String(error));
+    }
+  };
   const fileLibrary = (file) => `project-files/${project.id}/${file.trackerId}`;
   const beginEdit = async (file) => {
+    if (file.type === 'folder') {
+      setSelectedFileId(file.id);
+      return;
+    }
     if (!file.path) return;
     setFileBusy(true);
     setFileError('');
@@ -1945,31 +3647,73 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       }
 
       const bytes = await readStoredFile(providedSession.path);
-      const stored = await saveBytesFile(file.name, fileLibrary(file), bytes);
       const now = new Date().toISOString();
+      if (providedSession.versionFileId && providedSession.versionPath) {
+        const stored = await overwriteBytesFile(providedSession.versionPath, bytes, file.name);
+        onUpdate({
+          files: project.files.map((item) =>
+            item.id === providedSession.versionFileId
+              ? {
+                ...item,
+                path: stored.path,
+                size: stored.size,
+                contentHash: currentHash,
+                latest: true,
+                notes: withLatestVersionNote(item.notes || file.notes, new Date(now)),
+                createdAt: now,
+              }
+              : item.trackerId === file.trackerId
+                ? { ...item, latest: false }
+                : item,
+          ),
+        });
+        setEditSessions((current) => ({
+          ...current,
+          [file.id]: {
+            ...providedSession,
+            baseHash: currentHash,
+            versionPath: stored.path,
+          },
+        }));
+        if (!options.quiet) setFileError(`Updated ${file.name} in the current edit session.`);
+        return true;
+      }
+
+      const stored = await saveBytesFile(file.name, fileLibrary(file), bytes);
+      const newFileId = makeId('file');
+      const newFile = {
+        ...file,
+        id: newFileId,
+        path: stored.path,
+        sourcePath: providedSession.sourcePath || file.sourcePath || '',
+        storageMode: 'copy',
+        size: stored.size,
+        contentHash: currentHash,
+        latest: true,
+        notes: withLatestVersionNote(file.notes, new Date(now)),
+        createdAt: now,
+      };
       const resetFiles = project.files.map((item) => item.trackerId === file.trackerId ? { ...item, latest: false } : item);
       onUpdate({
         files: [
           ...resetFiles,
-          {
-            ...file,
-            id: makeId('file'),
-            path: stored.path,
-            sourcePath: providedSession.sourcePath || file.sourcePath || '',
-            storageMode: 'copy',
-            size: stored.size,
-            contentHash: currentHash,
-            latest: true,
-            notes: file.notes ? `${file.notes}\nSaved new version ${new Date(now).toLocaleString()}` : `Saved new version ${new Date(now).toLocaleString()}`,
-            createdAt: now,
-          },
+          newFile,
         ],
       });
       setEditSessions((current) => {
         const next = { ...current };
         delete next[file.id];
+        next[newFileId] = {
+          ...providedSession,
+          baseHash: currentHash,
+          name: file.name,
+          trackerId: file.trackerId,
+          versionFileId: newFileId,
+          versionPath: stored.path,
+        };
         return next;
       });
+      setSelectedFileId(newFileId);
       if (!options.quiet) setFileError(`Saved ${file.name} as a new latest version.`);
       return true;
     } catch (error) {
@@ -2000,71 +3744,175 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     tracker,
     files: sortFiles(project.files.filter((file) => file.trackerId === tracker.id)),
   })).filter((group) => group.files.length);
+  const latestFiles = sortFiles(project.files.filter((file) => file.latest));
+  const allFiles = grouped.flatMap((group) => group.files);
+  const viewerFiles = viewerScope === 'latest' ? latestFiles : allFiles;
+  const selectedFile = viewerFiles.find((file) => file.id === selectedFileId) || viewerFiles[0] || null;
+  const selectedFileTracker = selectedFile ? template.fileTrackers.find((tracker) => tracker.id === selectedFile.trackerId) : null;
+  const selectedExtension = fileExtension(selectedFile?.name || '');
+  const fullViewerExtensions = new Set(['.pdf', '.stl', '.obj', '.dxf', ...TEXT_EXTENSIONS]);
+  const viewerMode = selectedFile && (selectedFile.type === 'folder' || fullViewerExtensions.has(selectedExtension)) ? 'full' : 'compact';
+
+  useEffect(() => {
+    if (!selectedFile) {
+      setSelectedFileId('');
+      return;
+    }
+    if (!selectedFileId || !viewerFiles.some((file) => file.id === selectedFileId)) setSelectedFileId(selectedFile.id);
+  }, [project.files, selectedFile, selectedFileId, viewerFiles]);
 
   return (
-    <div>
-      <section className="panel upload-card">
-        <select value={fileTrackerId} onChange={(event) => setFileTrackerId(event.target.value)}>
-          {template.fileTrackers.map((tracker) => (
-            <option key={tracker.id} value={tracker.id}>
-              {tracker.name}{tracker.extensions ? ` (${tracker.extensions})` : ''}
-            </option>
-          ))}
-        </select>
-        {fileStorageMode === 'copy' ? (
-          <label className="file-picker compact-picker">
-            <input
-              type="file"
-              accept={acceptFromExtensions(template.fileTrackers.find((tracker) => tracker.id === fileTrackerId)?.extensions || '')}
-              onChange={(event) => {
-                const pickedFile = event.target.files?.[0];
-                if (pickedFile) attachProjectFile(pickedFile);
-                event.target.value = '';
-              }}
-            />
-            {fileBusy ? 'Saving...' : 'Choose File'}
-          </label>
-        ) : (
-          <>
-            <input value={filePath} onChange={(event) => setFilePath(event.target.value)} placeholder="Paste original file path to link" />
-            <button onClick={() => attachProjectFile()} disabled={fileBusy}>{fileBusy ? 'Saving' : 'Attach'}</button>
-          </>
-        )}
-        <div className="storage-options">
-          <label>
-            <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'copy'} onChange={() => setFileStorageMode('copy')} />
-            Copy into BuildBook library
-          </label>
-          <label>
-            <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'link'} onChange={() => setFileStorageMode('link')} />
-            Link original path
-          </label>
-        </div>
-        {fileError && <p className="error-text">{fileError}</p>}
-      </section>
-
-      {grouped.length === 0 ? <section className="panel empty-panel">No files attached yet.</section> : grouped.map(({ tracker, files }) => (
-        <section key={tracker.id} className="panel file-group">
-          <h3>{tracker.name}</h3>
-          <div className="file-table">
-            {files.map((file) => (
-              <div key={file.id} className="file-row">
-                <span>{file.latest ? 'Latest' : 'Older'}</span>
-                <span>{file.storageMode === 'link' ? 'Linked' : 'Copied'}</span>
-                <strong>{file.name}</strong>
-                <span>{file.createdAt ? new Date(file.createdAt).toLocaleDateString() : ''}</span>
-                {file.path && <button className="ghost" onClick={() => openStoredFile(file.path)}>Open</button>}
-                {file.path && <button className="ghost" onClick={() => beginEdit(file)} disabled={fileBusy}>Edit</button>}
-                {editSessions[file.id] && <button className="ghost" onClick={() => checkFileChanges(file)}>Check Changes</button>}
-                {file.path && tracker.programPath && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
-                <button className="ghost" onClick={() => toggleLatest(file.id)}>{file.latest ? 'Unset Latest' : 'Mark Latest'}</button>
-                <button className="ghost" onClick={() => removeFile(file.id)}>Delete</button>
-                <input value={file.notes || ''} onChange={(event) => updateFile(file.id, { notes: event.target.value })} placeholder="File notes" />
-              </div>
-            ))}
+    <div className="files-workspace">
+      <div className="file-list-pane">
+        <section className="panel upload-card">
+          <div className="upload-type-row">
+            <select value={fileTrackerId} onChange={(event) => setFileTrackerId(event.target.value)}>
+              {template.fileTrackers.map((tracker) => (
+                <option key={tracker.id} value={tracker.id}>
+                  {tracker.name}{tracker.extensions ? ` (${tracker.extensions})` : ''}
+                </option>
+              ))}
+            </select>
+            <input value={fileUploadNotes} onChange={(event) => setFileUploadNotes(event.target.value)} placeholder="Upload notes" />
           </div>
+          {fileStorageMode === 'copy' ? (
+            <div className="upload-buttons">
+              <label className="file-picker compact-picker">
+                <input
+                  type="file"
+                  accept={acceptFromExtensions(template.fileTrackers.find((tracker) => tracker.id === fileTrackerId)?.extensions || '')}
+                  onChange={(event) => {
+                    const pickedFile = event.target.files?.[0];
+                    if (pickedFile) attachProjectFile(pickedFile);
+                    event.target.value = '';
+                  }}
+                />
+                {fileBusy ? 'Saving...' : 'Choose File'}
+              </label>
+              <label className="file-picker compact-picker">
+                <input
+                  type="file"
+                  multiple
+                  webkitdirectory=""
+                  directory=""
+                  onChange={(event) => {
+                    attachProjectFolder(event.target.files || []);
+                    event.target.value = '';
+                  }}
+                />
+                {fileBusy ? 'Saving...' : 'Choose Folder'}
+              </label>
+            </div>
+          ) : (
+            <>
+              <input value={filePath} onChange={(event) => setFilePath(event.target.value)} placeholder="Paste original file path to link" />
+              <button onClick={() => attachProjectFile()} disabled={fileBusy}>{fileBusy ? 'Saving' : 'Attach'}</button>
+            </>
+          )}
+          <div className="storage-options">
+            <label>
+              <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'copy'} onChange={() => setFileStorageMode('copy')} />
+              Copy into BuildBook library
+            </label>
+            <label>
+              <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'link'} onChange={() => setFileStorageMode('link')} />
+              Link original path
+            </label>
+          </div>
+          {fileError && <p className="error-text">{fileError}</p>}
         </section>
-      ))}
+
+        {grouped.length === 0 ? <section className="panel empty-panel">No files attached yet.</section> : grouped.map(({ tracker, files }) => {
+          const expanded = !!expandedFileGroups[tracker.id];
+          const latestInGroup = files.filter((file) => file.latest);
+          const visibleFiles = expanded ? files : (latestInGroup.length ? latestInGroup : files.slice(0, 1));
+          const olderCount = Math.max(0, files.length - visibleFiles.length);
+          const hasHiddenFiles = files.length > (latestInGroup.length ? latestInGroup.length : 1);
+          return (
+          <section key={tracker.id} className="panel file-group">
+            <div className="file-group-header">
+              <div className="file-group-title-row">
+                <h3>{tracker.name}</h3>
+                {!expanded && olderCount > 0 && <span>{olderCount} older</span>}
+              </div>
+              <div className="file-group-actions">
+                {hasHiddenFiles && (
+                  <button
+                    className="ghost"
+                    onClick={() => setExpandedFileGroups((current) => ({ ...current, [tracker.id]: !current[tracker.id] }))}
+                  >
+                    {expanded ? 'Collapse' : 'Show all'}
+                  </button>
+                )}
+                {files.some((file) => editSessions[file.id]) && (
+                  <button
+                    className="ghost"
+                    onClick={() => files.forEach((file) => {
+                      if (editSessions[file.id]) checkFileChanges(file);
+                    })}
+                  >
+                    Check for changes
+                  </button>
+                )}
+              </div>
+            </div>
+            <div className="file-table">
+              {visibleFiles.map((file) => (
+                <div key={file.id} className="file-row">
+                  <div className="file-row-left">
+                    {(file.path || file.type === 'folder') && <button className="file-link-button" onClick={() => { setSelectedFileId(file.id); beginEdit(file); }} disabled={fileBusy}>Open</button>}
+                    {(file.path || file.type === 'folder') && <button className="file-download-button" onClick={() => downloadProjectFile(file)}>Download</button>}
+                    <strong>{file.type === 'folder' ? `${file.name}, ${(file.folderFiles || []).length} files` : file.name}</strong>
+                    <div className="file-note-field">
+                      <span>Note:</span>
+                      <p>{file.notes || ''}</p>
+                    </div>
+                  </div>
+                  <div className="file-row-right">
+                    {file.integrityStatus && <span className={`integrity-pill ${file.integrityStatus}`}>{integrityLabel(file.integrityStatus)}</span>}
+                    <span className="file-date">{file.createdAt ? new Date(file.createdAt).toLocaleDateString() : ''}</span>
+                    <button className={file.latest ? 'latest-pill' : 'mark-latest-button'} onClick={() => { toggleLatest(file.id); setSelectedFileId(file.id); }}>{file.latest ? 'Latest' : 'Mark Latest'}</button>
+                    <button className="file-delete-button" onClick={() => removeFile(file.id)} aria-label={`Delete ${file.name}`}>x</button>
+                  </div>
+                  {(file.path || file.type === 'folder' || editSessions[file.id] || tracker.programPath) && (
+                    <div className="file-extra-actions">
+                      {(file.path || file.type === 'folder') && <button className="ghost" onClick={() => checkAttachmentIntegrity(file)}>Check integrity</button>}
+                      {file.path && tracker.programPath && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+          );
+        })}
+      </div>
+      <section className={`panel file-viewer-card ${viewerMode === 'compact' ? 'compact-viewer' : 'full-viewer'}`}>
+        <div className="section-title">
+          <h2>File Viewer</h2>
+          <div className="viewer-scope-toggle">
+            <button className={viewerScope === 'latest' ? 'active' : ''} onClick={() => setViewerScope('latest')}>Latest Files</button>
+            <button className={viewerScope === 'all' ? 'active' : ''} onClick={() => setViewerScope('all')}>All Files</button>
+          </div>
+          {selectedFile?.path && selectedFileTracker?.programPath && <button className="ghost" onClick={() => openWithProgram(selectedFileTracker.programPath, selectedFile.path)}>Launch</button>}
+        </div>
+        {selectedFile ? (
+          <>
+            <select value={selectedFile.id} onChange={(event) => setSelectedFileId(event.target.value)}>
+              {viewerFiles.map((file) => (
+                <option key={file.id} value={file.id}>
+                  {fileTrackerLabel(template.fileTrackers, file.trackerId)} - {file.name}
+                </option>
+              ))}
+            </select>
+            <div className="file-viewer-meta">
+              <strong>{fileTrackerLabel(template.fileTrackers, selectedFile.trackerId)}</strong>
+              <span>{selectedFile.name}</span>
+            </div>
+            <FilePreview file={selectedFile} />
+          </>
+        ) : <p>No files available to preview yet.</p>}
+      </section>
     </div>
   );
 }
@@ -2097,8 +3945,15 @@ function categoryTreeCount(node, parts, categories) {
   return parts.filter((part) => ids.has(part.categoryId)).length;
 }
 
+function orderedCategoryDrafts(categories) {
+  return flattenCategoryOptions(categories).map((category, index) => {
+    const { depth, label, fullLabel, ...cleanCategory } = category;
+    return { ...cleanCategory, sortOrder: index };
+  });
+}
+
 function CategoryTreeNode({ node, parts, categories, activeId, onSelect, depth = 0 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(depth < 1);
   const hasChildren = node.children.length > 0;
 
   return (
@@ -2130,7 +3985,11 @@ function CategoryManager({ categories, onUpdate, onClose }) {
   const [drafts, setDrafts] = useState(categories);
   const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
   const [dragId, setDragId] = useState('');
-  const orderedDrafts = flattenCategoryOptions(drafts);
+  const [dragOverId, setDragOverId] = useState('');
+  const [mergeSource, setMergeSource] = useState('');
+  const [mergeTarget, setMergeTarget] = useState('');
+  const [remaps, setRemaps] = useState({});
+  const orderedDrafts = flattenCategoryOptions(drafts.filter((category) => category.id !== 'cat-unassigned'));
 
   const updateCategory = (categoryId, patch) => {
     setDrafts((current) => current.map((category) => category.id === categoryId ? { ...category, ...patch } : category));
@@ -2156,7 +4015,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
   };
 
   const save = () => {
-    onUpdate(drafts);
+    onUpdate(drafts, remaps);
     onClose();
   };
 
@@ -2168,29 +4027,99 @@ function CategoryManager({ categories, onUpdate, onClose }) {
     if (!file) return;
     const imported = JSON.parse(await file.text());
     if (!Array.isArray(imported)) return;
-    setDrafts(imported.map((category, index) => ({ id: category.id || makeId('cat'), name: category.name || 'Category', parentId: category.parentId || null, sortOrder: category.sortOrder ?? index })));
+    setDrafts(orderedCategoryDrafts(imported.map((category, index) => ({ id: category.id || makeId('cat'), name: category.name || 'Category', parentId: category.parentId || null, sortOrder: category.sortOrder ?? index }))));
   };
 
-  const dropCategory = (targetId) => {
-    if (!dragId || dragId === targetId) return;
+  const reorderCategory = (activeDragId, targetId) => {
+    setDragOverId('');
+    if (!activeDragId || activeDragId === targetId) return;
     setDrafts((current) => {
-      const dragged = current.find((category) => category.id === dragId);
+      const dragged = current.find((category) => category.id === activeDragId);
       const target = current.find((category) => category.id === targetId);
       if (!dragged || !target) return current;
-      return current.map((category) => {
-        if (category.id === dragged.id) return { ...category, parentId: target.parentId || null, sortOrder: target.sortOrder ?? 0 };
-        if (category.id === target.id) return { ...category, sortOrder: dragged.sortOrder ?? 0 };
-        return category;
-      });
+      if (descendantCategoryIds(current, dragged.id).includes(target.id)) return current;
+
+      const nextParentId = target.parentId || null;
+      const moved = current.map((category) => (
+        category.id === dragged.id ? { ...category, parentId: nextParentId } : category
+      ));
+      const siblings = moved
+        .filter((category) => (category.parentId || null) === nextParentId)
+        .sort((a, b) => ((a.sortOrder ?? 0) - (b.sortOrder ?? 0)) || a.name.localeCompare(b.name));
+      const fromIndex = siblings.findIndex((category) => category.id === dragged.id);
+      const targetIndex = siblings.findIndex((category) => category.id === target.id);
+      if (fromIndex < 0 || targetIndex < 0) return current;
+      const [item] = siblings.splice(fromIndex, 1);
+      siblings.splice(targetIndex, 0, item);
+      const siblingOrder = new Map(siblings.map((category, index) => [category.id, index]));
+
+      return orderedCategoryDrafts(moved.map((category) => (
+        siblingOrder.has(category.id) ? { ...category, sortOrder: siblingOrder.get(category.id) } : category
+      )));
     });
     setDragId('');
   };
+
+  const categoryAtPoint = (clientX, clientY) => (
+    document.elementFromPoint(clientX, clientY)?.closest('[data-category-id]')?.dataset.categoryId || ''
+  );
+
+  const startCategoryDrag = (event, categoryId) => {
+    event.preventDefault();
+    const handle = event.currentTarget;
+    setDragId(categoryId);
+    handle.setPointerCapture?.(event.pointerId);
+
+    const moveCategory = (moveEvent) => {
+      const targetId = categoryAtPoint(moveEvent.clientX, moveEvent.clientY);
+      setDragOverId(targetId && targetId !== categoryId ? targetId : '');
+    };
+    const finishCategoryDrag = (upEvent) => {
+      const targetId = categoryAtPoint(upEvent.clientX, upEvent.clientY);
+      handle.releasePointerCapture?.(event.pointerId);
+      handle.removeEventListener('pointermove', moveCategory);
+      handle.removeEventListener('pointerup', finishCategoryDrag);
+      handle.removeEventListener('pointercancel', cancelCategoryDrag);
+      reorderCategory(categoryId, targetId);
+    };
+    const cancelCategoryDrag = () => {
+      handle.releasePointerCapture?.(event.pointerId);
+      handle.removeEventListener('pointermove', moveCategory);
+      handle.removeEventListener('pointerup', finishCategoryDrag);
+      handle.removeEventListener('pointercancel', cancelCategoryDrag);
+      setDragId('');
+      setDragOverId('');
+    };
+
+    handle.addEventListener('pointermove', moveCategory);
+    handle.addEventListener('pointerup', finishCategoryDrag);
+    handle.addEventListener('pointercancel', cancelCategoryDrag);
+  };
+
+  const mergeCategory = () => {
+    if (!mergeSource || !mergeTarget || mergeSource === mergeTarget) return;
+    const blocked = new Set([mergeSource, ...descendantCategoryIds(drafts, mergeSource)]);
+    if (blocked.has(mergeTarget)) return;
+
+    setDrafts((current) => current
+      .filter((category) => category.id !== mergeSource)
+      .map((category) => category.parentId === mergeSource ? { ...category, parentId: mergeTarget } : category));
+    setRemaps((current) => ({ ...current, [mergeSource]: mergeTarget }));
+    setMergeSource('');
+    setMergeTarget('');
+  };
+
+  const levelLabel = (depth) => (depth === 0 ? 'Root' : `Sub ${depth}`);
 
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal category-manager-modal">
         <div className="section-title">
           <h2>Edit Categories</h2>
+          <button className="ghost modal-x" onClick={onClose}>x</button>
+        </div>
+        <div className="category-template-actions">
+          <button className="ghost" onClick={exportTemplate}>Export Template</button>
           <label className="file-picker header-picker">
             <input
               type="file"
@@ -2200,18 +4129,35 @@ function CategoryManager({ categories, onUpdate, onClose }) {
                 event.target.value = '';
               }}
             />
-            Import
+            Import Template
           </label>
-          <button className="ghost" onClick={exportTemplate}>Export</button>
-          <button className="ghost" onClick={onClose}>Close</button>
         </div>
         <section className="category-create-box">
           <input value={newCategory.name} onChange={(event) => setNewCategory((current) => ({ ...current, name: event.target.value }))} placeholder="New category name" />
           <select value={newCategory.parentId} onChange={(event) => setNewCategory((current) => ({ ...current, parentId: event.target.value }))}>
             <option value="">Root category</option>
-            {orderedDrafts.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+            {orderedDrafts.map((category) => <option key={category.id} value={category.id}>{category.fullLabel}</option>)}
           </select>
-          <button onClick={addCategory}>Add</button>
+          <button onClick={addCategory}>Add Category</button>
+        </section>
+        <section className="category-merge-box">
+          <div>
+            <h3>Merge Categories</h3>
+            <p>Move parts out of one category and delete it. Child categories move under the destination.</p>
+          </div>
+          <select value={mergeSource} onChange={(event) => setMergeSource(event.target.value)}>
+            <option value="">Category to merge...</option>
+            {orderedDrafts.filter((category) => category.id !== 'cat-unassigned').map((category) => (
+              <option key={category.id} value={category.id}>{category.fullLabel}</option>
+            ))}
+          </select>
+          <select value={mergeTarget} onChange={(event) => setMergeTarget(event.target.value)}>
+            <option value="">Destination...</option>
+            {orderedDrafts.filter((category) => category.id !== mergeSource).map((category) => (
+              <option key={category.id} value={category.id}>{category.fullLabel}</option>
+            ))}
+          </select>
+          <button className="secondary" onClick={mergeCategory}>Merge</button>
         </section>
         <div className="category-manager-list">
           {orderedDrafts.map((category) => {
@@ -2219,19 +4165,26 @@ function CategoryManager({ categories, onUpdate, onClose }) {
             return (
               <div
                 key={category.id}
-                className={`category-edit-row depth-${Math.min(category.depth, 4)}`}
-                draggable={category.id !== 'cat-unassigned'}
-                onDragStart={() => setDragId(category.id)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => dropCategory(category.id)}
+                data-category-id={category.id}
+                className={`category-edit-row depth-${Math.min(category.depth, 4)} ${dragId === category.id ? 'dragging' : ''} ${dragOverId === category.id ? 'drag-over' : ''}`}
+                style={{ marginLeft: `${category.depth * 28}px` }}
               >
+                <span
+                  className="category-drag-handle"
+                  onPointerDown={(event) => startCategoryDrag(event, category.id)}
+                  title="Drag to reorder"
+                >
+                  ::
+                </span>
+                <span className={`category-depth-pill depth-${Math.min(category.depth, 4)}`}>{levelLabel(category.depth)}</span>
                 <input value={category.name} onChange={(event) => updateCategory(category.id, { name: event.target.value })} />
                 <select value={category.parentId || ''} onChange={(event) => updateCategory(category.id, { parentId: event.target.value || null })}>
                   <option value="">Root category</option>
                   {orderedDrafts.filter((option) => !blocked.has(option.id)).map((option) => (
-                    <option key={option.id} value={option.id}>{option.label}</option>
+                    <option key={option.id} value={option.id}>{option.fullLabel}</option>
                   ))}
                 </select>
+                <button className="ghost" onClick={() => updateCategory(category.id, { sortOrder: category.sortOrder ?? 0 })}>Save</button>
                 <button className="ghost" disabled={category.id === 'cat-unassigned'} onClick={() => deleteCategory(category.id)}>Delete</button>
               </div>
             );
@@ -2252,6 +4205,7 @@ function Parts({ state, updateState }) {
   const [categoryFilter, setCategoryFilter] = useState('');
   const [showUnassigned, setShowUnassigned] = useState(false);
   const [editingCategories, setEditingCategories] = useState(false);
+  const [creatingPart, setCreatingPart] = useState(false);
   const selected = state.parts.find((part) => part.id === selectedId) || null;
 
   const visible = useMemo(() => {
@@ -2270,25 +4224,50 @@ function Parts({ state, updateState }) {
   }, [query, state.parts, state.categories, categoryFilter, showUnassigned]);
 
   const categoryOptions = useMemo(() => flattenCategoryOptions(state.categories), [state.categories]);
+  const categoryTree = useMemo(() => buildCategoryTree(state.categories.filter((category) => category.id !== 'cat-unassigned')), [state.categories]);
+  const unassignedCount = state.parts.filter((part) => part.categoryId === 'cat-unassigned').length;
 
-  const createPart = () => {
-    const name = window.prompt('Part name');
-    if (!name?.trim()) return;
+  const createPart = async (draft) => {
+    if (!draft.name.trim()) return;
+    const now = new Date().toISOString();
+    const partId = makeId('part');
+    const image = draft.imageFile ? await savePickedFile(draft.imageFile, `part-images/${partId}`) : null;
+    const document = draft.documentFile ? await savePickedFile(draft.documentFile, `part-documents/${partId}`) : null;
+    const documentHash = document?.path ? await fileHash(document.path).catch(() => '') : '';
     const part = {
-      id: makeId('part'),
-      name: name.trim(),
-      categoryId: 'cat-unassigned',
-      image: '',
-      productUrl: '',
-      storageLocation: '',
-      specSummary: '',
-      notes: '',
-      documents: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      id: partId,
+      name: draft.name.trim(),
+      categoryId: draft.categoryId || 'cat-unassigned',
+      image: image?.path || '',
+      productUrl: draft.productUrl.trim(),
+      storageLocation: draft.storageLocation.trim(),
+      specSummary: draft.specSummary.trim(),
+      notes: draft.notes.trim(),
+      documents: document ? [{
+        id: makeId('doc'),
+        name: document.name,
+        path: document.path,
+        sourcePath: '',
+        storageMode: 'copy',
+        size: document.size,
+        contentHash: documentHash,
+        type: document.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+        createdAt: now,
+      }] : [],
+      createdAt: now,
+      updatedAt: now,
     };
-    updateState((current) => ({ ...current, parts: [part, ...current.parts] }));
-    setSelectedId(part.id);
+    updateState((current) => ({
+      ...current,
+      parts: [part, ...current.parts],
+      projects: current.projects.map((project) => (
+        project.id === draft.projectId && !project.partIds.includes(partId)
+          ? { ...project, partIds: [...project.partIds, partId], partQuantities: { ...(project.partQuantities || {}), [partId]: 1 }, updatedAt: now }
+          : project
+      )),
+    }));
+    setSelectedId(partId);
+    setCreatingPart(false);
   };
 
   const updatePart = (partId, patch) => {
@@ -2323,13 +4302,62 @@ function Parts({ state, updateState }) {
     setSelectedId('');
   };
 
+  const linkPartToProject = (projectId, partId) => {
+    if (!projectId || !partId) return;
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => (
+        project.id === projectId && !project.partIds.includes(partId)
+          ? {
+            ...project,
+            partIds: [...project.partIds, partId],
+            partQuantities: { ...(project.partQuantities || {}), [partId]: 1 },
+            updatedAt: new Date().toISOString(),
+          }
+          : project
+      )),
+    }));
+  };
+
+  const unlinkPartFromProject = (projectId, partId) => {
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => {
+        if (project.id !== projectId) return project;
+        const partQuantities = { ...(project.partQuantities || {}) };
+        delete partQuantities[partId];
+        return {
+          ...project,
+          partIds: project.partIds.filter((id) => id !== partId),
+          partQuantities,
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
+  };
+
+  const updateProjectPartQuantity = (projectId, partId, quantity) => {
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => (
+        project.id === projectId
+          ? {
+            ...project,
+            partQuantities: { ...(project.partQuantities || {}), [partId]: Math.max(0, Number(quantity) || 0) },
+            updatedAt: new Date().toISOString(),
+          }
+          : project
+      )),
+    }));
+  };
+
   return (
-    <div>
+    <div className="parts-library-page">
       <Header title="Parts Library" subtitle="Reference parts, storage locations, specs, datasheets, and product links.">
         <button className="secondary" onClick={() => setEditingCategories(true)}>Edit Categories</button>
-        <button onClick={createPart}>New Part</button>
+        <button onClick={() => setCreatingPart(true)}>New Part</button>
       </Header>
-      <div className="filters">
+      <div className="parts-library-toolbar">
         <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search parts, notes, specs..." />
         <select value={showUnassigned ? 'cat-unassigned' : categoryFilter} onChange={(event) => {
           const value = event.target.value;
@@ -2347,36 +4375,74 @@ function Parts({ state, updateState }) {
             <option key={category.id} value={category.id}>{category.label}</option>
           ))}
         </select>
-        {(query || categoryFilter || showUnassigned) && (
-          <button className="secondary" onClick={() => { setQuery(''); setCategoryFilter(''); setShowUnassigned(false); }}>Clear</button>
-        )}
       </div>
-      {visible.length === 0 ? <div className="panel empty-panel">No parts found.</div> : (
-        <div className="item-grid">
-          {visible.map((part) => (
-            <button key={part.id} className="part-card" onClick={() => setSelectedId(part.id)}>
-              <div className="part-card-image">{part.image ? <StoredImage path={part.image} alt="" /> : <div>Part</div>}</div>
-              <div className="part-card-body">
-                <span>{categoryLabel(state.categories, part.categoryId)}</span>
-                <strong>{part.name}</strong>
-                <p>{part.storageLocation || 'No location set'}</p>
-                <div className="mini-meta">
-                  <span>{part.documents.length} docs</span>
-                  {part.productUrl && <span>Product link</span>}
-                </div>
-              </div>
-            </button>
-          ))}
+      <div className="library-layout">
+        <aside className="library-sidebar">
+          <h3>Categories</h3>
+          <button
+            className={`category-row ${!categoryFilter && !showUnassigned ? 'active' : ''}`}
+            onClick={() => { setCategoryFilter(''); setShowUnassigned(false); }}
+          >
+            All parts <span>{state.parts.length}</span>
+          </button>
+          <button
+            className={`category-row ${showUnassigned ? 'active' : ''}`}
+            onClick={() => { setCategoryFilter(''); setShowUnassigned(true); }}
+          >
+            Unassigned <span>{unassignedCount}</span>
+          </button>
+          <div className="category-tree">
+            {categoryTree.map((node) => (
+              <CategoryTreeNode
+                key={node.id}
+                node={node}
+                parts={state.parts}
+                categories={state.categories}
+                activeId={categoryFilter}
+                onSelect={(id) => { setCategoryFilter(id); setShowUnassigned(false); }}
+              />
+            ))}
+          </div>
+        </aside>
+        <div>
+          {(query || categoryFilter || showUnassigned) && (
+            <div className="toolbar">
+              <button className="secondary" onClick={() => { setQuery(''); setCategoryFilter(''); setShowUnassigned(false); }}>Clear filters</button>
+              <span className="muted-count">{visible.length} shown</span>
+            </div>
+          )}
+          {visible.length === 0 ? <div className="panel empty-panel">No parts found.</div> : (
+            <div className="item-grid">
+              {visible.map((part) => (
+                <button key={part.id} className="part-card" onClick={() => setSelectedId(part.id)}>
+                  <div className="part-card-image">{part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}</div>
+                  <div className="part-card-body">
+                    <span>{categoryLabel(state.categories, part.categoryId)}</span>
+                    <strong>{part.name}</strong>
+                    <p>{part.storageLocation || 'No location set'}</p>
+                    <div className="mini-meta">
+                      <span>{part.documents.length} docs</span>
+                      {part.productUrl && <span>Product link</span>}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
-      )}
+      </div>
       {selected && (
         <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && setSelectedId('')}>
           <div className="modal part-library-modal">
             <PartEditor
               part={selected}
               categories={state.categories}
+              projects={state.projects}
               onClose={() => setSelectedId('')}
               onUpdate={(patch) => updatePart(selected.id, patch)}
+              onLinkProject={linkPartToProject}
+              onUnlinkProject={unlinkPartFromProject}
+              onProjectQuantityChange={updateProjectPartQuantity}
               onDuplicate={() => duplicatePart(selected)}
               onDelete={() => deletePart(selected.id)}
               onCreateCategory={(name, parentId) => {
@@ -2388,14 +4454,25 @@ function Parts({ state, updateState }) {
           </div>
         </div>
       )}
+      {creatingPart && (
+        <NewPartDialog
+          categories={state.categories}
+          projects={state.projects.filter((project) => project.status === 'active')}
+          onCreate={createPart}
+          onClose={() => setCreatingPart(false)}
+        />
+      )}
       {editingCategories && (
         <CategoryManager
           categories={state.categories}
           onClose={() => setEditingCategories(false)}
-          onUpdate={(categories) => updateState((current) => ({
+          onUpdate={(categories, remaps = {}) => updateState((current) => ({
             ...current,
             categories,
-            parts: current.parts.map((part) => categories.some((category) => category.id === part.categoryId) ? part : { ...part, categoryId: 'cat-unassigned' }),
+            parts: current.parts.map((part) => {
+              const categoryId = remaps[part.categoryId] || part.categoryId;
+              return categories.some((category) => category.id === categoryId) ? { ...part, categoryId } : { ...part, categoryId: 'cat-unassigned' };
+            }),
           }))}
         />
       )}
@@ -2403,15 +4480,95 @@ function Parts({ state, updateState }) {
   );
 }
 
-function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate, onDelete, onClose }) {
+function NewPartDialog({ categories, projects, onCreate, onClose }) {
+  const [draft, setDraft] = useState({
+    name: '',
+    categoryId: 'cat-unassigned',
+    productUrl: '',
+    storageLocation: '',
+    imageFile: null,
+    documentFile: null,
+    projectId: '',
+    specSummary: '',
+    notes: '',
+  });
+  const [categoryTouched, setCategoryTouched] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const categoryOptions = useMemo(() => flattenCategoryOptions(categories), [categories]);
+
+  const updateName = (name) => {
+    setDraft((current) => ({
+      ...current,
+      name,
+      categoryId: categoryTouched ? current.categoryId : suggestCategoryId(name, categories),
+    }));
+  };
+
+  const save = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      await onCreate(draft);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal new-part-modal">
+        <h2>New Part</h2>
+        <div className="new-part-grid">
+          <label>Name<input autoFocus value={draft.name} onChange={(event) => updateName(event.target.value)} /></label>
+          <label>Category
+            <select value={draft.categoryId} onChange={(event) => {
+              setCategoryTouched(true);
+              setDraft((current) => ({ ...current, categoryId: event.target.value }));
+            }}>
+              <option value="cat-unassigned">Uncategorized</option>
+              {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
+                <option key={category.id} value={category.id}>{category.fullLabel}</option>
+              ))}
+            </select>
+          </label>
+          <label>Product URL<input value={draft.productUrl} onChange={(event) => setDraft((current) => ({ ...current, productUrl: event.target.value }))} placeholder="https://..." /></label>
+          <label>Storage location<input value={draft.storageLocation} onChange={(event) => setDraft((current) => ({ ...current, storageLocation: event.target.value }))} placeholder="Bin, drawer, shelf..." /></label>
+          <label className="wide">Image<input type="file" accept="image/*" onChange={(event) => setDraft((current) => ({ ...current, imageFile: event.target.files?.[0] || null }))} /></label>
+          <label>Document<input type="file" onChange={(event) => setDraft((current) => ({ ...current, documentFile: event.target.files?.[0] || null }))} /></label>
+          <label>Add to project
+            <select value={draft.projectId} onChange={(event) => setDraft((current) => ({ ...current, projectId: event.target.value }))}>
+              <option value="">Do not link yet</option>
+              {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          </label>
+          <label className="wide">Spec summary<textarea value={draft.specSummary} onChange={(event) => setDraft((current) => ({ ...current, specSummary: event.target.value }))} /></label>
+          <label className="wide">Notes<textarea value={draft.notes} onChange={(event) => setDraft((current) => ({ ...current, notes: event.target.value }))} /></label>
+        </div>
+        {error && <p className="error-text">{error}</p>}
+        <div className="modal-footer">
+          <button className="secondary" onClick={onClose} disabled={busy}>Cancel</button>
+          <button onClick={save} disabled={busy || !draft.name.trim()}>{busy ? 'Saving...' : 'Save'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnlinkProject, onProjectQuantityChange, onCreateCategory, onDuplicate, onDelete, onClose }) {
   const [documentPath, setDocumentPath] = useState('');
   const [documentStorageMode, setDocumentStorageMode] = useState('copy');
   const [documentError, setDocumentError] = useState('');
   const [documentBusy, setDocumentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
-  const [pdfExpanded, setPdfExpanded] = useState(false);
+  const [projectToLink, setProjectToLink] = useState('');
+  const [expandedPreview, setExpandedPreview] = useState(null);
   const pdf = part.documents.find((doc) => doc.name.toLowerCase().endsWith('.pdf'));
+  const linkedProjects = (projects || []).filter((project) => project.partIds.includes(part.id));
+  const linkableProjects = (projects || []).filter((project) => !project.partIds.includes(part.id));
 
   const attachDocument = async (pickedFile = null) => {
     const trimmedPath = documentPath.trim();
@@ -2422,6 +4579,7 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
       const stored = pickedFile
         ? await savePickedFile(pickedFile, `part-documents/${part.id}`)
         : linkedLocalFile(trimmedPath);
+      const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
       onUpdate({
         documents: [
           ...part.documents,
@@ -2432,6 +4590,7 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
             sourcePath: pickedFile ? '' : trimmedPath,
             storageMode: pickedFile ? 'copy' : documentStorageMode,
             size: stored.size,
+            contentHash,
             type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
             createdAt: new Date().toISOString(),
           },
@@ -2442,6 +4601,30 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
       setDocumentError(String(error));
     } finally {
       setDocumentBusy(false);
+    }
+  };
+
+  const checkDocumentIntegrity = async (doc) => {
+    if (!doc.path) return;
+    try {
+      const currentHash = await fileHash(doc.path);
+      const status = doc.contentHash && currentHash !== doc.contentHash ? 'changed' : 'ok';
+      onUpdate({
+        documents: part.documents.map((item) => item.id === doc.id ? {
+          ...item,
+          contentHash: item.contentHash || currentHash,
+          integrityStatus: status,
+          integrityCheckedAt: new Date().toISOString(),
+        } : item),
+      });
+    } catch {
+      onUpdate({
+        documents: part.documents.map((item) => item.id === doc.id ? {
+          ...item,
+          integrityStatus: 'missing',
+          integrityCheckedAt: new Date().toISOString(),
+        } : item),
+      });
     }
   };
 
@@ -2468,7 +4651,13 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
       <div className="part-editor-layout">
         <div className="part-editor-main">
           <div className="part-editor-image">
-            <div className="part-image detail-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+            <button
+              className="image-expand-button"
+              disabled={!part.image}
+              onClick={() => part.image && setExpandedPreview({ name: `${part.name} image`, path: part.image, previewType: 'image' })}
+            >
+              <div className="part-image detail-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+            </button>
             <label className="file-picker wide-picker">
               <input
                 type="file"
@@ -2515,6 +4704,42 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
           </label>
           <label>Spec Summary<textarea value={part.specSummary} onChange={(event) => onUpdate({ specSummary: event.target.value })} /></label>
           <label>Notes<textarea value={part.notes} onChange={(event) => onUpdate({ notes: event.target.value })} /></label>
+          <section className="part-project-usage">
+            <div className="section-title">
+              <h3>Project Usage</h3>
+            </div>
+            {linkedProjects.length ? linkedProjects.map((project) => (
+              <div key={project.id} className="usage-row">
+                <span>{project.name}</span>
+                <label>
+                  Qty
+                  <input
+                    type="number"
+                    min="0"
+                    value={project.partQuantities?.[part.id] ?? 1}
+                    onChange={(event) => onProjectQuantityChange(project.id, part.id, event.target.value)}
+                  />
+                </label>
+                <button className="ghost" onClick={() => onUnlinkProject(project.id, part.id)}>Unlink</button>
+              </div>
+            )) : <p>No projects use this part yet.</p>}
+            <div className="usage-link-row">
+              <select value={projectToLink} onChange={(event) => setProjectToLink(event.target.value)}>
+                <option value="">Link to project...</option>
+                {linkableProjects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+              <button
+                className="ghost"
+                disabled={!projectToLink}
+                onClick={() => {
+                  onLinkProject(projectToLink, part.id);
+                  setProjectToLink('');
+                }}
+              >
+                Link
+              </button>
+            </div>
+          </section>
         </div>
         <div className="part-editor-side">
           <div className="preview-box">
@@ -2526,10 +4751,7 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
                   <button className="ghost" onClick={() => openStoredFile(pdf.path)}>Open PDF</button>
                 </div>
                 {pdf.path && (
-                  <button className="pdf-preview-toggle" onClick={() => setPdfExpanded(true)}>
-                    <PdfPreview path={pdf.path} title={pdf.name} className="pdf-preview compact" />
-                    <span>Click preview to expand</span>
-                  </button>
+                  <ExpandablePdfPreview pdf={pdf} onExpand={() => setExpandedPreview(pdf)} label="Click preview to expand" />
                 )}
               </>
             ) : <p>No PDF attached yet.</p>}
@@ -2565,6 +4787,11 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
               <div key={doc.id} className="list-line">
                 <span>{doc.name} - {doc.storageMode === 'link' ? 'Linked' : 'Copied'}</span>
                 <div className="row-actions">
+                  {doc.integrityStatus && <span className={`integrity-pill ${doc.integrityStatus}`}>{integrityLabel(doc.integrityStatus)}</span>}
+                  {doc.path && <button className="ghost" onClick={() => checkDocumentIntegrity(doc)}>Check</button>}
+                  {doc.path && (doc.name.toLowerCase().endsWith('.pdf') || IMAGE_EXTENSIONS.includes(fileExtension(doc.name))) && (
+                    <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
+                  )}
                   {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
                   <button className="ghost" onClick={() => onUpdate({ documents: part.documents.filter((item) => item.id !== doc.id) })}>Delete</button>
                 </div>
@@ -2573,17 +4800,7 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
           </div>
         </div>
       </div>
-      {pdfExpanded && pdf?.path && (
-        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && setPdfExpanded(false)}>
-          <div className="modal pdf-reader-modal">
-            <div className="section-title">
-              <h2>{pdf.name}</h2>
-              <button className="ghost" onClick={() => setPdfExpanded(false)}>Close</button>
-            </div>
-            <PdfPreview path={pdf.path} title={pdf.name} className="pdf-preview expanded" />
-          </div>
-        </div>
-      )}
+      {expandedPreview && <ExpandedPartFileModal file={expandedPreview} onClose={() => setExpandedPreview(null)} />}
     </section>
   );
 }
@@ -2591,6 +4808,8 @@ function PartEditor({ part, categories, onUpdate, onCreateCategory, onDuplicate,
 function Imports({ state, updateState }) {
   const [importError, setImportError] = useState('');
   const [imageBusy, setImageBusy] = useState('');
+  const [selectedBatchId, setSelectedBatchId] = useState('');
+  const selectedBatch = state.importBatches.find((batch) => batch.id === selectedBatchId) || null;
 
   const createBatch = async (file) => {
     if (!file) return;
@@ -2609,6 +4828,7 @@ function Imports({ state, updateState }) {
         items,
       };
       updateState((current) => ({ ...current, importBatches: [batch, ...current.importBatches] }));
+      setSelectedBatchId('');
     } catch (error) {
       setImportError(String(error));
     }
@@ -2691,7 +4911,13 @@ function Imports({ state, updateState }) {
 
   return (
     <div>
-      <Header title="Imports" subtitle="Supplier invoices and CSV drafts become reviewed reference parts, never stock counts.">
+      <Header title="Imports" subtitle="Turn online order exports into draft parts for the library." />
+      {importError && <section className="alert alert-error">{importError}</section>}
+      <section className="panel upload-card">
+        <div>
+          <h3>Import CSV or PDF</h3>
+          <p>Upload supplier exports, invoices, or order files to create draft parts. Quantity columns are ignored.</p>
+        </div>
         <label className="file-picker header-picker">
           <input
             type="file"
@@ -2703,20 +4929,34 @@ function Imports({ state, updateState }) {
           />
           Import File
         </label>
-      </Header>
-      {importError && <section className="panel error-text">{importError}</section>}
-      {state.importBatches.length === 0 ? <section className="panel empty-panel">No import batches yet.</section> : state.importBatches.map((batch) => (
-        <section key={batch.id} className="panel import-batch">
+      </section>
+      <div className="imports-layout">
+        <aside className="library-sidebar">
+          <h3>Batches</h3>
+          {state.importBatches.length === 0 ? <p>No imports yet.</p> : state.importBatches.map((batch) => (
+            <button
+              key={batch.id}
+              className={`import-row ${selectedBatch?.id === batch.id ? 'active' : ''}`}
+              onClick={() => setSelectedBatchId((current) => current === batch.id ? '' : batch.id)}
+            >
+              <strong>{batch.name}</strong>
+              <span>{new Date(batch.createdAt).toLocaleDateString()}</span>
+              <small>{batch.items.filter((item) => item.status === 'draft').length} draft / {batch.items.length} total</small>
+            </button>
+          ))}
+        </aside>
+        {!selectedBatch ? <section className="panel empty-panel">Select an import batch.</section> : (
+        <section className="panel import-batch">
           <div className="section-title">
-            <h2>{batch.name}</h2>
-            <span>{batch.source} - {new Date(batch.createdAt).toLocaleDateString()}</span>
+            <h2>{selectedBatch.name}</h2>
+            <span>{selectedBatch.source} - {new Date(selectedBatch.createdAt).toLocaleDateString()}</span>
           </div>
           <div className="import-review-list">
-            {sortedItems(batch.items).map((item) => (
+            {sortedItems(selectedBatch.items).map((item) => (
               <div key={item.id} className={`import-part-row match-${item.matchQuality}`}>
                 <label>
                   Category
-                  <select value={item.categoryId || 'cat-unassigned'} onChange={(event) => updateItem(batch.id, item.id, { categoryId: event.target.value })}>
+                  <select value={item.categoryId || 'cat-unassigned'} onChange={(event) => updateItem(selectedBatch.id, item.id, { categoryId: event.target.value })}>
                     {categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
                   </select>
                 </label>
@@ -2726,183 +4966,225 @@ function Imports({ state, updateState }) {
                       {item.imagePath ? <StoredImage path={item.imagePath} alt="" /> : <img src={item.imageUrl} alt="" />}
                     </div>
                   )}
-                  <input value={item.name} onChange={(event) => updateItem(batch.id, item.id, { name: event.target.value })} disabled={item.status !== 'draft'} />
+                  <input value={item.name} onChange={(event) => updateItem(selectedBatch.id, item.id, { name: event.target.value })} disabled={item.status !== 'draft'} />
                   <span>{item.matchQuality === 'none' ? 'No suggestion' : item.matchQuality === 'exact' ? 'Exact match' : 'Recommended match'}</span>
                   {item.productUrl && <small>{item.productUrl}</small>}
                   {item.imageUrl && <small>{item.imagePath ? 'Image saved locally' : item.imageUrl}</small>}
                 </div>
                 <div className="import-action-grid">
-                  <select value={item.action} disabled={item.status !== 'draft'} onChange={(event) => updateItem(batch.id, item.id, { action: event.target.value })}>
+                  <select value={item.action} disabled={item.status !== 'draft'} onChange={(event) => updateItem(selectedBatch.id, item.id, { action: event.target.value })}>
                     <option value="create">Create new part</option>
                     <option value="merge">Merge into existing</option>
                     <option value="skip">Skip</option>
                   </select>
                   {item.action === 'merge' && (
-                    <select value={item.matchId || ''} disabled={item.status !== 'draft'} onChange={(event) => updateItem(batch.id, item.id, { matchId: event.target.value })}>
+                    <select value={item.matchId || ''} disabled={item.status !== 'draft'} onChange={(event) => updateItem(selectedBatch.id, item.id, { matchId: event.target.value })}>
                       <option value="">Choose part...</option>
                       {state.parts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
                     </select>
                   )}
                   {item.status === 'draft' ? (
                     <>
-                      {item.imageUrl && !item.imagePath && <button className="ghost" disabled={imageBusy === item.id} onClick={() => fetchItemImage(batch.id, item)}>{imageBusy === item.id ? 'Fetching...' : 'Fetch Image'}</button>}
-                      <button onClick={() => completeItem(batch.id, item, item.action)}>Apply</button>
-                      <button className="ghost" onClick={() => completeItem(batch.id, item, 'skip')}>Skip</button>
+                      {item.imageUrl && !item.imagePath && <button className="ghost" disabled={imageBusy === item.id} onClick={() => fetchItemImage(selectedBatch.id, item)}>{imageBusy === item.id ? 'Fetching...' : 'Fetch Image'}</button>}
+                      <button onClick={() => completeItem(selectedBatch.id, item, item.action)}>Apply</button>
+                      <button className="ghost" onClick={() => completeItem(selectedBatch.id, item, 'skip')}>Skip</button>
                     </>
                   ) : <span className="status-badge">{item.status}</span>}
                 </div>
               </div>
             ))}
           </div>
-      </section>
-      ))}
+        </section>
+        )}
+      </div>
     </div>
   );
 }
 
 function Settings({ state, updateState }) {
-  const [newStep, setNewStep] = useState('');
-  const [newChecklist, setNewChecklist] = useState('');
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
   const [restoreError, setRestoreError] = useState('');
+  const [backupNotice, setBackupNotice] = useState('');
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [lanNotice, setLanNotice] = useState('');
+  const [lanError, setLanError] = useState('');
+  const [lanBusy, setLanBusy] = useState(false);
+  const [lanQr, setLanQr] = useState('');
+  const [lanAccessUrl, setLanAccessUrl] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
   };
 
-  const addTracker = () => {
-    updateTemplate({
-      fileTrackers: [
-        ...state.template.fileTrackers,
-        { id: makeId('tracker'), name: 'New Tracker', extensions: '', viewer: 'file', programPath: '' },
-      ],
+  const updateLanServer = (patch) => {
+    updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), ...patch } }));
+  };
+
+  const regenerateLanToken = () => {
+    const token = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    updateLanServer({ token });
+  };
+
+  const toggleLanServer = () => {
+    if (state.lanServer?.enabled) {
+      updateLanServer({ enabled: false });
+      return;
+    }
+    updateLanServer({
+      enabled: true,
+      token: state.lanServer?.token || (crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`),
     });
   };
 
-  const exportBackup = () => {
-    downloadBytes(`buildbook-backup-v${APP_VERSION}.json`, new TextEncoder().encode(JSON.stringify(state, null, 2)), 'application/json');
+  useEffect(() => {
+    let active = true;
+    const syncLanServer = async () => {
+      setLanBusy(true);
+      setLanError('');
+      try {
+        if (state.lanServer?.enabled) {
+          const token = state.lanServer.token;
+          const info = await startLanServer(state.lanServer.port || 8787, token);
+          const accessUrl = info.url ? `${info.url}?access=${encodeURIComponent(token)}` : '';
+          const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
+          if (active) {
+            setLanNotice(info.url ? `LAN server running at ${info.url}` : 'LAN server running.');
+            setLanAccessUrl(accessUrl);
+            setLanQr(qr);
+          }
+        } else {
+          const status = await lanServerStatus();
+          if (status.running) await stopLanServer();
+          if (active) {
+            setLanNotice('');
+            setLanAccessUrl('');
+            setLanQr('');
+          }
+        }
+      } catch (error) {
+        if (active) setLanError(String(error));
+      } finally {
+        if (active) setLanBusy(false);
+      }
+    };
+    syncLanServer();
+    return () => { active = false; };
+  }, [state.lanServer?.enabled, state.lanServer?.port, state.lanServer?.token]);
+
+  const exportBackup = async () => {
+    setBackupBusy(true);
+    setRestoreError('');
+    setBackupNotice('');
+    try {
+      const bytes = await buildWebFullBackupPackage(state);
+      downloadBytes(`buildbook-full-backup-v${APP_VERSION}.zip`, bytes, 'application/zip');
+      setBackupNotice('Full backup exported successfully.');
+    } catch (error) {
+      setRestoreError(String(error));
+    } finally {
+      setBackupBusy(false);
+    }
   };
 
   const restoreBackup = async (file) => {
     if (!file) return;
+    if (!window.confirm('Restore will replace all current BuildBook data with this backup, including projects, parts, files, images, documents, imports, and settings. Continue?')) return;
+    setBackupBusy(true);
     setRestoreError('');
+    setBackupNotice('');
     try {
-      const restored = normalizeState(JSON.parse(await file.text()));
+      const restored = file.name.toLowerCase().endsWith('.zip')
+        ? await readFullBackupPackage(file)
+        : normalizeState(JSON.parse(await file.text()));
       updateState(() => restored);
+      setBackupNotice('Backup restored successfully.');
     } catch (error) {
       setRestoreError(String(error));
+    } finally {
+      setBackupBusy(false);
     }
   };
 
   return (
     <div>
-      <Header title="Settings" subtitle="Project template, tracked file types, backup, and launch handlers.">
-        <button className="secondary" onClick={() => setShowTemplatePreview(true)}>Project Template</button>
-      </Header>
-      <div className="settings-grid">
-        <section className="panel wide readme-panel">
-          <h2>BuildBook v{APP_VERSION}</h2>
-          <p>Use Projects for build notes, linked parts, latest files, and exportable project packages. Use Parts Library as a searchable reference shelf for datasheets, product links, and storage locations.</p>
-          <div className="header-actions">
-            <button className="secondary" onClick={exportBackup}>Export Backup</button>
-            <label className="file-picker header-picker">
-              <input
-                type="file"
-                accept=".json"
-                onChange={(event) => {
-                  restoreBackup(event.target.files?.[0]);
-                  event.target.value = '';
-                }}
-              />
-              Restore Backup
-            </label>
-          </div>
-          {restoreError && <p className="error-text">{restoreError}</p>}
-        </section>
-
-        <section className="panel">
-          <h2>Project Step Buttons</h2>
-          <div className="inline-entry">
-            <input value={newStep} onChange={(event) => setNewStep(event.target.value)} placeholder="New step button" />
-            <button onClick={() => {
-              if (!newStep.trim()) return;
-              updateTemplate({ steps: [...state.template.steps, newStep.trim()] });
-              setNewStep('');
-            }}>Add</button>
-          </div>
-          {state.template.steps.map((step) => (
-            <div key={step} className="list-line">
-              <span>{step}</span>
-              <button className="ghost" onClick={() => updateTemplate({ steps: state.template.steps.filter((item) => item !== step) })}>Delete</button>
+      <Header title="Settings" subtitle="Defaults and safeguards for documenting electronics projects." />
+      <section className="panel settings-section">
+        <h2>Project Template</h2>
+        <p>Set the default project step tags, starter checklist items, and tracked file types used for project workspaces.</p>
+        <button onClick={() => setShowTemplatePreview(true)}>Project Template</button>
+      </section>
+      <section className="panel settings-section">
+        <h2>Backup and Restore</h2>
+        <p>Backup downloads a portable zip containing app records, files, photos, documents, imports, and settings.</p>
+        <div className="button-row backup-actions">
+          <button className="secondary" onClick={exportBackup} disabled={backupBusy}>{backupBusy ? 'Working...' : 'Export Backup'}</button>
+          <label className={`file-picker header-picker backup-button ${backupBusy ? 'disabled-picker' : ''}`}>
+            <input
+              type="file"
+              accept=".zip,.json"
+              disabled={backupBusy}
+              onChange={(event) => {
+                restoreBackup(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+            />
+            Restore Backup
+          </label>
+        </div>
+        {backupNotice && <p className="success-text">{backupNotice}</p>}
+        {restoreError && <p className="error-text">{restoreError}</p>}
+      </section>
+      <section className="panel settings-section">
+        <h2>Local Network Access</h2>
+        <p>Serve BuildBook to devices on this local network. Leave this off unless you are actively using it.</p>
+        <div className="lan-settings-grid">
+          <label>
+            Port
+            <input
+              type="number"
+              min="1024"
+              max="65535"
+              value={state.lanServer?.port || 8787}
+              onChange={(event) => updateLanServer({ port: Number(event.target.value) || 8787 })}
+              disabled={state.lanServer?.enabled}
+            />
+          </label>
+          <button
+            className={state.lanServer?.enabled ? 'danger-fill' : ''}
+            onClick={toggleLanServer}
+            disabled={lanBusy}
+          >
+            {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
+          </button>
+          <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled}>
+            Regenerate Access Code
+          </button>
+        </div>
+        {state.lanServer?.enabled && (
+          <div className="lan-access-box">
+            {lanQr && <img src={lanQr} alt="BuildBook LAN access QR code" />}
+            <div>
+              <strong>Address</strong>
+              <p>{lanNotice.replace('LAN server running at ', '')}</p>
+              <strong>Access URL</strong>
+              <p>{lanAccessUrl}</p>
+              <span>Scan the QR code once. The phone browser remembers the access code.</span>
             </div>
-          ))}
-        </section>
-
-        <section className="panel">
-          <h2>Default Checklist</h2>
-          <div className="inline-entry">
-            <input value={newChecklist} onChange={(event) => setNewChecklist(event.target.value)} placeholder="Default checklist item" />
-            <button onClick={() => {
-              if (!newChecklist.trim()) return;
-              updateTemplate({ checklist: [...state.template.checklist, newChecklist.trim()] });
-              setNewChecklist('');
-            }}>Add</button>
           </div>
-          {state.template.checklist.map((item) => (
-            <div key={item} className="list-line">
-              <span>{item}</span>
-              <button className="ghost" onClick={() => updateTemplate({ checklist: state.template.checklist.filter((text) => text !== item) })}>Delete</button>
-            </div>
-          ))}
-        </section>
-
-        <section className="panel wide">
-          <div className="section-title">
-            <h2>Tracked File Types</h2>
-            <button onClick={addTracker}>Add Tracker</button>
-          </div>
-          {state.template.fileTrackers.map((tracker) => (
-            <div key={tracker.id} className="tracker-row">
-              <input
-                value={tracker.name}
-                onChange={(event) => updateTemplate({
-                  fileTrackers: state.template.fileTrackers.map((item) => item.id === tracker.id ? { ...item, name: event.target.value } : item),
-                })}
-              />
-              <input
-                value={tracker.extensions}
-                onChange={(event) => updateTemplate({
-                  fileTrackers: state.template.fileTrackers.map((item) => item.id === tracker.id ? { ...item, extensions: event.target.value } : item),
-                })}
-                placeholder=".pdf,.dxf"
-              />
-              <select
-                value={tracker.viewer}
-                onChange={(event) => updateTemplate({
-                  fileTrackers: state.template.fileTrackers.map((item) => item.id === tracker.id ? { ...item, viewer: event.target.value } : item),
-                })}
-              >
-                <option value="pdf">PDF</option>
-                <option value="model">3D Model</option>
-                <option value="cad">CAD</option>
-                <option value="spreadsheet">Spreadsheet</option>
-                <option value="text">Text</option>
-                <option value="file">File</option>
-              </select>
-              <input
-                value={tracker.programPath || ''}
-                onChange={(event) => updateTemplate({
-                  fileTrackers: state.template.fileTrackers.map((item) => item.id === tracker.id ? { ...item, programPath: event.target.value } : item),
-                })}
-                placeholder="Program path"
-              />
-              <button className="ghost" onClick={() => updateTemplate({ fileTrackers: state.template.fileTrackers.filter((item) => item.id !== tracker.id) })}>
-                Delete
-              </button>
-            </div>
-          ))}
-        </section>
-      </div>
+        )}
+        {lanNotice && <p className="success-text">{lanNotice}</p>}
+        {lanError && <p className="error-text">{lanError}</p>}
+        <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
+      </section>
+      <section className="panel settings-section">
+        <h2>Quick Notes</h2>
+        <p>BuildBook is for electronics project documentation. Projects are the workspace; parts are reusable reference records for datasheets, product info, storage location, and related documents.</p>
+        <div className="settings-list">
+          <span>Use Project Template to tune default workflow tags, checklist starters, and file tracking labels.</span>
+          <span>Use project exports when sharing a build package with notes, latest files, linked parts, and documents.</span>
+          <span>Use Backup before major cleanup, restore testing, or category/template changes.</span>
+        </div>
+      </section>
       {showTemplatePreview && (
         <TemplatePreviewModal
           template={state.template}
@@ -2917,7 +5199,7 @@ function Settings({ state, updateState }) {
 function TemplatePreviewModal({ template, onClose, onUpdate }) {
   const [newStep, setNewStep] = useState('');
   const [newChecklist, setNewChecklist] = useState('');
-  const [newTracker, setNewTracker] = useState({ name: '', extensions: '', viewer: 'file' });
+  const [newTracker, setNewTracker] = useState({ name: '', extensions: '' });
 
   const addStep = () => {
     if (!newStep.trim()) return;
@@ -2936,10 +5218,10 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
     onUpdate({
       fileTrackers: [
         ...template.fileTrackers,
-        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), viewer: newTracker.viewer, programPath: '' },
+        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), programPath: '' },
       ],
     });
-    setNewTracker({ name: '', extensions: '', viewer: 'file' });
+    setNewTracker({ name: '', extensions: '' });
   };
 
   return (
@@ -2997,14 +5279,6 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
               <div className="tracker-row">
                 <input value={newTracker.name} onChange={(event) => setNewTracker((current) => ({ ...current, name: event.target.value }))} placeholder="Tracker name" />
                 <input value={newTracker.extensions} onChange={(event) => setNewTracker((current) => ({ ...current, extensions: event.target.value }))} placeholder=".pdf,.dxf" />
-                <select value={newTracker.viewer} onChange={(event) => setNewTracker((current) => ({ ...current, viewer: event.target.value }))}>
-                  <option value="pdf">PDF</option>
-                  <option value="model">3D Model</option>
-                  <option value="cad">CAD</option>
-                  <option value="spreadsheet">Spreadsheet</option>
-                  <option value="text">Text</option>
-                  <option value="file">File</option>
-                </select>
                 <button onClick={addTracker}>Add</button>
               </div>
               {template.fileTrackers.map((tracker) => (

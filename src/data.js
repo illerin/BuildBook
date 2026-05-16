@@ -1,16 +1,23 @@
-export const APP_VERSION = '0.3.10';
+export const APP_VERSION = '0.3.66';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
 export const DEFAULT_CATEGORIES = [
   { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
-  { id: 'cat-boards', name: 'Boards & Modules', parentId: null, sortOrder: 1 },
-  { id: 'cat-sensors', name: 'Sensors', parentId: null, sortOrder: 2 },
-  { id: 'cat-power', name: 'Power', parentId: null, sortOrder: 3 },
-  { id: 'cat-connectors', name: 'Connectors', parentId: null, sortOrder: 4 },
-  { id: 'cat-displays', name: 'Displays', parentId: null, sortOrder: 5 },
-  { id: 'cat-passives', name: 'Passives', parentId: null, sortOrder: 6 },
-  { id: 'cat-mechanical', name: 'Mechanical', parentId: null, sortOrder: 7 },
+  { id: 'cat-capacitors', name: 'Capacitors', parentId: null, sortOrder: 1 },
+  { id: 'cat-connectors', name: 'Connectors & Wiring', parentId: null, sortOrder: 2 },
+  { id: 'cat-displays', name: 'LEDs & Displays', parentId: null, sortOrder: 3 },
+  { id: 'cat-mechanical', name: 'Mechanical & Hardware', parentId: null, sortOrder: 4 },
+  { id: 'cat-boards', name: 'Microcontrollers & Development Boards', parentId: null, sortOrder: 5 },
+  { id: 'cat-misc', name: 'Miscellaneous', parentId: null, sortOrder: 6 },
+  { id: 'cat-modules', name: 'Modules', parentId: null, sortOrder: 7 },
+  { id: 'cat-motors', name: 'Motors & Motion', parentId: null, sortOrder: 8 },
+  { id: 'cat-optics', name: 'Optics & Physics', parentId: null, sortOrder: 9 },
+  { id: 'cat-power', name: 'Power', parentId: null, sortOrder: 10 },
+  { id: 'cat-tools', name: 'Prototyping & Tools', parentId: null, sortOrder: 11 },
+  { id: 'cat-resistors', name: 'Resistors', parentId: null, sortOrder: 12 },
+  { id: 'cat-sensors', name: 'Sensors', parentId: null, sortOrder: 13 },
+  { id: 'cat-switches', name: 'Switches & Relays', parentId: null, sortOrder: 14 },
 ];
 
 export const DEFAULT_FILE_TRACKERS = [
@@ -21,13 +28,31 @@ export const DEFAULT_FILE_TRACKERS = [
   { id: 'tracker-bom', name: 'PCB BOM', extensions: '.xlsx,.xls,.csv', viewer: 'spreadsheet', programPath: '' },
 ];
 
+export const DEFAULT_PROJECT_STEPS = [
+  'Design',
+  'Schematic',
+  'PCB Layout',
+  'Parts',
+  'Assembly',
+  'Programming',
+  'Testing',
+  'Debugging',
+  'Enclosure',
+  'Documentation',
+];
+
 const now = () => new Date().toISOString();
 
 export const DEFAULT_STATE = {
   version: APP_VERSION,
+  lanServer: {
+    enabled: false,
+    port: 8787,
+    token: '',
+  },
   categories: DEFAULT_CATEGORIES,
   template: {
-    steps: ['Schematic', 'Parts', 'Firmware', '3D Print', 'Testing'],
+    steps: DEFAULT_PROJECT_STEPS,
     checklist: ['Add project notes', 'Link parts', 'Attach latest schematic', 'Export build package'],
     fileTrackers: DEFAULT_FILE_TRACKERS,
   },
@@ -45,6 +70,7 @@ export const DEFAULT_STATE = {
       ],
       nextSteps: ['Verify ADS1115 gain setting', 'Attach final schematic PDF'],
       partIds: ['part-ads1115', 'part-oled'],
+      partQuantities: {},
       files: [
         {
           id: 'file-ads1115-datasheet',
@@ -108,17 +134,21 @@ export function makeId(prefix) {
 export function normalizeState(raw) {
   const state = raw && typeof raw === 'object' ? raw : {};
   const template = state.template || {};
+  const rawCategories = Array.isArray(state.categories) && state.categories.length ? state.categories : [];
+  const categories = (rawCategories.length ? rawCategories : DEFAULT_CATEGORIES)
+    .map((category, index) => ({ sortOrder: index, ...category }));
+  const validCategoryIds = new Set(categories.map((category) => category.id));
+  const rawSteps = Array.isArray(template.steps) ? template.steps : [];
 
   return {
     ...DEFAULT_STATE,
     ...state,
     version: APP_VERSION,
-    categories: (Array.isArray(state.categories) && state.categories.length ? state.categories : DEFAULT_CATEGORIES)
-      .map((category, index) => ({ sortOrder: index, ...category })),
+    categories,
     template: {
       ...DEFAULT_STATE.template,
       ...template,
-      steps: Array.isArray(template.steps) ? template.steps : DEFAULT_STATE.template.steps,
+      steps: rawSteps.length ? rawSteps : DEFAULT_STATE.template.steps,
       checklist: Array.isArray(template.checklist) ? template.checklist : DEFAULT_STATE.template.checklist,
       fileTrackers: Array.isArray(template.fileTrackers) ? template.fileTrackers : DEFAULT_FILE_TRACKERS,
     },
@@ -127,12 +157,19 @@ export function normalizeState(raw) {
       noteImages: Array.isArray(project.noteImages) ? project.noteImages : [],
       files: Array.isArray(project.files) ? project.files : [],
       partIds: Array.isArray(project.partIds) ? project.partIds : [],
+      partQuantities: project.partQuantities && typeof project.partQuantities === 'object' ? project.partQuantities : {},
     })),
     parts: (Array.isArray(state.parts) ? state.parts : DEFAULT_STATE.parts).map((part) => ({
       ...part,
+      categoryId: validCategoryIds.has(part.categoryId) ? part.categoryId : 'cat-unassigned',
       documents: Array.isArray(part.documents) ? part.documents : [],
     })),
     importBatches: Array.isArray(state.importBatches) ? state.importBatches : [],
+    lanServer: {
+      enabled: Boolean(state.lanServer?.enabled),
+      port: Number(state.lanServer?.port) || DEFAULT_STATE.lanServer.port,
+      token: typeof state.lanServer?.token === 'string' ? state.lanServer.token : '',
+    },
   };
 }
 

@@ -129,26 +129,49 @@ export async function readZip(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entries = new Map();
-  let offset = 0;
+  let eocd = -1;
+  for (let index = bytes.length - 22; index >= 0; index -= 1) {
+    if (view.getUint32(index, true) === 0x06054b50) {
+      eocd = index;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error('This ZIP file is not readable.');
 
-  while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
-    const method = view.getUint16(offset + 8, true);
-    const compressedSize = view.getUint32(offset + 18, true);
-    const uncompressedSize = view.getUint32(offset + 22, true);
-    const nameLength = view.getUint16(offset + 26, true);
-    const extraLength = view.getUint16(offset + 28, true);
-    const nameStart = offset + 30;
-    const dataStart = nameStart + nameLength + extraLength;
-    const dataEnd = dataStart + compressedSize;
-    const name = decoder.decode(bytes.slice(nameStart, nameStart + nameLength));
+  const entryCount = view.getUint16(eocd + 10, true);
+  let centralOffset = view.getUint32(eocd + 16, true);
 
-    if (method !== 0) throw new Error('This ZIP uses compression BuildBook cannot import yet.');
-    if (compressedSize !== uncompressedSize) throw new Error('This ZIP entry is not stored plainly.');
-    entries.set(name, bytes.slice(dataStart, dataEnd));
-    offset = dataEnd;
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    if (view.getUint32(centralOffset, true) !== 0x02014b50) throw new Error('This ZIP central directory is not readable.');
+    const method = view.getUint16(centralOffset + 10, true);
+    const compressedSize = view.getUint32(centralOffset + 20, true);
+    const nameLength = view.getUint16(centralOffset + 28, true);
+    const extraLength = view.getUint16(centralOffset + 30, true);
+    const commentLength = view.getUint16(centralOffset + 32, true);
+    const localOffset = view.getUint32(centralOffset + 42, true);
+    const name = decoder.decode(bytes.slice(centralOffset + 46, centralOffset + 46 + nameLength));
+
+    const localNameLength = view.getUint16(localOffset + 26, true);
+    const localExtraLength = view.getUint16(localOffset + 28, true);
+    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+    const data = bytes.slice(dataStart, dataStart + compressedSize);
+
+    if (!name.endsWith('/')) {
+      if (method === 0) entries.set(name, data);
+      else if (method === 8) entries.set(name, await inflateRaw(data));
+      else throw new Error(`ZIP compression method ${method} is not supported.`);
+    }
+
+    centralOffset += 46 + nameLength + extraLength + commentLength;
   }
 
   return entries;
+}
+
+async function inflateRaw(data) {
+  if (!('DecompressionStream' in globalThis)) throw new Error('This system cannot read compressed ZIP backups.');
+  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 export function zipText(entries, name) {
