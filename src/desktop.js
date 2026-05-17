@@ -166,9 +166,19 @@ export async function openWithProgram(programPath, filePath) {
   await invoke('open_file_with_program', { programPath, filePath });
 }
 
-export function openExternalUrl(url) {
+export async function openExternalUrl(url) {
   if (!url) return;
-  window.open(url, '_blank', 'noopener,noreferrer');
+  if (isTauri()) {
+    try {
+      await invoke('plugin:opener|open_url', { url });
+      return;
+    } catch (error) {
+      console.warn('Could not open external URL with Tauri opener.', error);
+    }
+  }
+
+  const opened = window.open(url, '_blank', 'noopener,noreferrer');
+  if (!opened) window.location.href = url;
 }
 
 export function assetUrl(path) {

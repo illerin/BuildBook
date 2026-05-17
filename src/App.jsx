@@ -32,6 +32,7 @@ import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
   ['projects', 'Projects'],
+  ['completed-projects', 'Completed Projects', 'child'],
   ['parts', 'Parts Library'],
   ['search', 'Search'],
   ['imports', 'Imports'],
@@ -415,6 +416,17 @@ function stripHtml(value) {
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .trim();
+}
+
+function textSelectionTarget(target) {
+  return target?.closest?.('input, textarea, [contenteditable="true"]') || null;
+}
+
+function targetHasSelection(target) {
+  if (!target) return false;
+  if ('selectionStart' in target && 'selectionEnd' in target) return target.selectionStart !== target.selectionEnd;
+  const selection = window.getSelection?.();
+  return Boolean(selection && !selection.isCollapsed && selection.toString());
 }
 
 function webUploadName(prefix, id, name, fallbackExtension = '') {
@@ -1472,6 +1484,7 @@ export default function App() {
   const [tab, setTab] = useState('projects');
   const [state, setState] = useState(null);
   const [saveState, setSaveState] = useState('saved');
+  const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
 
   useEffect(() => {
     loadAppState().then(setState);
@@ -1508,15 +1521,48 @@ export default function App() {
 
   if (!state) return <div className="loading">Loading BuildBook...</div>;
 
+  const handlePointerDownCapture = (event) => {
+    const source = textSelectionTarget(event.target);
+    selectionGuardRef.current = {
+      source,
+      x: event.clientX,
+      y: event.clientY,
+      block: false,
+      timer: selectionGuardRef.current.timer,
+    };
+  };
+
+  const handlePointerUpCapture = (event) => {
+    const guard = selectionGuardRef.current;
+    if (!guard.source) return;
+    const moved = Math.hypot(event.clientX - guard.x, event.clientY - guard.y) > 5;
+    if (!moved && !targetHasSelection(guard.source)) return;
+    window.clearTimeout(guard.timer);
+    selectionGuardRef.current = {
+      ...guard,
+      block: true,
+      timer: window.setTimeout(() => {
+        selectionGuardRef.current = { source: null, x: 0, y: 0, block: false, timer: 0 };
+      }, 160),
+    };
+  };
+
+  const handleClickCapture = (event) => {
+    if (!selectionGuardRef.current.block) return;
+    event.preventDefault();
+    event.stopPropagation();
+    selectionGuardRef.current = { source: null, x: 0, y: 0, block: false, timer: 0 };
+  };
+
   return (
-    <div className="app">
+    <div className="app" onPointerDownCapture={handlePointerDownCapture} onPointerUpCapture={handlePointerUpCapture} onClickCapture={handleClickCapture}>
       <aside className="sidebar">
         <div className="brand">
           <strong>BuildBook</strong>
           <span>v{APP_VERSION}</span>
         </div>
-        {TABS.map(([key, label]) => (
-          <button key={key} className={tab === key ? 'active' : ''} onClick={() => setTab(key)}>
+        {TABS.map(([key, label, type]) => (
+          <button key={key} className={`${tab === key ? 'active' : ''} ${type === 'child' ? 'sub-nav' : ''}`} onClick={() => setTab(key)}>
             {label}
           </button>
         ))}
@@ -1524,6 +1570,7 @@ export default function App() {
       </aside>
       <main className="workspace">
         {tab === 'projects' && <Projects state={state} updateState={updateState} />}
+        {tab === 'completed-projects' && <Projects state={state} updateState={updateState} initialFilter="completed" lockedFilter />}
         {tab === 'parts' && <Parts state={state} updateState={updateState} />}
         {tab === 'search' && <Search state={state} setTab={setTab} />}
         {tab === 'imports' && <Imports state={state} updateState={updateState} />}
@@ -1533,18 +1580,18 @@ export default function App() {
   );
 }
 
-function Projects({ state, updateState }) {
+function Projects({ state, updateState, initialFilter = 'open', lockedFilter = false }) {
   const [selectedId, setSelectedId] = useState('');
   const [pendingImport, setPendingImport] = useState(null);
   const [importError, setImportError] = useState('');
-  const [filter, setFilter] = useState('open');
+  const [filter, setFilter] = useState(initialFilter);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectError, setNewProjectError] = useState('');
   const selected = state.projects.find((project) => project.id === selectedId);
   const visibleProjects = state.projects.filter((project) => (
     filter === 'all' ? true
-      : filter === 'open' ? project.status !== 'archived'
+      : filter === 'open' ? !['archived', 'completed'].includes(project.status)
         : project.status === filter
   ));
 
@@ -1662,8 +1709,8 @@ function Projects({ state, updateState }) {
   return (
     <div>
       <Header
-        title="Projects"
-        subtitle="Your build notebook: notes, parts, files, checklist, and the next thing to do."
+        title={lockedFilter && filter === 'completed' ? 'Completed Projects' : 'Projects'}
+        subtitle={lockedFilter && filter === 'completed' ? 'Finished build records kept for reference.' : 'Your build notebook: notes, parts, files, checklist, and the next thing to do.'}
       >
         <label className="file-picker header-picker">
           <input
@@ -1678,17 +1725,19 @@ function Projects({ state, updateState }) {
         </label>
         <button onClick={openNewProjectDialog}>New Project</button>
       </Header>
-      <div className="filters">
-        {['open', 'all', 'active', 'waiting', 'paused', 'completed', 'archived'].map((key) => (
-          <button
-            key={key}
-            className={filter === key ? '' : 'secondary'}
-            onClick={() => setFilter(key)}
-          >
-            {key === 'open' ? 'Open' : key === 'all' ? 'All' : key}
-          </button>
-        ))}
-      </div>
+      {!lockedFilter && (
+        <div className="filters">
+          {['open', 'all', 'active', 'waiting', 'paused', 'archived'].map((key) => (
+            <button
+              key={key}
+              className={filter === key ? '' : 'secondary'}
+              onClick={() => setFilter(key)}
+            >
+              {key === 'open' ? 'Open' : key === 'all' ? 'All' : key}
+            </button>
+          ))}
+        </div>
+      )}
       {importError && <section className="panel error-text">{importError}</section>}
 
       {visibleProjects.length === 0 ? (
@@ -1758,7 +1807,7 @@ function ProjectCard({ project, onOpen }) {
   return (
     <button className="project-card" onClick={onOpen}>
       <div className="project-card-image">
-        {project.image ? <StoredImage path={project.image} alt="" /> : <div>Project</div>}
+        {project.image ? <ProjectThumbnail path={project.image} alt="" /> : <div>Project</div>}
         <span className={`status-badge status-${project.status}`}>{project.status}</span>
       </div>
       <div className="project-card-body">
@@ -2333,6 +2382,79 @@ function imageMimeType(path = '') {
   return 'image/jpeg';
 }
 
+const PROJECT_THUMBNAIL_PREFIX = 'buildbook-project-thumb:';
+
+async function createImageThumbnailDataUrl(path, width = 480, height = 270) {
+  const bytes = await readStoredFile(path);
+  const blob = new Blob([bytes], { type: imageMimeType(path) });
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#21262d';
+  context.fillRect(0, 0, width, height);
+  const scale = Math.max(width / bitmap.width, height / bitmap.height);
+  const drawWidth = bitmap.width * scale;
+  const drawHeight = bitmap.height * scale;
+  context.drawImage(bitmap, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight);
+  bitmap.close?.();
+  return canvas.toDataURL('image/jpeg', 0.74);
+}
+
+function ProjectThumbnail({ path, alt = '' }) {
+  const cacheKey = path ? `${PROJECT_THUMBNAIL_PREFIX}${path}` : '';
+  const [src, setSrc] = useState(() => {
+    if (!cacheKey) return '';
+    try {
+      return localStorage.getItem(cacheKey) || '';
+    } catch {
+      return '';
+    }
+  });
+
+  useEffect(() => {
+    if (!path) {
+      setSrc('');
+      return undefined;
+    }
+
+    let active = true;
+    const cached = (() => {
+      try {
+        return localStorage.getItem(cacheKey) || '';
+      } catch {
+        return '';
+      }
+    })();
+    if (cached) {
+      setSrc(cached);
+      return undefined;
+    }
+
+    createImageThumbnailDataUrl(path)
+      .then((dataUrl) => {
+        if (!active) return;
+        try {
+          localStorage.setItem(cacheKey, dataUrl);
+        } catch {
+          // Ignore storage quota; the generated thumbnail still works this session.
+        }
+        setSrc(dataUrl);
+      })
+      .catch(() => {
+        if (active) setSrc(assetUrl(path));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [path, cacheKey]);
+
+  if (!src) return null;
+  return <img src={src} alt={alt} draggable={false} />;
+}
+
 function StoredImage({ path, alt = '', className = '', style }) {
   const [src, setSrc] = useState(path && /^(blob:|data:|https?:)/i.test(path) ? path : '');
 
@@ -2367,7 +2489,7 @@ function StoredImage({ path, alt = '', className = '', style }) {
   }, [path]);
 
   if (!src) return null;
-  return <img src={src} alt={alt} className={className} style={style} />;
+  return <img src={src} alt={alt} className={className} style={style} draggable={false} />;
 }
 
 function PdfPreview({ path, title, className = 'file-preview-frame' }) {
@@ -3108,6 +3230,17 @@ function FilePreview({ file }) {
   );
 }
 
+function isPreviewableFile(file) {
+  const extension = fileExtension(file?.name || '');
+  return Boolean(file?.path) && (
+    extension === '.pdf'
+    || IMAGE_EXTENSIONS.includes(extension)
+    || TEXT_EXTENSIONS.includes(extension)
+    || ['.csv', '.xlsx', '.stl', '.obj', '.dxf'].includes(extension)
+    || Boolean(EXTERNAL_VIEWER_MESSAGES[extension])
+  );
+}
+
 function ExpandedPartFileModal({ file, onClose }) {
   if (!file?.path) return null;
   const extension = fileExtension(file.name);
@@ -3146,7 +3279,8 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
   const [expandedPreview, setExpandedPreview] = useState(null);
   const [documentBusy, setDocumentBusy] = useState(false);
   const [documentError, setDocumentError] = useState('');
-  const pdf = part.documents.find((doc) => doc.name.toLowerCase().endsWith('.pdf') && doc.path);
+  const previewDocument = part.documents.find((doc) => doc.isPrimary && isPreviewableFile(doc))
+    || part.documents.find(isPreviewableFile);
 
   const attachDocument = async (pickedFile) => {
     if (!pickedFile) return;
@@ -3157,18 +3291,19 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
       const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
       onUpdatePart(part.id, {
         documents: [
-          ...part.documents,
-          {
-            id: makeId('doc'),
-            name: stored.name,
-            path: stored.path,
-            sourcePath: '',
-            storageMode: 'copy',
-            size: stored.size,
-            contentHash,
-            type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
-            createdAt: new Date().toISOString(),
-          },
+                  ...part.documents,
+                  {
+                    id: makeId('doc'),
+                    name: stored.name,
+                    path: stored.path,
+                    sourcePath: '',
+                    storageMode: 'copy',
+                    size: stored.size,
+                    contentHash,
+                    type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+                    isPrimary: !part.documents.length,
+                    createdAt: new Date().toISOString(),
+                  },
         ],
       });
     } catch (error) {
@@ -3234,7 +3369,7 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
                   <span>{doc.name}</span>
                   <small>{doc.type || 'Document'}</small>
                   <div className="row-actions">
-                    {doc.path && (doc.name.toLowerCase().endsWith('.pdf') || IMAGE_EXTENSIONS.includes(fileExtension(doc.name))) && (
+                    {isPreviewableFile(doc) && (
                       <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
                     )}
                     {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
@@ -3245,12 +3380,14 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
           </section>
           <section className="project-part-panel pdf-panel">
             <div className="section-title">
-              <h3>PDF Preview</h3>
-              {pdf?.path && <button className="ghost" onClick={() => openStoredFile(pdf.path)}>Open</button>}
+              <h3>File Preview</h3>
+              {previewDocument?.path && <button className="ghost" onClick={() => openStoredFile(previewDocument.path)}>Open</button>}
             </div>
-            {pdf ? (
-              <ExpandablePdfPreview pdf={pdf} onExpand={() => setExpandedPreview(pdf)} />
-            ) : <p>No PDF attached yet.</p>}
+            {previewDocument ? (
+              <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
+                <FilePreview file={previewDocument} />
+              </button>
+            ) : <p>No previewable file attached yet.</p>}
           </section>
           <section className="project-part-panel notes-panel">
             <h3>Notes</h3>
@@ -3952,8 +4089,8 @@ function orderedCategoryDrafts(categories) {
   });
 }
 
-function CategoryTreeNode({ node, parts, categories, activeId, onSelect, depth = 0 }) {
-  const [open, setOpen] = useState(depth < 1);
+function CategoryTreeNode({ node, parts, categories, activeId, onSelect, onDropPart, draggingPartId = '', depth = 0 }) {
+  const [open, setOpen] = useState(false);
   const hasChildren = node.children.length > 0;
 
   return (
@@ -3962,7 +4099,11 @@ function CategoryTreeNode({ node, parts, categories, activeId, onSelect, depth =
         {hasChildren ? (
           <button className="tree-toggle" onClick={() => setOpen((value) => !value)}>{open ? '-' : '+'}</button>
         ) : <span className="tree-toggle-spacer" />}
-        <button className={`category-row tree-row ${activeId === node.id ? 'active' : ''}`} onClick={() => onSelect(node.id)}>
+        <button
+          data-library-category-id={node.id}
+          className={`category-row tree-row ${activeId === node.id ? 'active' : ''} ${draggingPartId ? 'drop-ready' : ''}`}
+          onClick={() => onSelect(node.id)}
+        >
           {node.name} <span>{categoryTreeCount(node, parts, categories)}</span>
         </button>
       </div>
@@ -3974,6 +4115,8 @@ function CategoryTreeNode({ node, parts, categories, activeId, onSelect, depth =
           categories={categories}
           activeId={activeId}
           onSelect={onSelect}
+          onDropPart={onDropPart}
+          draggingPartId={draggingPartId}
           depth={depth + 1}
         />
       ))}
@@ -3991,19 +4134,29 @@ function CategoryManager({ categories, onUpdate, onClose }) {
   const [remaps, setRemaps] = useState({});
   const orderedDrafts = flattenCategoryOptions(drafts.filter((category) => category.id !== 'cat-unassigned'));
 
+  useEffect(() => {
+    setDrafts(categories);
+  }, [categories]);
+
+  const applyCategories = (nextDrafts, nextRemaps = remaps) => {
+    const ordered = orderedCategoryDrafts(nextDrafts);
+    setDrafts(ordered);
+    onUpdate(ordered, nextRemaps);
+  };
+
   const updateCategory = (categoryId, patch) => {
-    setDrafts((current) => current.map((category) => category.id === categoryId ? { ...category, ...patch } : category));
+    applyCategories(drafts.map((category) => category.id === categoryId ? { ...category, ...patch } : category));
   };
 
   const addCategory = () => {
     if (!newCategory.name.trim()) return;
-    setDrafts((current) => [
-      ...current,
+    applyCategories([
+      ...drafts,
       {
         id: makeId('cat'),
         name: newCategory.name.trim(),
         parentId: newCategory.parentId || null,
-        sortOrder: current.length,
+        sortOrder: drafts.length,
       },
     ]);
     setNewCategory({ name: '', parentId: '' });
@@ -4011,12 +4164,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
 
   const deleteCategory = (categoryId) => {
     const blocked = new Set([categoryId, ...descendantCategoryIds(drafts, categoryId)]);
-    setDrafts((current) => current.filter((category) => !blocked.has(category.id)));
-  };
-
-  const save = () => {
-    onUpdate(drafts, remaps);
-    onClose();
+    applyCategories(drafts.filter((category) => !blocked.has(category.id)));
   };
 
   const exportTemplate = () => {
@@ -4027,36 +4175,34 @@ function CategoryManager({ categories, onUpdate, onClose }) {
     if (!file) return;
     const imported = JSON.parse(await file.text());
     if (!Array.isArray(imported)) return;
-    setDrafts(orderedCategoryDrafts(imported.map((category, index) => ({ id: category.id || makeId('cat'), name: category.name || 'Category', parentId: category.parentId || null, sortOrder: category.sortOrder ?? index }))));
+    applyCategories(imported.map((category, index) => ({ id: category.id || makeId('cat'), name: category.name || 'Category', parentId: category.parentId || null, sortOrder: category.sortOrder ?? index })));
   };
 
   const reorderCategory = (activeDragId, targetId) => {
     setDragOverId('');
     if (!activeDragId || activeDragId === targetId) return;
-    setDrafts((current) => {
-      const dragged = current.find((category) => category.id === activeDragId);
-      const target = current.find((category) => category.id === targetId);
-      if (!dragged || !target) return current;
-      if (descendantCategoryIds(current, dragged.id).includes(target.id)) return current;
+    const dragged = drafts.find((category) => category.id === activeDragId);
+    const target = drafts.find((category) => category.id === targetId);
+    if (!dragged || !target) return;
+    if (descendantCategoryIds(drafts, dragged.id).includes(target.id)) return;
 
-      const nextParentId = target.parentId || null;
-      const moved = current.map((category) => (
-        category.id === dragged.id ? { ...category, parentId: nextParentId } : category
-      ));
-      const siblings = moved
-        .filter((category) => (category.parentId || null) === nextParentId)
-        .sort((a, b) => ((a.sortOrder ?? 0) - (b.sortOrder ?? 0)) || a.name.localeCompare(b.name));
-      const fromIndex = siblings.findIndex((category) => category.id === dragged.id);
-      const targetIndex = siblings.findIndex((category) => category.id === target.id);
-      if (fromIndex < 0 || targetIndex < 0) return current;
-      const [item] = siblings.splice(fromIndex, 1);
-      siblings.splice(targetIndex, 0, item);
-      const siblingOrder = new Map(siblings.map((category, index) => [category.id, index]));
+    const nextParentId = target.parentId || null;
+    const moved = drafts.map((category) => (
+      category.id === dragged.id ? { ...category, parentId: nextParentId } : category
+    ));
+    const siblings = moved
+      .filter((category) => (category.parentId || null) === nextParentId)
+      .sort((a, b) => ((a.sortOrder ?? 0) - (b.sortOrder ?? 0)) || a.name.localeCompare(b.name));
+    const fromIndex = siblings.findIndex((category) => category.id === dragged.id);
+    const targetIndex = siblings.findIndex((category) => category.id === target.id);
+    if (fromIndex < 0 || targetIndex < 0) return;
+    const [item] = siblings.splice(fromIndex, 1);
+    siblings.splice(targetIndex, 0, item);
+    const siblingOrder = new Map(siblings.map((category, index) => [category.id, index]));
 
-      return orderedCategoryDrafts(moved.map((category) => (
-        siblingOrder.has(category.id) ? { ...category, sortOrder: siblingOrder.get(category.id) } : category
-      )));
-    });
+    applyCategories(moved.map((category) => (
+      siblingOrder.has(category.id) ? { ...category, sortOrder: siblingOrder.get(category.id) } : category
+    )));
     setDragId('');
   };
 
@@ -4101,10 +4247,12 @@ function CategoryManager({ categories, onUpdate, onClose }) {
     const blocked = new Set([mergeSource, ...descendantCategoryIds(drafts, mergeSource)]);
     if (blocked.has(mergeTarget)) return;
 
-    setDrafts((current) => current
+    const nextDrafts = drafts
       .filter((category) => category.id !== mergeSource)
-      .map((category) => category.parentId === mergeSource ? { ...category, parentId: mergeTarget } : category));
-    setRemaps((current) => ({ ...current, [mergeSource]: mergeTarget }));
+      .map((category) => category.parentId === mergeSource ? { ...category, parentId: mergeTarget } : category);
+    const nextRemaps = { ...remaps, [mergeSource]: mergeTarget };
+    setRemaps(nextRemaps);
+    applyCategories(nextDrafts, nextRemaps);
     setMergeSource('');
     setMergeTarget('');
   };
@@ -4184,15 +4332,13 @@ function CategoryManager({ categories, onUpdate, onClose }) {
                     <option key={option.id} value={option.id}>{option.fullLabel}</option>
                   ))}
                 </select>
-                <button className="ghost" onClick={() => updateCategory(category.id, { sortOrder: category.sortOrder ?? 0 })}>Save</button>
                 <button className="ghost" disabled={category.id === 'cat-unassigned'} onClick={() => deleteCategory(category.id)}>Delete</button>
               </div>
             );
           })}
         </div>
         <div className="modal-footer">
-          <button className="secondary" onClick={onClose}>Cancel</button>
-          <button onClick={save}>Save Categories</button>
+          <button className="secondary" onClick={onClose}>Close</button>
         </div>
       </div>
     </div>
@@ -4206,6 +4352,10 @@ function Parts({ state, updateState }) {
   const [showUnassigned, setShowUnassigned] = useState(false);
   const [editingCategories, setEditingCategories] = useState(false);
   const [creatingPart, setCreatingPart] = useState(false);
+  const [draggingPartId, setDraggingPartId] = useState('');
+  const [partDragGhost, setPartDragGhost] = useState(null);
+  const partDragRef = useRef(null);
+  const suppressPartClickRef = useRef(false);
   const selected = state.parts.find((part) => part.id === selectedId) || null;
 
   const visible = useMemo(() => {
@@ -4277,6 +4427,52 @@ function Parts({ state, updateState }) {
         part.id === partId ? { ...part, ...patch, updatedAt: new Date().toISOString() } : part,
       ),
     }));
+  };
+
+  const movePartToCategory = (categoryId, droppedPartId = '') => {
+    const partId = droppedPartId || draggingPartId;
+    if (!partId || !categoryId) return;
+    updatePart(partId, { categoryId });
+    setDraggingPartId('');
+    setPartDragGhost(null);
+  };
+
+  const categoryDropAtPoint = (clientX, clientY) => (
+    document.elementFromPoint(clientX, clientY)?.closest('[data-library-category-id]')?.dataset.libraryCategoryId || ''
+  );
+
+  const beginPartPointerDrag = (event, partId) => {
+    if (event.button !== 0) return;
+    partDragRef.current = { partId, x: event.clientX, y: event.clientY, dragging: false };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  };
+
+  const movePartPointerDrag = (event) => {
+    const drag = partDragRef.current;
+    if (!drag) return;
+    const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 6;
+    if (moved && !drag.dragging) {
+      partDragRef.current = { ...drag, dragging: true };
+      setDraggingPartId(drag.partId);
+    }
+    if (partDragRef.current?.dragging) setPartDragGhost({ partId: drag.partId, x: event.clientX, y: event.clientY });
+  };
+
+  const endPartPointerDrag = (event) => {
+    const drag = partDragRef.current;
+    if (!drag) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (drag.dragging) {
+      suppressPartClickRef.current = true;
+      const categoryId = categoryDropAtPoint(event.clientX, event.clientY);
+      if (categoryId) movePartToCategory(categoryId, drag.partId);
+      else setDraggingPartId('');
+      setPartDragGhost(null);
+      window.setTimeout(() => {
+        suppressPartClickRef.current = false;
+      }, 0);
+    }
+    partDragRef.current = null;
   };
 
   const duplicatePart = (part) => {
@@ -4386,7 +4582,8 @@ function Parts({ state, updateState }) {
             All parts <span>{state.parts.length}</span>
           </button>
           <button
-            className={`category-row ${showUnassigned ? 'active' : ''}`}
+            data-library-category-id="cat-unassigned"
+            className={`category-row ${showUnassigned ? 'active' : ''} ${draggingPartId ? 'drop-ready' : ''}`}
             onClick={() => { setCategoryFilter(''); setShowUnassigned(true); }}
           >
             Unassigned <span>{unassignedCount}</span>
@@ -4400,6 +4597,8 @@ function Parts({ state, updateState }) {
                 categories={state.categories}
                 activeId={categoryFilter}
                 onSelect={(id) => { setCategoryFilter(id); setShowUnassigned(false); }}
+                onDropPart={movePartToCategory}
+                draggingPartId={draggingPartId}
               />
             ))}
           </div>
@@ -4414,8 +4613,32 @@ function Parts({ state, updateState }) {
           {visible.length === 0 ? <div className="panel empty-panel">No parts found.</div> : (
             <div className="item-grid">
               {visible.map((part) => (
-                <button key={part.id} className="part-card" onClick={() => setSelectedId(part.id)}>
-                  <div className="part-card-image">{part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}</div>
+                <div
+                  key={part.id}
+                  className={`part-card ${draggingPartId === part.id ? 'dragging' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onPointerDown={(event) => beginPartPointerDrag(event, part.id)}
+                  onPointerMove={movePartPointerDrag}
+                  onPointerUp={endPartPointerDrag}
+                  onPointerCancel={(event) => {
+                    event.currentTarget.releasePointerCapture?.(event.pointerId);
+                    partDragRef.current = null;
+                    setDraggingPartId('');
+                    setPartDragGhost(null);
+                  }}
+                  onClick={() => {
+                    if (draggingPartId || suppressPartClickRef.current) return;
+                    setSelectedId(part.id);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                      event.preventDefault();
+                      setSelectedId(part.id);
+                    }
+                  }}
+                >
+                  <div className="part-card-image" draggable={false}>{part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}</div>
                   <div className="part-card-body">
                     <span>{categoryLabel(state.categories, part.categoryId)}</span>
                     <strong>{part.name}</strong>
@@ -4425,7 +4648,7 @@ function Parts({ state, updateState }) {
                       {part.productUrl && <span>Product link</span>}
                     </div>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           )}
@@ -4454,6 +4677,19 @@ function Parts({ state, updateState }) {
           </div>
         </div>
       )}
+      {partDragGhost && (() => {
+        const part = state.parts.find((item) => item.id === partDragGhost.partId);
+        if (!part) return null;
+        return (
+          <div className="part-drag-ghost" style={{ left: partDragGhost.x + 14, top: partDragGhost.y + 14 }}>
+            <div className="part-drag-ghost-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+            <div>
+              <strong>{part.name}</strong>
+              <span>{categoryLabel(state.categories, part.categoryId)}</span>
+            </div>
+          </div>
+        );
+      })()}
       {creatingPart && (
         <NewPartDialog
           categories={state.categories}
@@ -4558,27 +4794,23 @@ function NewPartDialog({ categories, projects, onCreate, onClose }) {
 }
 
 function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnlinkProject, onProjectQuantityChange, onCreateCategory, onDuplicate, onDelete, onClose }) {
-  const [documentPath, setDocumentPath] = useState('');
-  const [documentStorageMode, setDocumentStorageMode] = useState('copy');
   const [documentError, setDocumentError] = useState('');
   const [documentBusy, setDocumentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
   const [projectToLink, setProjectToLink] = useState('');
   const [expandedPreview, setExpandedPreview] = useState(null);
-  const pdf = part.documents.find((doc) => doc.name.toLowerCase().endsWith('.pdf'));
+  const previewDocument = part.documents.find((doc) => doc.isPrimary && isPreviewableFile(doc))
+    || part.documents.find(isPreviewableFile);
   const linkedProjects = (projects || []).filter((project) => project.partIds.includes(part.id));
   const linkableProjects = (projects || []).filter((project) => !project.partIds.includes(part.id));
 
   const attachDocument = async (pickedFile = null) => {
-    const trimmedPath = documentPath.trim();
-    if (!trimmedPath && !pickedFile) return;
+    if (!pickedFile) return;
     setDocumentBusy(true);
     setDocumentError('');
     try {
-      const stored = pickedFile
-        ? await savePickedFile(pickedFile, `part-documents/${part.id}`)
-        : linkedLocalFile(trimmedPath);
+      const stored = await savePickedFile(pickedFile, `part-documents/${part.id}`);
       const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
       onUpdate({
         documents: [
@@ -4587,16 +4819,16 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
             id: makeId('doc'),
             name: stored.name,
             path: stored.path,
-            sourcePath: pickedFile ? '' : trimmedPath,
-            storageMode: pickedFile ? 'copy' : documentStorageMode,
+            sourcePath: '',
+            storageMode: 'copy',
             size: stored.size,
             contentHash,
             type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+            isPrimary: !part.documents.length,
             createdAt: new Date().toISOString(),
           },
         ],
       });
-      if (!pickedFile) setDocumentPath('');
     } catch (error) {
       setDocumentError(String(error));
     } finally {
@@ -4604,28 +4836,8 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
     }
   };
 
-  const checkDocumentIntegrity = async (doc) => {
-    if (!doc.path) return;
-    try {
-      const currentHash = await fileHash(doc.path);
-      const status = doc.contentHash && currentHash !== doc.contentHash ? 'changed' : 'ok';
-      onUpdate({
-        documents: part.documents.map((item) => item.id === doc.id ? {
-          ...item,
-          contentHash: item.contentHash || currentHash,
-          integrityStatus: status,
-          integrityCheckedAt: new Date().toISOString(),
-        } : item),
-      });
-    } catch {
-      onUpdate({
-        documents: part.documents.map((item) => item.id === doc.id ? {
-          ...item,
-          integrityStatus: 'missing',
-          integrityCheckedAt: new Date().toISOString(),
-        } : item),
-      });
-    }
+  const setPrimaryDocument = (docId) => {
+    onUpdate({ documents: part.documents.map((doc) => ({ ...doc, isPrimary: doc.id === docId })) });
   };
 
   const updateImage = async (file) => {
@@ -4658,17 +4870,27 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
             >
               <div className="part-image detail-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
             </button>
-            <label className="file-picker wide-picker">
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(event) => {
-                  updateImage(event.target.files?.[0]);
-                  event.target.value = '';
-                }}
-              />
-              {imageBusy ? 'Saving...' : part.image ? 'Change Image' : 'Add Image'}
-            </label>
+            <div className="part-image-actions">
+              <label className="file-picker compact-picker">
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(event) => {
+                    updateImage(event.target.files?.[0]);
+                    event.target.value = '';
+                  }}
+                />
+                {imageBusy ? 'Saving...' : part.image ? 'Change Image' : 'Add Image'}
+              </label>
+              <button
+                className="ghost"
+                type="button"
+                onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(part.name)}`)}
+                disabled={!part.name.trim()}
+              >
+                Search web for Image
+              </button>
+            </div>
           </div>
           <label>Name<input value={part.name} onChange={(event) => onUpdate({ name: event.target.value })} /></label>
           <label>
@@ -4743,53 +4965,41 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
         </div>
         <div className="part-editor-side">
           <div className="preview-box">
-            <h3>PDF Preview</h3>
-            {pdf ? (
+            <h3>File Preview</h3>
+            {previewDocument ? (
               <>
                 <div className="list-line">
-                  <span>{pdf.name}</span>
-                  <button className="ghost" onClick={() => openStoredFile(pdf.path)}>Open PDF</button>
+                  <span>{previewDocument.name}</span>
+                  <button className="ghost" onClick={() => openStoredFile(previewDocument.path)}>Open</button>
                 </div>
-                {pdf.path && (
-                  <ExpandablePdfPreview pdf={pdf} onExpand={() => setExpandedPreview(pdf)} label="Click preview to expand" />
-                )}
+                <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
+                  <FilePreview file={previewDocument} />
+                </button>
               </>
-            ) : <p>No PDF attached yet.</p>}
+            ) : <p>No previewable file attached yet.</p>}
           </div>
           <div>
             <h3>Documents</h3>
             <div className="attach-form vertical">
-              <div className="storage-options">
-                <label><input type="radio" name={`document-storage-${part.id}`} checked={documentStorageMode === 'copy'} onChange={() => setDocumentStorageMode('copy')} />Copy into BuildBook library</label>
-                <label><input type="radio" name={`document-storage-${part.id}`} checked={documentStorageMode === 'link'} onChange={() => setDocumentStorageMode('link')} />Link original path</label>
-              </div>
-              {documentStorageMode === 'copy' ? (
-                <label className="file-picker wide-picker">
-                  <input
-                    type="file"
-                    onChange={(event) => {
-                      const pickedFile = event.target.files?.[0];
-                      if (pickedFile) attachDocument(pickedFile);
-                      event.target.value = '';
-                    }}
-                  />
-                  {documentBusy ? 'Saving...' : 'Choose Document'}
-                </label>
-              ) : (
-                <>
-                  <input value={documentPath} onChange={(event) => setDocumentPath(event.target.value)} placeholder="Paste original file path to link" />
-                  <button onClick={() => attachDocument()} disabled={documentBusy}>{documentBusy ? 'Saving' : 'Attach Document'}</button>
-                </>
-              )}
+              <label className="file-picker wide-picker">
+                <input
+                  type="file"
+                  onChange={(event) => {
+                    const pickedFile = event.target.files?.[0];
+                    if (pickedFile) attachDocument(pickedFile);
+                    event.target.value = '';
+                  }}
+                />
+                {documentBusy ? 'Saving...' : 'Choose Document'}
+              </label>
             </div>
             {documentError && <p className="error-text">{documentError}</p>}
             {part.documents.map((doc) => (
               <div key={doc.id} className="list-line">
-                <span>{doc.name} - {doc.storageMode === 'link' ? 'Linked' : 'Copied'}</span>
+                <span>{doc.name}</span>
                 <div className="row-actions">
-                  {doc.integrityStatus && <span className={`integrity-pill ${doc.integrityStatus}`}>{integrityLabel(doc.integrityStatus)}</span>}
-                  {doc.path && <button className="ghost" onClick={() => checkDocumentIntegrity(doc)}>Check</button>}
-                  {doc.path && (doc.name.toLowerCase().endsWith('.pdf') || IMAGE_EXTENSIONS.includes(fileExtension(doc.name))) && (
+                  <button className={doc.isPrimary ? 'latest-pill' : 'ghost'} onClick={() => setPrimaryDocument(doc.id)}>{doc.isPrimary ? 'Default' : 'Set Default'}</button>
+                  {isPreviewableFile(doc) && (
                     <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
                   )}
                   {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
