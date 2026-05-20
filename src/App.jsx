@@ -16,10 +16,13 @@ import {
   extensionAllowed,
   linkedLocalFile,
   lanServerStatus,
+  listLinkedFolderFiles,
   openExternalUrl,
   openStoredFile,
   openWithProgram,
   overwriteBytesFile,
+  pickLinkedFolderPath,
+  pickLinkedFilePath,
   prepareEditableFile,
   readStoredFile,
   saveBytesFile,
@@ -806,7 +809,7 @@ async function readWebBackupPackage(entries) {
 
   return normalizeState({
     version: APP_VERSION,
-    lanServer: { enabled: false, port: 8787, token: '' },
+    lanServer: { enabled: false, port: 8787, token: '', requireToken: true },
     categories,
     template: {
       steps: asArray(backup.step_definition).slice().sort((a, b) => (a.order_index || 0) - (b.order_index || 0)).map((step) => step.name).filter(Boolean),
@@ -1507,17 +1510,17 @@ export default function App() {
   useEffect(() => {
     if (!state) return;
     const lan = state.lanServer || {};
-    if (lan.enabled && !lan.token) {
+    if (lan.enabled && lan.requireToken !== false && !lan.token) {
       const token = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), token } }));
       return;
     }
-    if (lan.enabled && lan.token) {
-      startLanServer(lan.port || 8787, lan.token).catch((error) => console.error(error));
+    if (lan.enabled && (lan.token || lan.requireToken === false)) {
+      startLanServer(lan.port || 8787, lan.token || '', lan.requireToken !== false).catch((error) => console.error(error));
       return;
     }
     stopLanServer().catch(() => {});
-  }, [state?.lanServer?.enabled, state?.lanServer?.port, state?.lanServer?.token]);
+  }, [state?.lanServer?.enabled, state?.lanServer?.port, state?.lanServer?.token, state?.lanServer?.requireToken]);
 
   if (!state) return <div className="loading">Loading BuildBook...</div>;
 
@@ -1589,11 +1592,16 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectError, setNewProjectError] = useState('');
   const selected = state.projects.find((project) => project.id === selectedId);
-  const visibleProjects = state.projects.filter((project) => (
-    filter === 'all' ? true
-      : filter === 'open' ? !['archived', 'completed'].includes(project.status)
-        : project.status === filter
-  ));
+  const visibleProjects = state.projects
+    .filter((project) => (
+      filter === 'all' ? true
+        : filter === 'open' ? !['archived', 'completed'].includes(project.status)
+          : project.status === filter
+    ))
+    .sort((a, b) => {
+      const order = { active: 0, waiting: 1, paused: 2, completed: 3, archived: 4 };
+      return ((order[a.status] ?? 99) - (order[b.status] ?? 99)) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+    });
 
   useEffect(() => {
     if (selected && !visibleProjects.some((project) => project.id === selected.id)) setSelectedId('');
@@ -2351,7 +2359,7 @@ function withLatestVersionNote(notes = '', date = new Date()) {
 }
 
 function integrityLabel(status) {
-  if (status === 'changed') return 'Changed';
+  if (status === 'changed') return 'Outdated';
   if (status === 'missing') return 'Missing';
   if (status === 'ok') return 'OK';
   return '';
@@ -3553,20 +3561,25 @@ function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart })
 }
 
 function ProjectFilesTab({ project, template, onUpdate }) {
-  const [filePath, setFilePath] = useState('');
   const [fileTrackerId, setFileTrackerId] = useState(template.fileTrackers[0]?.id || '');
   const [fileUploadNotes, setFileUploadNotes] = useState('');
-  const [fileStorageMode, setFileStorageMode] = useState('copy');
+  const [stagedAttachment, setStagedAttachment] = useState(null);
   const [fileError, setFileError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
   const [editSessions, setEditSessions] = useState({});
   const [selectedFileId, setSelectedFileId] = useState('');
   const [viewerScope, setViewerScope] = useState('latest');
   const [expandedFileGroups, setExpandedFileGroups] = useState({});
+  const autoIntegrityBusyRef = useRef(false);
+  const projectFilesRef = useRef(project.files);
 
-  const attachProjectFile = async (pickedFile = null) => {
+  useEffect(() => {
+    projectFilesRef.current = project.files;
+  }, [project.files]);
+
+  const attachProjectFile = async (pickedFile = null, linkedPath = '') => {
     const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
-    const trimmedPath = filePath.trim();
+    const trimmedPath = linkedPath.trim();
     if ((!trimmedPath && !pickedFile) || !tracker) return;
 
     const candidateName = pickedFile?.name || trimmedPath;
@@ -3592,7 +3605,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
             name: stored.name,
             path: stored.path,
             sourcePath: pickedFile ? '' : trimmedPath,
-            storageMode: pickedFile ? 'copy' : fileStorageMode,
+            storageMode: pickedFile ? 'copy' : 'link',
             size: stored.size,
             contentHash,
             latest: true,
@@ -3601,8 +3614,34 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           },
         ],
       });
-      if (!pickedFile) setFilePath('');
       setFileUploadNotes('');
+      setStagedAttachment(null);
+    } catch (error) {
+      setFileError(String(error));
+    } finally {
+      setFileBusy(false);
+    }
+  };
+
+  const selectLinkedProjectFile = async () => {
+    setFileBusy(true);
+    setFileError('');
+    try {
+      const selectedPath = await pickLinkedFilePath();
+      if (selectedPath) setStagedAttachment({ type: 'link-file', path: selectedPath });
+    } catch (error) {
+      setFileError(String(error));
+    } finally {
+      setFileBusy(false);
+    }
+  };
+
+  const selectLinkedProjectFolder = async () => {
+    setFileBusy(true);
+    setFileError('');
+    try {
+      const selectedPath = await pickLinkedFolderPath();
+      if (selectedPath) setStagedAttachment({ type: 'link-folder', path: selectedPath });
     } catch (error) {
       setFileError(String(error));
     } finally {
@@ -3665,12 +3704,74 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         ],
       });
       setFileUploadNotes('');
+      setStagedAttachment(null);
       if (hasExtensionFilter && files.length !== allPickedFiles.length) setFileError(`Uploaded folder "${folderName}" with ${files.length} matching files. Some files did not match this file type.`);
     } catch (error) {
       setFileError(String(error));
     } finally {
       setFileBusy(false);
     }
+  };
+
+  const attachLinkedProjectFolder = async (folderPath) => {
+    const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
+    if (!tracker || !folderPath) return;
+    setFileBusy(true);
+    setFileError('');
+    try {
+      const allFiles = await listLinkedFolderFiles(folderPath);
+      const hasExtensionFilter = Boolean((tracker.extensions || '').split(',').map((item) => item.trim()).filter(Boolean).length);
+      const files = hasExtensionFilter ? allFiles.filter((file) => extensionAllowed(file.name, tracker.extensions)) : allFiles;
+      if (!files.length) {
+        setFileError(tracker.extensions ? `No files in that folder match: ${tracker.extensions}` : 'No files found in that folder.');
+        return;
+      }
+      const now = new Date().toISOString();
+      const folderName = folderPath.split(/[\\/]/).filter(Boolean).pop() || 'Linked folder';
+      const folderFiles = await Promise.all(files.map(async (file) => ({
+        id: makeId('folder-file'),
+        name: file.relativePath || file.name,
+        relativePath: file.relativePath || file.name,
+        path: file.path,
+        size: file.size || 0,
+        contentHash: file.path ? await fileHash(file.path).catch(() => '') : '',
+      })));
+      onUpdate({
+        files: [
+          ...project.files.map((file) => file.trackerId === tracker.id ? { ...file, latest: false } : file),
+          {
+            id: makeId('file'),
+            trackerId: tracker.id,
+            type: 'folder',
+            name: folderName,
+            path: '',
+            sourcePath: folderPath,
+            storageMode: 'link',
+            size: folderFiles.reduce((total, file) => total + (file.size || 0), 0),
+            contentHash: '',
+            latest: true,
+            notes: fileUploadNotes.trim(),
+            folderFiles,
+            createdAt: now,
+          },
+        ],
+      });
+      setFileUploadNotes('');
+      setStagedAttachment(null);
+      if (hasExtensionFilter && files.length !== allFiles.length) setFileError(`Linked folder "${folderName}" with ${files.length} matching files. Some files did not match this file type.`);
+    } catch (error) {
+      setFileError(String(error));
+    } finally {
+      setFileBusy(false);
+    }
+  };
+
+  const loadStagedAttachment = () => {
+    if (!stagedAttachment) return;
+    if (stagedAttachment.type === 'upload-file') attachProjectFile(stagedAttachment.file);
+    if (stagedAttachment.type === 'upload-folder') attachProjectFolder(stagedAttachment.files);
+    if (stagedAttachment.type === 'link-file') attachProjectFile(null, stagedAttachment.path);
+    if (stagedAttachment.type === 'link-folder') attachLinkedProjectFolder(stagedAttachment.path);
   };
 
   const toggleLatest = (fileId) => {
@@ -3689,7 +3790,10 @@ function ProjectFilesTab({ project, template, onUpdate }) {
 
   const removeFile = (fileId) => onUpdate({ files: project.files.filter((file) => file.id !== fileId) });
   const updateFile = (fileId, patch) => onUpdate({ files: project.files.map((file) => file.id === fileId ? { ...file, ...patch } : file) });
+  const integrityCheckable = (file) => Boolean(file.path || file.type === 'folder');
+  const visibleIntegrityStatus = (file) => (['changed', 'missing'].includes(file.integrityStatus) ? file.integrityStatus : '');
   const checkAttachmentIntegrity = async (file) => {
+    if (!integrityCheckable(file)) return;
     try {
       if (file.type === 'folder') {
         const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
@@ -3724,6 +3828,90 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       updateFile(file.id, { integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() });
     }
   };
+
+  const acceptCurrentFileVersion = async (file) => {
+    if (!integrityCheckable(file)) return;
+    try {
+      if (file.type === 'folder') {
+        const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
+          const currentHash = await fileHash(child.path);
+          return {
+            ...child,
+            contentHash: currentHash,
+            integrityStatus: 'ok',
+            integrityCheckedAt: new Date().toISOString(),
+          };
+        }));
+        updateFile(file.id, {
+          folderFiles: checkedChildren,
+          integrityStatus: 'ok',
+          integrityCheckedAt: new Date().toISOString(),
+        });
+        return;
+      }
+      const currentHash = await fileHash(file.path);
+      updateFile(file.id, {
+        contentHash: currentHash,
+        integrityStatus: 'ok',
+        integrityCheckedAt: new Date().toISOString(),
+      });
+    } catch {
+      updateFile(file.id, { integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() });
+    }
+  };
+
+  const checkAllAttachmentIntegrity = async () => {
+    const currentFiles = projectFilesRef.current;
+    if (autoIntegrityBusyRef.current || !currentFiles.some(integrityCheckable)) return;
+    autoIntegrityBusyRef.current = true;
+    try {
+      const checkedFiles = await Promise.all(currentFiles.map(async (file) => {
+        if (!integrityCheckable(file)) return file;
+        try {
+          if (file.type === 'folder') {
+            const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
+              try {
+                const currentHash = await fileHash(child.path);
+                return {
+                  ...child,
+                  contentHash: child.contentHash || currentHash,
+                  integrityStatus: child.contentHash && currentHash !== child.contentHash ? 'changed' : 'ok',
+                  integrityCheckedAt: new Date().toISOString(),
+                };
+              } catch {
+                return { ...child, integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() };
+              }
+            }));
+            const statuses = checkedChildren.map((child) => child.integrityStatus);
+            return {
+              ...file,
+              folderFiles: checkedChildren,
+              integrityStatus: statuses.includes('missing') ? 'missing' : statuses.includes('changed') ? 'changed' : 'ok',
+              integrityCheckedAt: new Date().toISOString(),
+            };
+          }
+          const currentHash = await fileHash(file.path);
+          return {
+            ...file,
+            contentHash: file.contentHash || currentHash,
+            integrityStatus: file.contentHash && currentHash !== file.contentHash ? 'changed' : 'ok',
+            integrityCheckedAt: new Date().toISOString(),
+          };
+        } catch {
+          return { ...file, integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() };
+        }
+      }));
+      onUpdate({ files: checkedFiles });
+    } finally {
+      autoIntegrityBusyRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    checkAllAttachmentIntegrity();
+    const timer = window.setInterval(checkAllAttachmentIntegrity, 60000);
+    return () => window.clearInterval(timer);
+  }, [project.id]);
   const downloadProjectFile = async (file) => {
     if (!file.path && file.type !== 'folder') return;
     try {
@@ -3912,7 +4100,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
             </select>
             <input value={fileUploadNotes} onChange={(event) => setFileUploadNotes(event.target.value)} placeholder="Upload notes" />
           </div>
-          {fileStorageMode === 'copy' ? (
+          <div className="upload-action-row">
             <div className="upload-buttons">
               <label className="file-picker compact-picker">
                 <input
@@ -3920,11 +4108,11 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                   accept={acceptFromExtensions(template.fileTrackers.find((tracker) => tracker.id === fileTrackerId)?.extensions || '')}
                   onChange={(event) => {
                     const pickedFile = event.target.files?.[0];
-                    if (pickedFile) attachProjectFile(pickedFile);
+                    if (pickedFile) setStagedAttachment({ type: 'upload-file', file: pickedFile });
                     event.target.value = '';
                   }}
                 />
-                {fileBusy ? 'Saving...' : 'Choose File'}
+                Upload File
               </label>
               <label className="file-picker compact-picker">
                 <input
@@ -3933,28 +4121,19 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                   webkitdirectory=""
                   directory=""
                   onChange={(event) => {
-                    attachProjectFolder(event.target.files || []);
+                    const files = Array.from(event.target.files || []);
+                    if (files.length) setStagedAttachment({ type: 'upload-folder', files });
                     event.target.value = '';
                   }}
                 />
-                {fileBusy ? 'Saving...' : 'Choose Folder'}
+                Upload Folder
               </label>
+              <button onClick={selectLinkedProjectFile} disabled={fileBusy}>Link File</button>
+              <button onClick={selectLinkedProjectFolder} disabled={fileBusy}>Link Folder</button>
             </div>
-          ) : (
-            <>
-              <input value={filePath} onChange={(event) => setFilePath(event.target.value)} placeholder="Paste original file path to link" />
-              <button onClick={() => attachProjectFile()} disabled={fileBusy}>{fileBusy ? 'Saving' : 'Attach'}</button>
-            </>
-          )}
-          <div className="storage-options">
-            <label>
-              <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'copy'} onChange={() => setFileStorageMode('copy')} />
-              Copy into BuildBook library
-            </label>
-            <label>
-              <input type="radio" name={`file-storage-${project.id}`} checked={fileStorageMode === 'link'} onChange={() => setFileStorageMode('link')} />
-              Link original path
-            </label>
+            <button className={stagedAttachment ? '' : 'secondary'} onClick={loadStagedAttachment} disabled={fileBusy || !stagedAttachment}>
+              {fileBusy ? 'Loading...' : stagedAttachment?.type?.includes('folder') ? 'Load Folder' : 'Load File'}
+            </button>
           </div>
           {fileError && <p className="error-text">{fileError}</p>}
         </section>
@@ -3965,12 +4144,13 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           const visibleFiles = expanded ? files : (latestInGroup.length ? latestInGroup : files.slice(0, 1));
           const olderCount = Math.max(0, files.length - visibleFiles.length);
           const hasHiddenFiles = files.length > (latestInGroup.length ? latestInGroup.length : 1);
+          const latestIsLinked = (latestInGroup.length ? latestInGroup : files.slice(0, 1)).some((file) => file.storageMode === 'link');
           return (
           <section key={tracker.id} className="panel file-group">
             <div className="file-group-header">
               <div className="file-group-title-row">
                 <h3>{tracker.name}</h3>
-                {!expanded && olderCount > 0 && <span>{olderCount} older</span>}
+                {latestIsLinked && <span className="linked-status">Linked</span>}
               </div>
               <div className="file-group-actions">
                 {hasHiddenFiles && (
@@ -4006,14 +4186,14 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                     </div>
                   </div>
                   <div className="file-row-right">
-                    {file.integrityStatus && <span className={`integrity-pill ${file.integrityStatus}`}>{integrityLabel(file.integrityStatus)}</span>}
+                    {visibleIntegrityStatus(file) && <span className={`integrity-pill ${file.integrityStatus}`}>{integrityLabel(file.integrityStatus)}</span>}
                     <span className="file-date">{file.createdAt ? new Date(file.createdAt).toLocaleDateString() : ''}</span>
                     <button className={file.latest ? 'latest-pill' : 'mark-latest-button'} onClick={() => { toggleLatest(file.id); setSelectedFileId(file.id); }}>{file.latest ? 'Latest' : 'Mark Latest'}</button>
                     <button className="file-delete-button" onClick={() => removeFile(file.id)} aria-label={`Delete ${file.name}`}>x</button>
                   </div>
                   {(file.path || file.type === 'folder' || editSessions[file.id] || tracker.programPath) && (
                     <div className="file-extra-actions">
-                      {(file.path || file.type === 'folder') && <button className="ghost" onClick={() => checkAttachmentIntegrity(file)}>Check integrity</button>}
+                      {file.integrityStatus === 'changed' && <button className="ghost" onClick={() => acceptCurrentFileVersion(file)}>Update</button>}
                       {file.path && tracker.programPath && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
                     </div>
                   )}
@@ -4129,6 +4309,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
   const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
   const [dragId, setDragId] = useState('');
   const [dragOverId, setDragOverId] = useState('');
+  const [dragOverPosition, setDragOverPosition] = useState('before');
   const [mergeSource, setMergeSource] = useState('');
   const [mergeTarget, setMergeTarget] = useState('');
   const [remaps, setRemaps] = useState({});
@@ -4178,7 +4359,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
     applyCategories(imported.map((category, index) => ({ id: category.id || makeId('cat'), name: category.name || 'Category', parentId: category.parentId || null, sortOrder: category.sortOrder ?? index })));
   };
 
-  const reorderCategory = (activeDragId, targetId) => {
+  const reorderCategory = (activeDragId, targetId, position = 'before') => {
     setDragOverId('');
     if (!activeDragId || activeDragId === targetId) return;
     const dragged = drafts.find((category) => category.id === activeDragId);
@@ -4194,21 +4375,26 @@ function CategoryManager({ categories, onUpdate, onClose }) {
       .filter((category) => (category.parentId || null) === nextParentId)
       .sort((a, b) => ((a.sortOrder ?? 0) - (b.sortOrder ?? 0)) || a.name.localeCompare(b.name));
     const fromIndex = siblings.findIndex((category) => category.id === dragged.id);
-    const targetIndex = siblings.findIndex((category) => category.id === target.id);
+    let targetIndex = siblings.findIndex((category) => category.id === target.id);
     if (fromIndex < 0 || targetIndex < 0) return;
     const [item] = siblings.splice(fromIndex, 1);
-    siblings.splice(targetIndex, 0, item);
+    targetIndex = siblings.findIndex((category) => category.id === target.id);
+    siblings.splice(targetIndex + (position === 'after' ? 1 : 0), 0, item);
     const siblingOrder = new Map(siblings.map((category, index) => [category.id, index]));
 
     applyCategories(moved.map((category) => (
       siblingOrder.has(category.id) ? { ...category, sortOrder: siblingOrder.get(category.id) } : category
     )));
     setDragId('');
+    setDragOverPosition('before');
   };
 
-  const categoryAtPoint = (clientX, clientY) => (
-    document.elementFromPoint(clientX, clientY)?.closest('[data-category-id]')?.dataset.categoryId || ''
-  );
+  const categoryDropAtPoint = (clientX, clientY) => {
+    const row = document.elementFromPoint(clientX, clientY)?.closest('[data-category-id]');
+    if (!row) return { id: '', position: 'before' };
+    const rect = row.getBoundingClientRect();
+    return { id: row.dataset.categoryId || '', position: clientY > rect.top + rect.height / 2 ? 'after' : 'before' };
+  };
 
   const startCategoryDrag = (event, categoryId) => {
     event.preventDefault();
@@ -4217,16 +4403,17 @@ function CategoryManager({ categories, onUpdate, onClose }) {
     handle.setPointerCapture?.(event.pointerId);
 
     const moveCategory = (moveEvent) => {
-      const targetId = categoryAtPoint(moveEvent.clientX, moveEvent.clientY);
-      setDragOverId(targetId && targetId !== categoryId ? targetId : '');
+      const target = categoryDropAtPoint(moveEvent.clientX, moveEvent.clientY);
+      setDragOverId(target.id && target.id !== categoryId ? target.id : '');
+      setDragOverPosition(target.position);
     };
     const finishCategoryDrag = (upEvent) => {
-      const targetId = categoryAtPoint(upEvent.clientX, upEvent.clientY);
+      const target = categoryDropAtPoint(upEvent.clientX, upEvent.clientY);
       handle.releasePointerCapture?.(event.pointerId);
       handle.removeEventListener('pointermove', moveCategory);
       handle.removeEventListener('pointerup', finishCategoryDrag);
       handle.removeEventListener('pointercancel', cancelCategoryDrag);
-      reorderCategory(categoryId, targetId);
+      reorderCategory(categoryId, target.id, target.position);
     };
     const cancelCategoryDrag = () => {
       handle.releasePointerCapture?.(event.pointerId);
@@ -4235,6 +4422,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
       handle.removeEventListener('pointercancel', cancelCategoryDrag);
       setDragId('');
       setDragOverId('');
+      setDragOverPosition('before');
     };
 
     handle.addEventListener('pointermove', moveCategory);
@@ -4314,7 +4502,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
               <div
                 key={category.id}
                 data-category-id={category.id}
-                className={`category-edit-row depth-${Math.min(category.depth, 4)} ${dragId === category.id ? 'dragging' : ''} ${dragOverId === category.id ? 'drag-over' : ''}`}
+                className={`category-edit-row depth-${Math.min(category.depth, 4)} ${dragId === category.id ? 'dragging' : ''} ${dragOverId === category.id ? `drop-${dragOverPosition}` : ''}`}
                 style={{ marginLeft: `${category.depth * 28}px` }}
               >
                 <span
@@ -5242,6 +5430,7 @@ function Settings({ state, updateState }) {
     }
     updateLanServer({
       enabled: true,
+      requireToken: state.lanServer?.requireToken !== false,
       token: state.lanServer?.token || (crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`),
     });
   };
@@ -5254,8 +5443,9 @@ function Settings({ state, updateState }) {
       try {
         if (state.lanServer?.enabled) {
           const token = state.lanServer.token;
-          const info = await startLanServer(state.lanServer.port || 8787, token);
-          const accessUrl = info.url ? `${info.url}?access=${encodeURIComponent(token)}` : '';
+          const requireToken = state.lanServer.requireToken !== false;
+          const info = await startLanServer(state.lanServer.port || 8787, token || '', requireToken);
+          const accessUrl = info.url ? (requireToken ? `${info.url}?access=${encodeURIComponent(token)}` : info.url) : '';
           const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
           if (active) {
             setLanNotice(info.url ? `LAN server running at ${info.url}` : 'LAN server running.');
@@ -5279,7 +5469,7 @@ function Settings({ state, updateState }) {
     };
     syncLanServer();
     return () => { active = false; };
-  }, [state.lanServer?.enabled, state.lanServer?.port, state.lanServer?.token]);
+  }, [state.lanServer?.enabled, state.lanServer?.port, state.lanServer?.token, state.lanServer?.requireToken]);
 
   const exportBackup = async () => {
     setBackupBusy(true);
@@ -5321,7 +5511,7 @@ function Settings({ state, updateState }) {
       <section className="panel settings-section">
         <h2>Project Template</h2>
         <p>Set the default project step tags, starter checklist items, and tracked file types used for project workspaces.</p>
-        <button onClick={() => setShowTemplatePreview(true)}>Project Template</button>
+        <button className="settings-template-button" onClick={() => setShowTemplatePreview(true)}>Project Template</button>
       </section>
       <section className="panel settings-section">
         <h2>Backup and Restore</h2>
@@ -5370,6 +5560,15 @@ function Settings({ state, updateState }) {
             Regenerate Access Code
           </button>
         </div>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={state.lanServer?.requireToken !== false}
+            onChange={(event) => updateLanServer({ requireToken: event.target.checked })}
+            disabled={state.lanServer?.enabled}
+          />
+          Require access token
+        </label>
         {state.lanServer?.enabled && (
           <div className="lan-access-box">
             {lanQr && <img src={lanQr} alt="BuildBook LAN access QR code" />}
@@ -5378,7 +5577,7 @@ function Settings({ state, updateState }) {
               <p>{lanNotice.replace('LAN server running at ', '')}</p>
               <strong>Access URL</strong>
               <p>{lanAccessUrl}</p>
-              <span>Scan the QR code once. The phone browser remembers the access code.</span>
+              <span>{state.lanServer?.requireToken === false ? 'Token is off. Anyone on the network can open this address.' : 'Scan the QR code once. The phone browser remembers the access code.'}</span>
             </div>
           </div>
         )}
@@ -5410,11 +5609,28 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
   const [newStep, setNewStep] = useState('');
   const [newChecklist, setNewChecklist] = useState('');
   const [newTracker, setNewTracker] = useState({ name: '', extensions: '' });
+  const [selectedSteps, setSelectedSteps] = useState([]);
+  const [dragTrackerId, setDragTrackerId] = useState('');
+  const [dragTrackerOverId, setDragTrackerOverId] = useState('');
+  const [dragTrackerPosition, setDragTrackerPosition] = useState('before');
+  const trackerDragRef = useRef(null);
 
   const addStep = () => {
     if (!newStep.trim()) return;
     onUpdate({ steps: [...template.steps, newStep.trim()] });
     setNewStep('');
+  };
+
+  const toggleSelectedStep = (step) => {
+    setSelectedSteps((current) => (
+      current.includes(step) ? current.filter((item) => item !== step) : [...current, step]
+    ));
+  };
+
+  const deleteSelectedSteps = () => {
+    if (!selectedSteps.length) return;
+    onUpdate({ steps: template.steps.filter((step) => !selectedSteps.includes(step)) });
+    setSelectedSteps([]);
   };
 
   const addChecklist = () => {
@@ -5432,6 +5648,62 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
       ],
     });
     setNewTracker({ name: '', extensions: '' });
+  };
+
+  const updateTracker = (trackerId, patch) => {
+    onUpdate({
+      fileTrackers: template.fileTrackers.map((tracker) => (
+        tracker.id === trackerId ? { ...tracker, ...patch } : tracker
+      )),
+    });
+  };
+
+  const reorderTracker = (sourceId, targetId, position = 'before') => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const current = [...template.fileTrackers];
+    const sourceIndex = current.findIndex((tracker) => tracker.id === sourceId);
+    let targetIndex = current.findIndex((tracker) => tracker.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const [moved] = current.splice(sourceIndex, 1);
+    targetIndex = current.findIndex((tracker) => tracker.id === targetId);
+    current.splice(targetIndex + (position === 'after' ? 1 : 0), 0, moved);
+    onUpdate({ fileTrackers: current });
+  };
+
+  const trackerDropAtPoint = (x, y) => {
+    const row = document.elementFromPoint(x, y)?.closest?.('[data-template-tracker-id]');
+    if (!row) return { id: '', position: 'before' };
+    const rect = row.getBoundingClientRect();
+    return { id: row.dataset.templateTrackerId || '', position: y > rect.top + rect.height / 2 ? 'after' : 'before' };
+  };
+
+  const startTrackerDrag = (event, trackerId) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    trackerDragRef.current = { trackerId };
+    setDragTrackerId(trackerId);
+    setDragTrackerOverId('');
+    setDragTrackerPosition('before');
+  };
+
+  const moveTrackerDrag = (event) => {
+    const drag = trackerDragRef.current;
+    if (!drag) return;
+    const target = trackerDropAtPoint(event.clientX, event.clientY);
+    setDragTrackerOverId(target.id && target.id !== drag.trackerId ? target.id : '');
+    setDragTrackerPosition(target.position);
+  };
+
+  const endTrackerDrag = (event) => {
+    const drag = trackerDragRef.current;
+    if (!drag) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const target = trackerDropAtPoint(event.clientX, event.clientY);
+    reorderTracker(drag.trackerId, dragTrackerOverId || target.id, dragTrackerPosition || target.position);
+    trackerDragRef.current = null;
+    setDragTrackerId('');
+    setDragTrackerOverId('');
+    setDragTrackerPosition('before');
   };
 
   return (
@@ -5464,10 +5736,19 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
               <div className="inline-entry">
                 <input value={newStep} onChange={(event) => setNewStep(event.target.value)} placeholder="New step" />
                 <button onClick={addStep}>Add</button>
+                {selectedSteps.length > 0 && (
+                  <button className="danger-fill" onClick={deleteSelectedSteps}>Delete Selected</button>
+                )}
               </div>
               <div className="step-tags template-tags">
                 {template.steps.map((step) => (
-                  <button key={step} className="tag active" onClick={() => onUpdate({ steps: template.steps.filter((item) => item !== step) })}>{step}</button>
+                  <button
+                    key={step}
+                    className={`tag ${selectedSteps.includes(step) ? 'selected-delete' : 'active'}`}
+                    onClick={() => toggleSelectedStep(step)}
+                  >
+                    {step}
+                  </button>
                 ))}
               </div>
             </article>
@@ -5492,9 +5773,24 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
                 <button onClick={addTracker}>Add</button>
               </div>
               {template.fileTrackers.map((tracker) => (
-                <div key={tracker.id} className="list-line">
-                  <span>{tracker.name} {tracker.extensions ? `(${tracker.extensions})` : ''}</span>
-                  <button className="ghost" onClick={() => onUpdate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
+                <div
+                  key={tracker.id}
+                  data-template-tracker-id={tracker.id}
+                  className={`tracker-edit-row ${dragTrackerId === tracker.id ? 'dragging' : ''} ${dragTrackerOverId === tracker.id ? `drop-${dragTrackerPosition}` : ''}`}
+                >
+                  <span
+                    className="drag-handle"
+                    title="Drag to reorder"
+                    onPointerDown={(event) => startTrackerDrag(event, tracker.id)}
+                    onPointerMove={moveTrackerDrag}
+                    onPointerUp={endTrackerDrag}
+                    onPointerCancel={endTrackerDrag}
+                  >
+                    ::
+                  </span>
+                  <input value={tracker.name} onChange={(event) => updateTracker(tracker.id, { name: event.target.value })} placeholder="Tracker name" />
+                  <input value={tracker.extensions || ''} onChange={(event) => updateTracker(tracker.id, { extensions: event.target.value })} placeholder=".pdf,.dxf" />
+                  <button className="ghost danger-button" onClick={() => onUpdate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
                 </div>
               ))}
             </article>

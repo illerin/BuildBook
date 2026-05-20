@@ -85,6 +85,21 @@ export async function prepareEditableFile(path, name, library) {
   return invoke('prepare_edit_file', { path, name, library });
 }
 
+export async function pickLinkedFilePath() {
+  if (!isTauri()) return '';
+  return invoke('pick_file_path');
+}
+
+export async function pickLinkedFolderPath() {
+  if (!isTauri()) return '';
+  return invoke('pick_folder_path');
+}
+
+export async function listLinkedFolderFiles(path) {
+  if (!isTauri() || !path) return [];
+  return invoke('list_folder_files', { path });
+}
+
 export async function downloadUrlFile(url, library, name) {
   if (!isTauri()) {
     const response = await fetch(url);
@@ -187,9 +202,9 @@ export function assetUrl(path) {
   return isTauri() ? convertFileSrc(path) : path;
 }
 
-export async function startLanServer(port, token) {
+export async function startLanServer(port, token, requireToken = true) {
   if (!isTauri()) return { running: false, url: '' };
-  return invoke('start_lan_server', { port: Number(port) || 8787, token });
+  return invoke('start_lan_server', { port: Number(port) || 8787, token, requireToken });
 }
 
 export async function stopLanServer() {

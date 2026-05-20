@@ -20,6 +20,9 @@ pub fn run() {
             read_file_bytes,
             open_file_path,
             open_file_with_program,
+            pick_file_path,
+            pick_folder_path,
+            list_folder_files,
             start_lan_server,
             stop_lan_server,
             lan_server_status
@@ -66,6 +69,15 @@ struct StoredFile {
     size: u64,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkedFolderFile {
+    name: String,
+    relative_path: String,
+    path: String,
+    size: u64,
+}
+
 #[derive(serde::Serialize, Clone)]
 struct LanServerInfo {
     running: bool,
@@ -77,6 +89,7 @@ struct LanServerHandle {
     port: u16,
     url: String,
     token: String,
+    require_token: bool,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -313,11 +326,14 @@ fn header_value(headers: &str, key: &str) -> String {
 }
 
 fn request_is_authorized(path: &str, headers: &str) -> bool {
-    let expected = lan_mutex()
+    let (expected, require_token) = lan_mutex()
         .lock()
         .ok()
-        .and_then(|guard| guard.as_ref().map(|server| server.token.clone()))
-        .unwrap_or_default();
+        .and_then(|guard| guard.as_ref().map(|server| (server.token.clone(), server.require_token)))
+        .unwrap_or_else(|| (String::new(), true));
+    if !require_token {
+        return true;
+    }
     if expected.is_empty() {
         return false;
     }
@@ -464,13 +480,13 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 }
 
 #[tauri::command]
-fn start_lan_server(app: tauri::AppHandle, port: u16, token: String) -> Result<LanServerInfo, String> {
-    if token.trim().is_empty() {
+fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_token: bool) -> Result<LanServerInfo, String> {
+    if require_token && token.trim().is_empty() {
         return Err("LAN access code is missing.".to_string());
     }
     let mut guard = lan_mutex().lock().map_err(|_| "Could not lock LAN server state.".to_string())?;
     if let Some(server) = guard.as_ref() {
-        if server.port == port && server.token == token {
+        if server.port == port && server.token == token && server.require_token == require_token {
             return Ok(LanServerInfo { running: true, url: server.url.clone(), port: server.port });
         }
         drop(guard);
@@ -497,7 +513,7 @@ fn start_lan_server(app: tauri::AppHandle, port: u16, token: String) -> Result<L
         }
     });
 
-    *guard = Some(LanServerHandle { port, url: url.clone(), token, stop, thread: Some(thread) });
+    *guard = Some(LanServerHandle { port, url: url.clone(), token, require_token, stop, thread: Some(thread) });
     Ok(LanServerInfo { running: true, url, port })
 }
 
@@ -628,6 +644,97 @@ fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
     }
 
     std::fs::read(target).map_err(|error| format!("Could not read file: {error}"))
+}
+
+#[tauri::command]
+fn pick_file_path() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Multiselect = $false
+$dialog.CheckFileExists = $true
+$dialog.Title = 'Select file to link'
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.FileName
+}
+"#;
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .map_err(|error| format!("Could not open file picker: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("File picker is only available on Windows right now.".to_string())
+    }
+}
+
+#[tauri::command]
+fn pick_folder_path() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = 'Select folder to link'
+$dialog.ShowNewFolderButton = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  Write-Output $dialog.SelectedPath
+}
+"#;
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", script])
+            .output()
+            .map_err(|error| format!("Could not open folder picker: {error}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Folder picker is only available on Windows right now.".to_string())
+    }
+}
+
+fn collect_folder_files(root: &std::path::Path, current: &std::path::Path, files: &mut Vec<LinkedFolderFile>) -> Result<(), String> {
+    for entry in std::fs::read_dir(current).map_err(|error| format!("Could not read folder: {error}"))? {
+        let entry = entry.map_err(|error| format!("Could not read folder entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_folder_files(root, &path, files)?;
+        } else if path.is_file() {
+            let relative_path = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
+            files.push(LinkedFolderFile {
+                name: path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_else(|| relative_path.clone()),
+                relative_path,
+                path: path.to_string_lossy().to_string(),
+                size: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+            });
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_folder_files(path: String) -> Result<Vec<LinkedFolderFile>, String> {
+    let root = std::path::PathBuf::from(path.trim_matches('"'));
+    if !root.is_dir() {
+        return Err("The selected folder could not be found.".to_string());
+    }
+    let mut files = Vec::new();
+    collect_folder_files(&root, &root, &mut files)?;
+    Ok(files)
 }
 
 #[tauri::command]

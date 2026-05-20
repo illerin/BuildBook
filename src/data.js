@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.81';
+export const APP_VERSION = '0.3.93';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -49,6 +49,7 @@ export const DEFAULT_STATE = {
     enabled: false,
     port: 8787,
     token: '',
+    requireToken: true,
   },
   categories: DEFAULT_CATEGORIES,
   template: {
@@ -169,6 +170,7 @@ export function normalizeState(raw) {
       enabled: Boolean(state.lanServer?.enabled),
       port: Number(state.lanServer?.port) || DEFAULT_STATE.lanServer.port,
       token: typeof state.lanServer?.token === 'string' ? state.lanServer.token : '',
+      requireToken: state.lanServer?.requireToken !== false,
     },
   };
 }
