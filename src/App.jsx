@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   APP_VERSION,
+  DEFAULT_THEME,
   STATUSES,
   categoryLabel,
   fileTrackerLabel,
@@ -24,6 +25,7 @@ import {
   pickLinkedFolderPath,
   pickLinkedFilePath,
   prepareEditableFile,
+  readShellThumbnail,
   readStoredFile,
   saveBytesFile,
   savePickedFile,
@@ -41,6 +43,52 @@ const TABS = [
   ['imports', 'Imports'],
   ['settings', 'Settings'],
 ];
+
+const THEME_FIELDS = [
+  ['bg', 'App background'],
+  ['sidebar', 'Sidebar background'],
+  ['surface', 'Panel background'],
+  ['surfaceRaised', 'Raised controls'],
+  ['field', 'Input background'],
+  ['border', 'Border'],
+  ['text', 'Main text'],
+  ['textMuted', 'Muted text'],
+  ['textSoft', 'Soft text'],
+  ['accent', 'Primary blue'],
+  ['accentFill', 'Active blue'],
+  ['success', 'Success green'],
+  ['successHover', 'Success hover'],
+  ['danger', 'Danger red'],
+  ['dangerHover', 'Danger hover'],
+  ['warning', 'Warning yellow'],
+];
+
+const THEME_CSS_VARS = {
+  bg: '--bg',
+  sidebar: '--sidebar',
+  surface: '--surface',
+  surfaceRaised: '--surface-raised',
+  field: '--field',
+  border: '--border',
+  text: '--text',
+  textMuted: '--text-muted',
+  textSoft: '--text-soft',
+  accent: '--accent',
+  accentFill: '--accent-fill',
+  success: '--success',
+  successHover: '--success-hover',
+  danger: '--danger',
+  dangerHover: '--danger-hover',
+  warning: '--warning',
+};
+
+function normalizeTheme(theme) {
+  return { ...DEFAULT_THEME, ...(theme && typeof theme === 'object' ? theme : {}) };
+}
+
+function validHexColor(value) {
+  return /^#[0-9a-fA-F]{6}$/.test(String(value || ''));
+}
 
 function safeName(value) {
   return String(value || 'item')
@@ -1493,6 +1541,14 @@ export default function App() {
     loadAppState().then(setState);
   }, []);
 
+  useEffect(() => {
+    if (!state) return;
+    const theme = normalizeTheme(state.theme);
+    Object.entries(THEME_CSS_VARS).forEach(([key, cssVar]) => {
+      document.documentElement.style.setProperty(cssVar, theme[key]);
+    });
+  }, [state?.theme]);
+
   const updateState = (recipe) => {
     setState((current) => {
       const next = normalizeState(recipe(current));
@@ -2327,7 +2383,10 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
             <div key={file.id} className={`latest latest-${index % 5}`}>
               <strong>{fileTrackerLabel(template.fileTrackers, file.trackerId)}</strong>
               <span>{file.name}</span>
-              {file.path && <button className="ghost" onClick={() => openStoredFile(file.path)}>Open</button>}
+              <div className="latest-file-actions">
+                {file.path && <button className="ghost" onClick={() => openStoredFile(file.path)}>Open</button>}
+                {(file.path || file.type === 'folder') && <button className="ghost" onClick={() => downloadStoredProjectFile(file)}>Download</button>}
+              </div>
             </div>
           )) : <p>No latest files attached.</p>}
         </article>
@@ -2338,6 +2397,7 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'];
 const TEXT_EXTENSIONS = ['.txt', '.md', '.json', '.ino', '.cpp', '.c', '.h', '.hpp', '.py', '.js', '.ts', '.tsx', '.jsx', '.html', '.css'];
+const SHELL_THUMBNAIL_EXTENSIONS = ['.sldprt', '.sldasm', '.slddrw', '.dwg', '.step', '.stp'];
 const MODEL_TRIANGLE_LIMIT = 50000;
 const EXTERNAL_VIEWER_MESSAGES = {
   '.dwg': 'DWG preview is not available inline. Open this file in a CAD app.',
@@ -2378,6 +2438,20 @@ async function fileHash(path) {
     hash = Math.imul(hash, 16777619);
   });
   return `${bytes.length}-${hash >>> 0}`;
+}
+
+async function downloadStoredProjectFile(file) {
+  if (!file?.path && file?.type !== 'folder') return;
+  if (file.type === 'folder') {
+    const entries = await Promise.all((file.folderFiles || []).map(async (child) => ({
+      name: child.relativePath || child.name,
+      data: await readStoredFile(child.path),
+    })));
+    downloadBytes(`${safeName(file.name)}.zip`, createZip(entries), 'application/zip');
+    return;
+  }
+  const bytes = await readStoredFile(file.path);
+  downloadBytes(file.name, bytes, 'application/octet-stream');
 }
 
 function imageMimeType(path = '') {
@@ -2498,6 +2572,53 @@ function StoredImage({ path, alt = '', className = '', style }) {
 
   if (!src) return null;
   return <img src={src} alt={alt} className={className} style={style} draggable={false} />;
+}
+
+function ShellThumbnailPreview({ file }) {
+  const [src, setSrc] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    let objectUrl = '';
+    setSrc('');
+    setError('');
+
+    readShellThumbnail(file.path, 768)
+      .then((bytes) => {
+        if (!active || !bytes?.length) {
+          if (active) setError('Windows did not return a thumbnail for this file.');
+          return;
+        }
+        objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'image/bmp' }));
+        setSrc(objectUrl);
+      })
+      .catch((thumbnailError) => {
+        if (active) setError(String(thumbnailError || 'Windows did not return a thumbnail for this file.'));
+      });
+
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [file.path]);
+
+  if (src) {
+    return (
+      <div className="shell-thumbnail-preview">
+        <img src={src} alt="" draggable={false} />
+        <span>Windows thumbnail preview</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="file-preview-empty">
+      <strong>{file.name}</strong>
+      <p>{error || 'Loading Windows thumbnail...'}</p>
+      <button className="ghost" onClick={() => openStoredFile(file.path)}>Open File</button>
+    </div>
+  );
 }
 
 function PdfPreview({ path, title, className = 'file-preview-frame' }) {
@@ -3219,6 +3340,10 @@ function FilePreview({ file }) {
     return <DxfPreview file={file} />;
   }
 
+  if (SHELL_THUMBNAIL_EXTENSIONS.includes(extension)) {
+    return <ShellThumbnailPreview file={file} />;
+  }
+
   if (EXTERNAL_VIEWER_MESSAGES[extension]) {
     return (
       <div className="file-preview-empty">
@@ -3245,6 +3370,7 @@ function isPreviewableFile(file) {
     || IMAGE_EXTENSIONS.includes(extension)
     || TEXT_EXTENSIONS.includes(extension)
     || ['.csv', '.xlsx', '.stl', '.obj', '.dxf'].includes(extension)
+    || SHELL_THUMBNAIL_EXTENSIONS.includes(extension)
     || Boolean(EXTERNAL_VIEWER_MESSAGES[extension])
   );
 }
@@ -3791,7 +3917,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const removeFile = (fileId) => onUpdate({ files: project.files.filter((file) => file.id !== fileId) });
   const updateFile = (fileId, patch) => onUpdate({ files: project.files.map((file) => file.id === fileId ? { ...file, ...patch } : file) });
   const integrityCheckable = (file) => Boolean(file.path || file.type === 'folder');
-  const visibleIntegrityStatus = (file) => (['changed', 'missing'].includes(file.integrityStatus) ? file.integrityStatus : '');
+  const autoIntegrityCheckable = (file) => file.latest && integrityCheckable(file);
+  const visibleIntegrityStatus = (file) => (file.latest && ['changed', 'missing'].includes(file.integrityStatus) ? file.integrityStatus : '');
   const checkAttachmentIntegrity = async (file) => {
     if (!integrityCheckable(file)) return;
     try {
@@ -3862,11 +3989,11 @@ function ProjectFilesTab({ project, template, onUpdate }) {
 
   const checkAllAttachmentIntegrity = async () => {
     const currentFiles = projectFilesRef.current;
-    if (autoIntegrityBusyRef.current || !currentFiles.some(integrityCheckable)) return;
+    if (autoIntegrityBusyRef.current || !currentFiles.some(autoIntegrityCheckable)) return;
     autoIntegrityBusyRef.current = true;
     try {
       const checkedFiles = await Promise.all(currentFiles.map(async (file) => {
-        if (!integrityCheckable(file)) return file;
+        if (!autoIntegrityCheckable(file)) return file;
         try {
           if (file.type === 'folder') {
             const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
@@ -3913,18 +4040,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     return () => window.clearInterval(timer);
   }, [project.id]);
   const downloadProjectFile = async (file) => {
-    if (!file.path && file.type !== 'folder') return;
     try {
-      if (file.type === 'folder') {
-        const entries = await Promise.all((file.folderFiles || []).map(async (child) => ({
-          name: child.relativePath || child.name,
-          data: await readStoredFile(child.path),
-        })));
-        downloadBytes(`${safeName(file.name)}.zip`, createZip(entries), 'application/zip');
-        return;
-      }
-      const bytes = await readStoredFile(file.path);
-      downloadBytes(file.name, bytes, 'application/octet-stream');
+      await downloadStoredProjectFile(file);
     } catch (error) {
       setFileError(String(error));
     }
@@ -4161,16 +4278,6 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                     {expanded ? 'Collapse' : 'Show all'}
                   </button>
                 )}
-                {files.some((file) => editSessions[file.id]) && (
-                  <button
-                    className="ghost"
-                    onClick={() => files.forEach((file) => {
-                      if (editSessions[file.id]) checkFileChanges(file);
-                    })}
-                  >
-                    Check for changes
-                  </button>
-                )}
               </div>
             </div>
             <div className="file-table">
@@ -4193,7 +4300,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                   </div>
                   {(file.path || file.type === 'folder' || editSessions[file.id] || tracker.programPath) && (
                     <div className="file-extra-actions">
-                      {file.integrityStatus === 'changed' && <button className="ghost" onClick={() => acceptCurrentFileVersion(file)}>Update</button>}
+                      {file.latest && file.integrityStatus === 'changed' && <button className="ghost" onClick={() => acceptCurrentFileVersion(file)}>Update</button>}
                       {file.path && tracker.programPath && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
                     </div>
                   )}
@@ -5401,6 +5508,7 @@ function Imports({ state, updateState }) {
 
 function Settings({ state, updateState }) {
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
+  const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [backupNotice, setBackupNotice] = useState('');
   const [backupBusy, setBackupBusy] = useState(false);
@@ -5416,6 +5524,10 @@ function Settings({ state, updateState }) {
 
   const updateLanServer = (patch) => {
     updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), ...patch } }));
+  };
+
+  const updateTheme = (theme) => {
+    updateState((current) => ({ ...current, theme: normalizeTheme(theme) }));
   };
 
   const regenerateLanToken = () => {
@@ -5514,6 +5626,11 @@ function Settings({ state, updateState }) {
         <button className="settings-template-button" onClick={() => setShowTemplatePreview(true)}>Project Template</button>
       </section>
       <section className="panel settings-section">
+        <h2>Color Theme</h2>
+        <p>Review current app colors, adjust theme tokens, and export or import a portable theme file.</p>
+        <button className="settings-template-button" onClick={() => setShowThemeEditor(true)}>Theme Editor</button>
+      </section>
+      <section className="panel settings-section">
         <h2>Backup and Restore</h2>
         <p>Backup downloads a portable zip containing app records, files, photos, documents, imports, and settings.</p>
         <div className="button-row backup-actions">
@@ -5601,6 +5718,125 @@ function Settings({ state, updateState }) {
           onUpdate={updateTemplate}
         />
       )}
+      {showThemeEditor && (
+        <ThemeEditorModal
+          theme={state.theme}
+          onClose={() => setShowThemeEditor(false)}
+          onSave={updateTheme}
+        />
+      )}
+    </div>
+  );
+}
+
+function ThemeEditorModal({ theme, onClose, onSave }) {
+  const [draft, setDraft] = useState(() => normalizeTheme(theme));
+  const [error, setError] = useState('');
+
+  const updateDraft = (key, value) => {
+    setDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const exportTheme = () => {
+    const payload = {
+      type: 'buildbook-theme',
+      version: APP_VERSION,
+      theme: normalizeTheme(draft),
+    };
+    downloadBytes('buildbook-theme.json', new TextEncoder().encode(JSON.stringify(payload, null, 2)), 'application/json');
+  };
+
+  const importTheme = async (file) => {
+    if (!file) return;
+    setError('');
+    try {
+      const payload = JSON.parse(await file.text());
+      const nextTheme = payload.theme && typeof payload.theme === 'object' ? payload.theme : payload;
+      setDraft(normalizeTheme(nextTheme));
+    } catch (importError) {
+      setError(String(importError));
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal theme-modal">
+        <div className="section-title">
+          <h2>Theme Editor</h2>
+          <button className="ghost" onClick={onClose}>Close</button>
+        </div>
+        <section className="theme-preview" style={{
+          '--preview-bg': draft.bg,
+          '--preview-sidebar': draft.sidebar,
+          '--preview-surface': draft.surface,
+          '--preview-raised': draft.surfaceRaised,
+          '--preview-field': draft.field,
+          '--preview-border': draft.border,
+          '--preview-text': draft.text,
+          '--preview-muted': draft.textMuted,
+          '--preview-accent': draft.accent,
+          '--preview-success': draft.success,
+          '--preview-danger': draft.danger,
+        }}>
+          <aside>
+            <strong>BuildBook</strong>
+            <span>Projects</span>
+            <span className="active">Parts Library</span>
+            <span>Settings</span>
+          </aside>
+          <main>
+            <div className="theme-preview-header">
+              <div>
+                <h3>Parts Library</h3>
+                <p>Preview of the selected theme colors.</p>
+              </div>
+              <button>New Part</button>
+            </div>
+            <div className="theme-preview-grid">
+              <article>
+                <strong>Nema Motor</strong>
+                <span>Motors & Motion</span>
+                <input readOnly value="Drawer 1, Bin 1" />
+              </article>
+              <article>
+                <strong>Earthquake PCB</strong>
+                <span>Prototyping & Tools</span>
+                <button className="danger-fill">Delete</button>
+              </article>
+            </div>
+          </main>
+        </section>
+        <div className="theme-actions">
+          <button onClick={() => onSave(draft)}>Save Theme</button>
+          <button className="secondary" onClick={() => setDraft(DEFAULT_THEME)}>Reset Original</button>
+          <button className="secondary" onClick={exportTheme}>Export Theme</button>
+          <label className="file-picker header-picker backup-button">
+            <input
+              type="file"
+              accept=".json"
+              onChange={(event) => {
+                importTheme(event.target.files?.[0]);
+                event.target.value = '';
+              }}
+            />
+            Import Theme
+          </label>
+        </div>
+        {error && <p className="error-text">{error}</p>}
+        <div className="theme-color-grid">
+          {THEME_FIELDS.map(([key, label]) => (
+            <div key={key} className="theme-color-row">
+              <span>{label}</span>
+              <div className="theme-swatch-pair">
+                <i style={{ background: DEFAULT_THEME[key] }} title={DEFAULT_THEME[key]} />
+                <i style={{ background: draft[key] }} title={draft[key]} />
+              </div>
+              <input type="color" value={validHexColor(draft[key]) ? draft[key] : DEFAULT_THEME[key]} onChange={(event) => updateDraft(key, event.target.value)} />
+              <input value={draft[key]} onChange={(event) => updateDraft(key, event.target.value)} />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

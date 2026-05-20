@@ -128,6 +128,11 @@ export async function readStoredFile(path) {
   return new Uint8Array(await invoke('read_file_bytes', { path }));
 }
 
+export async function readShellThumbnail(path, size = 512) {
+  if (!path || !isTauri()) return new Uint8Array();
+  return new Uint8Array(await invoke('shell_thumbnail_bytes', { path, size }));
+}
+
 export function downloadBytes(name, bytes, type = 'application/octet-stream') {
   const blob = new Blob([bytes], { type });
   const url = URL.createObjectURL(blob);

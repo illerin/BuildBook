@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.93';
+export const APP_VERSION = '0.3.101';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -41,6 +41,25 @@ export const DEFAULT_PROJECT_STEPS = [
   'Documentation',
 ];
 
+export const DEFAULT_THEME = {
+  bg: '#0f1117',
+  sidebar: '#161b22',
+  surface: '#161b22',
+  surfaceRaised: '#21262d',
+  field: '#0d1117',
+  border: '#30363d',
+  text: '#e1e4e8',
+  textMuted: '#8b949e',
+  textSoft: '#c9d1d9',
+  accent: '#58a6ff',
+  accentFill: '#1f6feb',
+  success: '#238636',
+  successHover: '#2ea043',
+  danger: '#da3633',
+  dangerHover: '#f85149',
+  warning: '#d29922',
+};
+
 const now = () => new Date().toISOString();
 
 export const DEFAULT_STATE = {
@@ -51,6 +70,7 @@ export const DEFAULT_STATE = {
     token: '',
     requireToken: true,
   },
+  theme: DEFAULT_THEME,
   categories: DEFAULT_CATEGORIES,
   template: {
     steps: DEFAULT_PROJECT_STEPS,
@@ -146,6 +166,10 @@ export function normalizeState(raw) {
     ...state,
     version: APP_VERSION,
     categories,
+    theme: {
+      ...DEFAULT_THEME,
+      ...(state.theme && typeof state.theme === 'object' ? state.theme : {}),
+    },
     template: {
       ...DEFAULT_STATE.template,
       ...template,
