@@ -23,6 +23,8 @@ pub fn run() {
             pick_file_path,
             pick_folder_path,
             list_folder_files,
+            scan_storage,
+            cleanup_orphaned_files,
             shell_thumbnail_bytes,
             start_lan_server,
             stop_lan_server,
@@ -77,6 +79,28 @@ struct LinkedFolderFile {
     relative_path: String,
     path: String,
     size: u64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrphanFile {
+    name: String,
+    path: String,
+    relative_path: String,
+    size: u64,
+    modified_at: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageScan {
+    file_count: usize,
+    total_bytes: u64,
+    orphan_count: usize,
+    orphan_bytes: u64,
+    deleted_count: usize,
+    deleted_bytes: u64,
+    orphans: Vec<OrphanFile>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -870,6 +894,108 @@ fn list_folder_files(path: String) -> Result<Vec<LinkedFolderFile>, String> {
     let mut files = Vec::new();
     collect_folder_files(&root, &root, &mut files)?;
     Ok(files)
+}
+
+fn collect_storage_files(current: &std::path::Path, files: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    if !current.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(current).map_err(|error| format!("Could not scan storage: {error}"))? {
+        let entry = entry.map_err(|error| format!("Could not read storage entry: {error}"))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_storage_files(&path, files)?;
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn storage_roots(app: &tauri::AppHandle) -> Result<Vec<std::path::PathBuf>, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data folder: {error}"))?;
+    Ok(vec![app_dir.join("uploads"), app_dir.join("working")])
+}
+
+fn storage_relative_path(roots: &[std::path::PathBuf], path: &std::path::Path) -> String {
+    roots
+        .iter()
+        .find_map(|root| path.strip_prefix(root).ok().map(|value| value.to_string_lossy().replace('\\', "/")))
+        .unwrap_or_else(|| path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default())
+}
+
+fn modified_millis(path: &std::path::Path) -> String {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_default()
+}
+
+fn scan_storage_inner(app: tauri::AppHandle, referenced_paths: Vec<String>, delete_paths: Vec<String>) -> Result<StorageScan, String> {
+    let roots = storage_roots(&app)?;
+    let referenced: std::collections::HashSet<String> = referenced_paths
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path.trim_matches('"')).ok())
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect();
+    let delete_set: std::collections::HashSet<String> = delete_paths
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path.trim_matches('"')).ok())
+        .map(|path| path.to_string_lossy().to_lowercase())
+        .collect();
+    let mut files = Vec::new();
+    for root in &roots {
+        collect_storage_files(root, &mut files)?;
+    }
+
+    let mut result = StorageScan {
+        file_count: 0,
+        total_bytes: 0,
+        orphan_count: 0,
+        orphan_bytes: 0,
+        deleted_count: 0,
+        deleted_bytes: 0,
+        orphans: Vec::new(),
+    };
+
+    for file in files {
+        let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        result.file_count += 1;
+        result.total_bytes += size;
+        let canonical = std::fs::canonicalize(&file).unwrap_or(file.clone()).to_string_lossy().to_lowercase();
+        if referenced.contains(&canonical) {
+            continue;
+        }
+        result.orphan_count += 1;
+        result.orphan_bytes += size;
+        result.orphans.push(OrphanFile {
+            name: file.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default(),
+            path: file.to_string_lossy().to_string(),
+            relative_path: storage_relative_path(&roots, &file),
+            size,
+            modified_at: modified_millis(&file),
+        });
+        if delete_set.contains(&canonical) && std::fs::remove_file(&file).is_ok() {
+            result.deleted_count += 1;
+            result.deleted_bytes += size;
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn scan_storage(app: tauri::AppHandle, referenced_paths: Vec<String>) -> Result<StorageScan, String> {
+    scan_storage_inner(app, referenced_paths, Vec::new())
+}
+
+#[tauri::command]
+fn cleanup_orphaned_files(app: tauri::AppHandle, referenced_paths: Vec<String>, delete_paths: Vec<String>) -> Result<StorageScan, String> {
+    scan_storage_inner(app, referenced_paths, delete_paths)
 }
 
 #[tauri::command]

@@ -128,6 +128,16 @@ export async function readStoredFile(path) {
   return new Uint8Array(await invoke('read_file_bytes', { path }));
 }
 
+export async function scanStorage(referencedPaths) {
+  if (!isTauri()) return { fileCount: 0, totalBytes: 0, orphanCount: 0, orphanBytes: 0 };
+  return invoke('scan_storage', { referencedPaths });
+}
+
+export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
+  if (!isTauri()) return { fileCount: 0, totalBytes: 0, orphanCount: 0, orphanBytes: 0, deletedCount: 0, deletedBytes: 0 };
+  return invoke('cleanup_orphaned_files', { referencedPaths, deletePaths });
+}
+
 export async function readShellThumbnail(path, size = 512) {
   if (!path || !isTauri()) return new Uint8Array();
   return new Uint8Array(await invoke('shell_thumbnail_bytes', { path, size }));

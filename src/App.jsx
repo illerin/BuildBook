@@ -12,6 +12,7 @@ import {
 import {
   acceptFromExtensions,
   assetUrl,
+  cleanupOrphanedFiles,
   downloadBytes,
   downloadUrlFile,
   extensionAllowed,
@@ -27,6 +28,7 @@ import {
   prepareEditableFile,
   readShellThumbnail,
   readStoredFile,
+  scanStorage,
   saveBytesFile,
   savePickedFile,
   startLanServer,
@@ -44,6 +46,22 @@ const TABS = [
   ['settings', 'Settings'],
 ];
 
+const DEFAULT_PROJECT_EXPORT_OPTIONS = {
+  overviewNotes: true,
+  overviewChecklist: true,
+  instructions: true,
+  photos: true,
+  linkedParts: true,
+  latestFiles: true,
+  allFileVersions: false,
+  partDocuments: true,
+};
+
+const FULL_PROJECT_EXPORT_OPTIONS = {
+  ...DEFAULT_PROJECT_EXPORT_OPTIONS,
+  allFileVersions: true,
+};
+
 const THEME_FIELDS = [
   ['bg', 'App background'],
   ['sidebar', 'Sidebar background'],
@@ -51,6 +69,7 @@ const THEME_FIELDS = [
   ['surfaceRaised', 'Raised controls'],
   ['field', 'Input background'],
   ['border', 'Border'],
+  ['borderSoft', 'Soft border'],
   ['text', 'Main text'],
   ['textMuted', 'Muted text'],
   ['textSoft', 'Soft text'],
@@ -61,6 +80,18 @@ const THEME_FIELDS = [
   ['danger', 'Danger red'],
   ['dangerHover', 'Danger hover'],
   ['warning', 'Warning yellow'],
+  ['projectTagBg', 'Project tag background'],
+  ['projectTagText', 'Project tag text'],
+  ['statusActiveBg', 'Active status background'],
+  ['statusActiveText', 'Active status text'],
+  ['statusPausedBg', 'Paused status background'],
+  ['statusPausedText', 'Paused status text'],
+  ['statusWaitingBg', 'Waiting status background'],
+  ['statusWaitingText', 'Waiting status text'],
+  ['statusCompletedBg', 'Completed status background'],
+  ['statusCompletedText', 'Completed status text'],
+  ['statusArchivedBg', 'Archived status background'],
+  ['statusArchivedText', 'Archived status text'],
 ];
 
 const THEME_CSS_VARS = {
@@ -70,6 +101,7 @@ const THEME_CSS_VARS = {
   surfaceRaised: '--surface-raised',
   field: '--field',
   border: '--border',
+  borderSoft: '--border-soft',
   text: '--text',
   textMuted: '--text-muted',
   textSoft: '--text-soft',
@@ -80,6 +112,18 @@ const THEME_CSS_VARS = {
   danger: '--danger',
   dangerHover: '--danger-hover',
   warning: '--warning',
+  projectTagBg: '--project-tag-bg',
+  projectTagText: '--project-tag-text',
+  statusActiveBg: '--status-active-bg',
+  statusActiveText: '--status-active-text',
+  statusPausedBg: '--status-paused-bg',
+  statusPausedText: '--status-paused-text',
+  statusWaitingBg: '--status-waiting-bg',
+  statusWaitingText: '--status-waiting-text',
+  statusCompletedBg: '--status-completed-bg',
+  statusCompletedText: '--status-completed-text',
+  statusArchivedBg: '--status-archived-bg',
+  statusArchivedText: '--status-archived-text',
 };
 
 function normalizeTheme(theme) {
@@ -88,6 +132,14 @@ function normalizeTheme(theme) {
 
 function validHexColor(value) {
   return /^#[0-9a-fA-F]{6}$/.test(String(value || ''));
+}
+
+function trackerColor(trackers, trackerId) {
+  return trackers.find((tracker) => tracker.id === trackerId)?.color || '#58a6ff';
+}
+
+function cssColor(name, fallback) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
 }
 
 function safeName(value) {
@@ -402,7 +454,68 @@ function buildGuideHtml(project, parts, categories, fileTrackers) {
     </section>
   </main>
 </body>
-</html>`;
+  </html>`;
+}
+
+function buildInstructionsHtml(project, parts, photoArchiveById = new Map()) {
+  const instructions = project.instructions || { intro: '', steps: [] };
+  const partRows = project.partIds.map((partId) => {
+    const part = parts.find((item) => item.id === partId);
+    if (!part) return '';
+    return `<li>${escapeHtml(part.name)} <span class="muted">Qty ${Number(project.partQuantities?.[partId]) || 1}</span></li>`;
+  }).join('');
+  const stepRows = (instructions.steps || []).map((step, index) => {
+    const photoPath = step.photoId ? photoArchiveById.get(step.photoId) : '';
+    return `<section>
+      <h2>Step ${index + 1}: ${escapeHtml(step.title || '')}</h2>
+      ${photoPath ? `<img src="${escapeHtml(photoPath)}" alt="${escapeHtml(step.title || `Step ${index + 1}`)}">` : ''}
+      <div>${step.body || ''}</div>
+    </section>`;
+  }).join('');
+  return `<!doctype html>
+  <html>
+  <head>
+    <meta charset="utf-8">
+    <title>${escapeHtml(project.name)} Instructions</title>
+    <style>
+      body { margin: 0; background: #f4f3ef; color: #24302f; font-family: Segoe UI, Arial, sans-serif; line-height: 1.55; }
+      main { max-width: 920px; margin: 0 auto; padding: 32px 22px; }
+      section { border: 1px solid #d8d5ca; border-radius: 8px; background: white; padding: 18px; margin: 16px 0; }
+      img { display: block; max-width: 100%; max-height: 720px; object-fit: contain; border: 1px solid #d8d5ca; border-radius: 8px; margin: 12px 0; }
+      .muted { color: #66706d; }
+      @media print { body { background: white; } section { break-inside: avoid; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>${escapeHtml(project.name)}</h1>
+      <section><h2>Intro</h2><div>${instructions.intro || ''}</div></section>
+      <section><h2>Parts List</h2><ul>${partRows || '<li>No linked parts.</li>'}</ul></section>
+      ${stepRows || '<section><p class="muted">No instruction steps yet.</p></section>'}
+    </main>
+  </body>
+  </html>`;
+}
+
+async function storedImageDataUri(path, name = '') {
+  if (!path) return '';
+  const bytes = await readStoredFile(path);
+  let binary = '';
+  new Uint8Array(bytes).forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return `data:${imageMimeType(name || path)};base64,${btoa(binary)}`;
+}
+
+async function buildPrintableInstructionsHtml(project, parts) {
+  const photoArchiveById = new Map();
+  for (const folder of project.photoFolders || []) {
+    for (const photo of folder.photos || []) {
+      const path = photo.markupPath || photo.path;
+      if (path) photoArchiveById.set(photo.id, await storedImageDataUri(path, photo.name));
+    }
+  }
+  return buildInstructionsHtml(project, parts, photoArchiveById);
 }
 
 async function addFileEntry(entries, path, packagePath) {
@@ -589,6 +702,27 @@ async function buildFullBackupPackage(state) {
       return packagePath ? { ...image, path: '', packagePath } : image;
     }));
 
+    project.photoFolders = await Promise.all((project.photoFolders || []).map(async (folder) => ({
+      ...folder,
+      photos: await Promise.all((folder.photos || []).map(async (photo) => {
+        const packagePath = await addFileEntry(entries, photo.path, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/${safeName(photo.id)}-${safeName(photo.name)}`);
+        const markupPackagePath = await addFileEntry(entries, photo.markupPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/markup-${safeName(photo.id)}-${safeName(photo.name)}`);
+        const thumbnailPackagePath = await addFileEntry(entries, photo.thumbnailPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/thumb-${safeName(photo.id)}.jpg`);
+        const markupThumbnailPackagePath = await addFileEntry(entries, photo.markupThumbnailPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/markup-thumb-${safeName(photo.id)}.jpg`);
+        return {
+          ...photo,
+          path: packagePath ? '' : photo.path,
+          markupPath: markupPackagePath ? '' : photo.markupPath,
+          thumbnailPath: thumbnailPackagePath ? '' : photo.thumbnailPath,
+          markupThumbnailPath: markupThumbnailPackagePath ? '' : photo.markupThumbnailPath,
+          packagePath,
+          markupPackagePath,
+          thumbnailPackagePath,
+          markupThumbnailPackagePath,
+        };
+      })),
+    })));
+
     project.files = await Promise.all((project.files || []).map(async (file) => {
       if (file.type === 'folder') {
         const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
@@ -605,6 +739,8 @@ async function buildFullBackupPackage(state) {
   for (const part of backupState.parts || []) {
     part.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.id)}/image/${safeName(part.name)}${fileExtension(part.image) || '.image'}`);
     if (part.imagePackagePath) part.image = '';
+    part.imageThumbnailPackagePath = await addFileEntry(entries, part.imageThumbnail, `parts/${safeName(part.id)}/image/thumb-${safeName(part.name)}.jpg`);
+    if (part.imageThumbnailPackagePath) part.imageThumbnail = '';
     part.documents = await Promise.all((part.documents || []).map(async (doc) => {
       const packagePath = await addFileEntry(entries, doc.path, `parts/${safeName(part.id)}/documents/${safeName(doc.id)}-${safeName(doc.name)}`);
       return packagePath ? { ...doc, path: '', sourcePath: '', storageMode: 'copy', packagePath } : doc;
@@ -647,6 +783,28 @@ async function readFullBackupPackage(file) {
       return restored;
     }));
 
+    project.photoFolders = await Promise.all((project.photoFolders || []).map(async (folder) => ({
+      ...folder,
+      photos: await Promise.all((folder.photos || []).map(async (photo) => {
+        const path = await saveZipAsset(entries, photo.packagePath, photo.name, `project-photos/${project.id}/${folder.id}`);
+        const markupPath = await saveZipAsset(entries, photo.markupPackagePath, `markup-${photo.name}`, `project-photos/${project.id}/markup`);
+        const thumbnailPath = await saveZipAsset(entries, photo.thumbnailPackagePath, `thumb-${photo.name}.jpg`, `project-photos/${project.id}/thumbs`);
+        const markupThumbnailPath = await saveZipAsset(entries, photo.markupThumbnailPackagePath, `markup-thumb-${photo.name}.jpg`, `project-photos/${project.id}/thumbs`);
+        const restored = {
+          ...photo,
+          path: path || photo.path || '',
+          markupPath: markupPath || photo.markupPath || '',
+          thumbnailPath: thumbnailPath || photo.thumbnailPath || '',
+          markupThumbnailPath: markupThumbnailPath || photo.markupThumbnailPath || '',
+        };
+        delete restored.packagePath;
+        delete restored.markupPackagePath;
+        delete restored.thumbnailPackagePath;
+        delete restored.markupThumbnailPackagePath;
+        return restored;
+      })),
+    })));
+
     project.files = await Promise.all((project.files || []).map(async (file) => {
       if (file.type === 'folder') {
         const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
@@ -667,6 +825,8 @@ async function readFullBackupPackage(file) {
   for (const part of restoredState.parts || []) {
     part.image = await saveZipAsset(entries, part.imagePackagePath, `${part.name}-image`, `part-images/${part.id}`) || part.image || '';
     delete part.imagePackagePath;
+    part.imageThumbnail = await saveZipAsset(entries, part.imageThumbnailPackagePath, `thumb-${part.name}.jpg`, `part-images/${part.id}/thumbs`) || part.imageThumbnail || '';
+    delete part.imageThumbnailPackagePath;
     part.documents = await Promise.all((part.documents || []).map(async (doc) => {
       const path = await saveZipAsset(entries, doc.packagePath, doc.name, `part-documents/${part.id}`);
       const restored = path ? { ...doc, path, sourcePath: '', storageMode: 'copy' } : doc;
@@ -990,22 +1150,45 @@ async function readWebProjectPackage(entries) {
   };
 }
 
-async function buildWebProjectPackage(state, project) {
+async function buildWebProjectPackage(state, project, exportOptions = {}) {
+  const options = { ...DEFAULT_PROJECT_EXPORT_OPTIONS, ...exportOptions };
   const entries = [];
   const now = new Date().toISOString();
-  const linkedParts = project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean);
+  const linkedParts = options.linkedParts ? project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean) : [];
   const noteImages = [];
-  const notes = await rewriteNotesForWeb(entries, project.notes, project.id, noteImages);
-  const projectImageName = project.image ? webUploadName('project', project.id, `${project.name}${fileExtension(project.image) || '.image'}`) : '';
+  const notes = options.overviewNotes ? await rewriteNotesForWeb(entries, project.notes, project.id, noteImages) : '';
+  const projectImageName = options.overviewNotes && project.image ? webUploadName('project', project.id, `${project.name}${fileExtension(project.image) || '.image'}`) : '';
   const projectImageArchive = projectImageName ? `project-image/${projectImageName}` : '';
   if (project.image && projectImageName) await addFileEntry(entries, project.image, projectImageArchive);
+  const photoArchiveById = new Map();
+  const photoLibrary = [];
+  const includePhotoAssets = options.photos || options.instructions;
+  if (includePhotoAssets) {
+    for (const folder of project.photoFolders || []) {
+      const exportedPhotos = [];
+      for (const photo of folder.photos || []) {
+        const archivePath = `project-photos/${safeName(folder.name)}/${safeName(photo.name)}`;
+        await addFileEntry(entries, photo.path, archivePath);
+        const markupArchivePath = photo.markupPath ? `project-photos/${safeName(folder.name)}/markup-${safeName(photo.name)}` : '';
+        if (photo.markupPath) await addFileEntry(entries, photo.markupPath, markupArchivePath);
+        photoArchiveById.set(photo.id, markupArchivePath || archivePath);
+        if (options.photos) exportedPhotos.push({ ...photo, path: '', markupPath: '', thumbnailPath: '', markupThumbnailPath: '', archive_path: archivePath, markup_archive_path: markupArchivePath });
+      }
+      if (options.photos) photoLibrary.push({ id: folder.id, name: folder.name, photos: exportedPhotos });
+    }
+  }
 
   const files = [];
   let fileIndex = 1;
-  for (const file of project.files.filter((item) => item.latest)) {
+  const projectFilesToExport = options.allFileVersions
+    ? project.files
+    : options.latestFiles
+      ? project.files.filter((item) => item.latest)
+      : [];
+  for (const file of projectFilesToExport) {
     const addManifestFile = async (sourcePath, originalName, notesText, createdAt, trackerId) => {
       if (!sourcePath) return;
-      const archivePath = `latest-files/${fileIndex}-${safeName(originalName)}`;
+      const archivePath = `${file.latest ? 'latest-files' : 'older-files'}/${fileIndex}-${safeName(originalName)}`;
       await addFileEntry(entries, sourcePath, archivePath);
       const tracker = state.template.fileTrackers.find((item) => item.id === trackerId);
       files.push({
@@ -1015,7 +1198,7 @@ async function buildWebProjectPackage(state, project) {
         tracker_key: webTrackerKey(trackerId),
         file_category: `${tracker?.name || 'Imported'}-${tracker?.extensions || ''}`,
         version_note: notesText || null,
-        is_latest: true,
+        is_latest: Boolean(file.latest),
         uploaded_at: createdAt || now,
         archive_path: archivePath,
       });
@@ -1036,19 +1219,21 @@ async function buildWebProjectPackage(state, project) {
     const partImageArchive = partImageName ? `part-images/${partImageName}` : '';
     if (part.image && partImageArchive) await addFileEntry(entries, part.image, partImageArchive);
     const documents = [];
-    for (const [docIndex, doc] of (part.documents || []).entries()) {
-      const archivePath = `part-documents/${partIndex + 1}/${docIndex + 1}-${safeName(doc.name)}`;
-      await addFileEntry(entries, doc.path, archivePath);
-      documents.push({
-        id: docIndex + 1,
-        file_type: doc.type || guessWebFileType(doc.name),
-        file_path: '',
-        text_content: null,
-        original_filename: doc.name,
-        is_primary: docIndex === 0,
-        uploaded_at: doc.createdAt || now,
-        archive_path: archivePath,
-      });
+    if (options.partDocuments) {
+      for (const [docIndex, doc] of (part.documents || []).entries()) {
+        const archivePath = `part-documents/${partIndex + 1}/${docIndex + 1}-${safeName(doc.name)}`;
+        await addFileEntry(entries, doc.path, archivePath);
+        documents.push({
+          id: docIndex + 1,
+          file_type: doc.type || guessWebFileType(doc.name),
+          file_path: '',
+          text_content: null,
+          original_filename: doc.name,
+          is_primary: docIndex === 0,
+          uploaded_at: doc.createdAt || now,
+          archive_path: archivePath,
+        });
+      }
     }
     parts.push({
       name: part.name,
@@ -1077,18 +1262,27 @@ async function buildWebProjectPackage(state, project) {
     },
     note_images: noteImages.map((image) => ({ image_path: image.image_path, archive_path: image.archive_path })),
     steps: (project.activeSteps || []).map((name, index) => ({ name, order_index: (index + 1) * 10 })),
-    checklist: (project.checklist || []).map((item, index) => ({
+    checklist: options.overviewChecklist ? (project.checklist || []).map((item, index) => ({
       text: item.text,
       is_completed: Boolean(item.completedAt),
       completed_at: item.completedAt || null,
       order_index: index,
-    })),
+    })) : [],
     files,
     parts,
+    photo_library: photoLibrary,
+    instructions: options.instructions ? project.instructions || { intro: '', steps: [] } : { intro: '', steps: [] },
+    desktop_export_options: options,
   };
 
-  entries.unshift({ name: 'project-summary.html', data: buildGuideHtml(project, linkedParts, state.categories, state.template.fileTrackers) });
-  entries.push({ name: 'notes.txt', data: stripHtml(notes) });
+  const summaryProject = {
+    ...project,
+    notes: options.overviewNotes ? project.notes : '',
+    checklist: options.overviewChecklist ? project.checklist : [],
+  };
+  entries.unshift({ name: 'project-summary.html', data: buildGuideHtml(summaryProject, linkedParts, state.categories, state.template.fileTrackers) });
+  if (options.instructions) entries.push({ name: 'instructions.html', data: buildInstructionsHtml(project, linkedParts, photoArchiveById) });
+  if (options.overviewNotes) entries.push({ name: 'notes.txt', data: stripHtml(notes) });
   entries.push({ name: 'project-manifest.json', data: JSON.stringify(manifest, null, 2) });
   entries.push({ name: 'project-data.json', data: JSON.stringify(manifest, null, 2) });
   return createZip(entries);
@@ -1304,10 +1498,13 @@ async function buildProjectPackage(state, project) {
       quantity: Number(project.partQuantities?.[part.id]) || 1,
       image: '',
       imagePackagePath: '',
+      imageThumbnail: '',
+      imageThumbnailPackagePath: '',
       categoryPath: categoryPath(state.categories, part.categoryId),
       documents: [],
     };
     exportedPart.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.name)}/image${fileExtension(part.image) || '.image'}`);
+    exportedPart.imageThumbnailPackagePath = await addFileEntry(entries, part.imageThumbnail, `parts/${safeName(part.name)}/thumb.jpg`);
     entries.push({ name: `parts/${safeName(part.name)}/part-info.txt`, data: partInfoText(part, state.categories) });
     for (const doc of part.documents || []) {
       const packagePath = await addFileEntry(entries, doc.path, `parts/${safeName(part.name)}/documents/${safeName(doc.name)}`);
@@ -1421,6 +1618,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
 
         const newPartId = makeId('part');
         const image = await savePackagedAsset(part.imagePackagePath, `${part.name}-image`, `part-images/${newPartId}`);
+        const imageThumbnail = await savePackagedAsset(part.imageThumbnailPackagePath, `thumb-${part.name}.jpg`, `part-images/${newPartId}/thumbs`);
         const documents = [];
         for (const doc of part.documents || []) {
           const path = await savePackagedAsset(doc.packagePath, doc.name, `part-documents/${newPartId}`);
@@ -1431,12 +1629,14 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
           id: newPartId,
           categoryId: categoryDecisions[part.id] || 'cat-unassigned',
           image,
+          imageThumbnail,
           documents,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
         delete createdPart.categoryPath;
         delete createdPart.imagePackagePath;
+        delete createdPart.imageThumbnailPackagePath;
         createdParts.push(createdPart);
         importedPartIds.push(newPartId);
         importedPartQuantities[newPartId] = Number(part.quantity) || Number(manifest.project.partQuantities?.[part.id]) || 1;
@@ -1535,6 +1735,8 @@ export default function App() {
   const [tab, setTab] = useState('projects');
   const [state, setState] = useState(null);
   const [saveState, setSaveState] = useState('saved');
+  const saveTimerRef = useRef(null);
+  const saveSequenceRef = useRef(0);
   const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
 
   useEffect(() => {
@@ -1549,16 +1751,27 @@ export default function App() {
     });
   }, [state?.theme]);
 
+  useEffect(() => () => {
+    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+  }, []);
+
   const updateState = (recipe) => {
     setState((current) => {
-      const next = normalizeState(recipe(current));
+      const next = normalizeState(typeof recipe === 'function' ? recipe(current) : recipe);
+      const saveSequence = saveSequenceRef.current + 1;
+      saveSequenceRef.current = saveSequence;
       setSaveState('saving');
-      saveAppState(next)
-        .then(() => setSaveState('saved'))
-        .catch((error) => {
-          console.error(error);
-          setSaveState('error');
-        });
+      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(() => {
+        saveAppState(next)
+          .then(() => {
+            if (saveSequenceRef.current === saveSequence) setSaveState('saved');
+          })
+          .catch((error) => {
+            console.error(error);
+            if (saveSequenceRef.current === saveSequence) setSaveState('error');
+          });
+      }, 450);
       return next;
     });
   };
@@ -1689,6 +1902,8 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
       nextSteps: [],
       partIds: [],
       partQuantities: {},
+      photoFolders: [],
+      instructions: { intro: '', steps: [] },
       files: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -1719,6 +1934,37 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
     }));
   };
 
+  const createPartForProject = (projectId, draft) => {
+    const now = new Date().toISOString();
+    const partId = makeId('part');
+    const part = {
+      id: partId,
+      name: draft.name.trim(),
+      categoryId: draft.categoryId || 'cat-unassigned',
+      image: '',
+      productUrl: draft.productUrl || '',
+      storageLocation: draft.storageLocation || '',
+      specSummary: draft.specSummary || '',
+      notes: draft.notes || '',
+      documents: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    updateState((current) => ({
+      ...current,
+      parts: [part, ...current.parts],
+      projects: current.projects.map((project) => project.id === projectId
+        ? {
+            ...project,
+            partIds: project.partIds.includes(partId) ? project.partIds : [...project.partIds, partId],
+            partQuantities: { ...(project.partQuantities || {}), [partId]: Number(draft.quantity) || 1 },
+            updatedAt: now,
+          }
+        : project),
+    }));
+    return partId;
+  };
+
   const duplicateProject = (project) => {
     const now = new Date().toISOString();
     const copy = {
@@ -1729,6 +1975,15 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
       checklist: project.checklist.map((item) => ({ ...item, id: makeId('check') })),
       files: project.files.map((file) => ({ ...file, id: makeId('file') })),
       noteImages: (project.noteImages || []).map((image) => ({ ...image, id: makeId('note-img') })),
+      photoFolders: (project.photoFolders || []).map((folder) => ({
+        ...folder,
+        id: makeId('photo-folder'),
+        photos: (folder.photos || []).map((photo) => ({ ...photo, id: makeId('photo') })),
+      })),
+      instructions: {
+        intro: project.instructions?.intro || '',
+        steps: (project.instructions?.steps || []).map((step) => ({ ...step, id: makeId('instruction-step') })),
+      },
       partQuantities: { ...(project.partQuantities || {}) },
       createdAt: now,
       updatedAt: now,
@@ -1764,6 +2019,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
         onBack={() => setSelectedId('')}
         onUpdate={(patch) => updateProject(selected.id, patch)}
         onUpdatePart={updatePart}
+        onCreatePart={createPartForProject}
         onDuplicate={() => duplicateProject(selected)}
         onDelete={() => deleteProject(selected.id)}
       />
@@ -2036,7 +2292,7 @@ function NoteImageMarkupModal({ source, onCancel, onSave }) {
     const point = canvasPoint(event);
     const previous = lastPointRef.current || point;
     const context = canvasRef.current.getContext('2d');
-    context.strokeStyle = '#f85149';
+    context.strokeStyle = cssColor('--danger-hover', '#f85149');
     context.lineWidth = 5;
     context.lineCap = 'round';
     context.beginPath();
@@ -2215,11 +2471,95 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
   );
 }
 
-function ProjectWorkspace({ state, project, parts, template, categories, onBack, onUpdate, onUpdatePart, onDuplicate, onDelete }) {
+function ProjectExportModal({ project, onCancel, onExport }) {
+  const [format, setFormat] = useState('fullZip');
+  const [options, setOptions] = useState(FULL_PROJECT_EXPORT_OPTIONS);
+  const [exporting, setExporting] = useState(false);
+  const photoCount = (project.photoFolders || []).reduce((total, folder) => total + (folder.photos?.length || 0), 0);
+  const customOptions = format === 'selectedZip';
+
+  const applyFormat = (nextFormat) => {
+    setFormat(nextFormat);
+    if (nextFormat === 'fullZip') setOptions(FULL_PROJECT_EXPORT_OPTIONS);
+    if (nextFormat === 'instructionsPdf' || nextFormat === 'instructionsHtml') {
+      setOptions({
+        ...DEFAULT_PROJECT_EXPORT_OPTIONS,
+        overviewNotes: false,
+        overviewChecklist: false,
+        instructions: true,
+        photos: true,
+        linkedParts: true,
+        latestFiles: false,
+        allFileVersions: false,
+        partDocuments: false,
+      });
+    }
+    if (nextFormat === 'selectedZip') setOptions(DEFAULT_PROJECT_EXPORT_OPTIONS);
+  };
+
+  const toggleOption = (key) => {
+    setOptions((current) => ({
+      ...current,
+      [key]: !current[key],
+      ...(key === 'allFileVersions' && !current[key] ? { latestFiles: true } : {}),
+    }));
+  };
+
+  const runExport = async () => {
+    setExporting(true);
+    try {
+      await onExport(format, options);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onCancel()}>
+      <div className="modal project-export-modal">
+        <div className="section-title">
+          <div>
+            <h2>Export Project</h2>
+            <p>{project.name}</p>
+          </div>
+        </div>
+        <label>
+          Export type
+          <select value={format} onChange={(event) => applyFormat(event.target.value)}>
+            <option value="fullZip">Full project zip</option>
+            <option value="instructionsPdf">Instructions PDF using browser print</option>
+            <option value="instructionsHtml">Instructions HTML</option>
+            <option value="selectedZip">Selected files/photos/parts zip</option>
+          </select>
+        </label>
+        {customOptions && (
+          <div className="export-option-grid">
+            <label><input type="checkbox" checked={options.overviewNotes} onChange={() => toggleOption('overviewNotes')} /><span>Overview Notes</span></label>
+            <label><input type="checkbox" checked={options.overviewChecklist} onChange={() => toggleOption('overviewChecklist')} /><span>Overview Checklist</span></label>
+            <label><input type="checkbox" checked={options.instructions} onChange={() => toggleOption('instructions')} /><span>Instructions</span></label>
+            <label><input type="checkbox" checked={options.photos} onChange={() => toggleOption('photos')} /><span>Photos ({photoCount})</span></label>
+            <label><input type="checkbox" checked={options.linkedParts} onChange={() => toggleOption('linkedParts')} /><span>Linked Parts ({project.partIds.length})</span></label>
+            <label><input type="checkbox" checked={options.partDocuments} onChange={() => toggleOption('partDocuments')} /><span>Part Documents</span></label>
+            <label><input type="checkbox" checked={options.latestFiles} onChange={() => toggleOption('latestFiles')} /><span>Current/latest tracked files</span></label>
+            <label><input type="checkbox" checked={options.allFileVersions} onChange={() => toggleOption('allFileVersions')} /><span>All tracked file versions</span></label>
+            <label><input type="checkbox" checked readOnly /><span>Include project-manifest.json</span></label>
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="secondary" onClick={onCancel} disabled={exporting}>Cancel</button>
+          <button onClick={runExport} disabled={exporting}>{exporting ? 'Exporting...' : 'Export'}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProjectWorkspace({ state, project, parts, template, categories, onBack, onUpdate, onUpdatePart, onCreatePart, onDuplicate, onDelete }) {
   const [projectTab, setProjectTab] = useState('overview');
   const [imageBusy, setImageBusy] = useState(false);
   const [imagePreview, setImagePreview] = useState('');
   const [exportNotice, setExportNotice] = useState('');
+  const [showExportModal, setShowExportModal] = useState(false);
   const linkedParts = project.partIds.map((id) => parts.find((part) => part.id === id)).filter(Boolean);
   const latestFiles = project.files.filter((file) => file.latest);
 
@@ -2241,12 +2581,41 @@ function ProjectWorkspace({ state, project, parts, template, categories, onBack,
     }
   };
 
-  const exportProject = async () => {
-    const bytes = await buildWebProjectPackage(state, project);
-    downloadBytes(`${safeName(project.name)}-export.zip`, bytes, 'application/zip');
-    setExportNotice('Project exported.');
+  const toggleStep = (step) => {
+    const activeSteps = project.activeSteps.includes(step)
+      ? project.activeSteps.filter((item) => item !== step)
+      : [...project.activeSteps, step];
+    onUpdate({ activeSteps });
+  };
+
+  const showExportMessage = (message) => {
+    setExportNotice(message);
     window.clearTimeout(window.__buildBookExportNotice);
     window.__buildBookExportNotice = window.setTimeout(() => setExportNotice(''), 2600);
+  };
+
+  const exportProject = async (format, options) => {
+    const exportParts = options.linkedParts ? linkedParts : [];
+    if (format === 'instructionsPdf') {
+      const html = await buildPrintableInstructionsHtml(project, exportParts);
+      const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      window.open(url, '_blank');
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      showExportMessage('Instructions opened. Use browser print to save as PDF.');
+      setShowExportModal(false);
+      return;
+    }
+    if (format === 'instructionsHtml') {
+      const html = await buildPrintableInstructionsHtml(project, exportParts);
+      downloadBytes(`${safeName(project.name)}-instructions.html`, new TextEncoder().encode(html), 'text/html');
+      showExportMessage('Instructions HTML exported.');
+      setShowExportModal(false);
+      return;
+    }
+    const bytes = await buildWebProjectPackage(state, project, options);
+    downloadBytes(`${safeName(project.name)}-export.zip`, bytes, 'application/zip');
+    showExportMessage('Project exported.');
+    setShowExportModal(false);
   };
 
   return (
@@ -2282,20 +2651,42 @@ function ProjectWorkspace({ state, project, parts, template, categories, onBack,
           </div>
         </div>
         <div className="step-tags hero-steps">
-          <button onClick={exportProject}>Export Project</button>
+          <button onClick={() => setShowExportModal(true)}>Export Project</button>
           <button className="danger-fill" onClick={onDelete}>Delete</button>
         </div>
       </section>
+      {showExportModal && <ProjectExportModal project={project} onCancel={() => setShowExportModal(false)} onExport={exportProject} />}
       {exportNotice && <p className="export-notice">{exportNotice}</p>}
+      <ProjectTagControls project={project} steps={template.steps} onToggle={toggleStep} className="project-header-tags" />
       <div className="tabs">
         <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Overview</button>
+        <button className={`tab ${projectTab === 'instructions' ? 'active' : ''}`} onClick={() => setProjectTab('instructions')}>Instructions</button>
+        <button className={`tab ${projectTab === 'photos' ? 'active' : ''}`} onClick={() => setProjectTab('photos')}>Photos ({(project.photoFolders || []).reduce((total, folder) => total + (folder.photos?.length || 0), 0)})</button>
         <button className={`tab ${projectTab === 'parts' ? 'active' : ''}`} onClick={() => setProjectTab('parts')}>Parts ({linkedParts.length})</button>
         <button className={`tab ${projectTab === 'files' ? 'active' : ''}`} onClick={() => setProjectTab('files')}>Files ({project.files.length})</button>
       </div>
       {projectTab === 'overview' && <ProjectOverviewTab project={project} template={template} onUpdate={onUpdate} />}
       {projectTab === 'parts' && <ProjectPartsTab project={project} parts={parts} categories={categories} template={template} onUpdate={onUpdate} onUpdatePart={onUpdatePart} />}
       {projectTab === 'files' && <ProjectFilesTab project={project} template={template} onUpdate={onUpdate} />}
+      {projectTab === 'photos' && <ProjectPhotosTab project={project} onUpdate={onUpdate} />}
+      {projectTab === 'instructions' && <ProjectInstructionsTab project={project} parts={parts} categories={categories} onUpdate={onUpdate} onCreatePart={onCreatePart} />}
     </div>
+  );
+}
+
+function ProjectTagControls({ project, steps, onToggle, className = '' }) {
+  return (
+    <section className={`project-tags-panel ${className}`}>
+      <h3>Project Tags</h3>
+      <div className="step-tags quick-tag-grid">
+        {steps.map((step) => (
+          <button key={step} className={project.activeSteps.includes(step) ? 'tag active' : 'tag'} onClick={() => onToggle(step)}>
+            {step}
+          </button>
+        ))}
+      </div>
+      {!project.activeSteps.length && <p>No quick tags selected yet.</p>}
+    </section>
   );
 }
 
@@ -2326,13 +2717,6 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
     }, 3000);
   };
 
-  const toggleStep = (step) => {
-    const activeSteps = project.activeSteps.includes(step)
-      ? project.activeSteps.filter((item) => item !== step)
-      : [...project.activeSteps, step];
-    onUpdate({ activeSteps });
-  };
-
   const addNoteImage = async (file) => {
     if (!file) return;
     return savePickedFile(file, `project-note-images/${project.id}`);
@@ -2347,18 +2731,6 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
         <RichTextEditor value={project.notes} onChange={(notes) => onUpdate({ notes })} onUploadImage={addNoteImage} placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..." />
       </article>
       <div className="overview-side">
-        <article>
-          <h3>Project Tags</h3>
-          <div className="step-tags quick-tag-grid">
-            {template.steps.map((step) => (
-              <button key={step} className={project.activeSteps.includes(step) ? 'tag active' : 'tag'} onClick={() => toggleStep(step)}>
-                {step}
-              </button>
-            ))}
-          </div>
-          {!project.activeSteps.length && <p>No quick tags selected yet.</p>}
-        </article>
-
         <article>
           <h3>Checklist</h3>
           <div className="inline-entry checklist-toolbar">
@@ -2379,9 +2751,9 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
 
         <article>
           <h3>Latest Files</h3>
-          {latestFiles.length ? latestFiles.map((file, index) => (
-            <div key={file.id} className={`latest latest-${index % 5}`}>
-              <strong>{fileTrackerLabel(template.fileTrackers, file.trackerId)}</strong>
+          {latestFiles.length ? latestFiles.map((file) => (
+            <div key={file.id} className="latest">
+              <strong style={{ color: trackerColor(template.fileTrackers, file.trackerId) }}>{fileTrackerLabel(template.fileTrackers, file.trackerId)}</strong>
               <span>{file.name}</span>
               <div className="latest-file-actions">
                 {file.path && <button className="ghost" onClick={() => openStoredFile(file.path)}>Open</button>}
@@ -2391,6 +2763,384 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
           )) : <p>No latest files attached.</p>}
         </article>
       </div>
+    </div>
+  );
+}
+
+function dataUrlToBytes(dataUrl) {
+  const [, raw = ''] = String(dataUrl || '').split(',');
+  const binary = atob(raw);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function savePhotoThumbnail(blob, name, library) {
+  const bitmap = await createImageBitmap(blob);
+  const size = 360;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext('2d');
+  context.fillStyle = cssColor('--field', '#0d1117');
+  context.fillRect(0, 0, size, size);
+  const scale = Math.min(size / bitmap.width, size / bitmap.height);
+  const width = bitmap.width * scale;
+  const height = bitmap.height * scale;
+  context.drawImage(bitmap, (size - width) / 2, (size - height) / 2, width, height);
+  bitmap.close?.();
+  const thumbBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.72));
+  if (!thumbBlob) throw new Error('Could not create photo thumbnail.');
+  const bytes = new Uint8Array(await thumbBlob.arrayBuffer());
+  return saveBytesFile(`thumb-${safeName(name || 'photo')}.jpg`, library, bytes);
+}
+
+async function savePhotoThumbnailFromPath(path, name, library) {
+  const bytes = await readStoredFile(path);
+  return savePhotoThumbnail(new Blob([bytes], { type: imageMimeType(name || path) }), name, library);
+}
+
+async function savePartImageWithThumbnail(file, partId) {
+  const stored = await savePickedFile(file, `part-images/${partId}`);
+  let imageThumbnail = '';
+  try {
+    const thumbnail = await savePhotoThumbnail(file, stored.name, `part-images/${partId}/thumbs`);
+    imageThumbnail = thumbnail.path;
+  } catch (error) {
+    console.warn('Could not create part thumbnail', error);
+  }
+  return { image: stored.path, imageThumbnail };
+}
+
+function PartPreviewImage({ part, className = '' }) {
+  if (!part.image && !part.imageThumbnail) return <div className={className || undefined}>{part.name.slice(0, 2).toUpperCase()}</div>;
+  return <StoredImage className={className} path={part.imageThumbnail || part.image} alt="" />;
+}
+
+function collectReferencedPaths(state) {
+  const paths = new Set();
+  const add = (path) => {
+    if (path && typeof path === 'string' && !path.startsWith('blob:')) paths.add(path);
+  };
+  state.projects.forEach((project) => {
+    add(project.image);
+    (project.noteImages || []).forEach((image) => add(image.path));
+    (project.photoFolders || []).forEach((folder) => (folder.photos || []).forEach((photo) => {
+      add(photo.path);
+      add(photo.markupPath);
+      add(photo.thumbnailPath);
+      add(photo.markupThumbnailPath);
+    }));
+    (project.files || []).forEach((file) => {
+      add(file.path);
+      (file.folderFiles || []).forEach((child) => add(child.path));
+    });
+  });
+  state.parts.forEach((part) => {
+    add(part.image);
+    add(part.imageThumbnail);
+    (part.documents || []).forEach((doc) => add(doc.path));
+  });
+  state.importBatches.forEach((batch) => (batch.items || []).forEach((item) => add(item.imagePath)));
+  return [...paths];
+}
+
+function runWhenIdle(callback) {
+  if ('requestIdleCallback' in window) {
+    const id = window.requestIdleCallback(callback, { timeout: 1800 });
+    return () => window.cancelIdleCallback?.(id);
+  }
+  const id = window.setTimeout(callback, 200);
+  return () => window.clearTimeout(id);
+}
+
+function PhotoMarkupButton({ photo, projectId, onSave }) {
+  const [source, setSource] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const openMarkup = async () => {
+    setBusy(true);
+    try {
+      const bytes = await readStoredFile(photo.markupPath || photo.path);
+      setSource(URL.createObjectURL(new Blob([bytes], { type: imageMimeType(photo.name) })));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button className="ghost" onClick={openMarkup} disabled={busy}>{busy ? 'Loading...' : 'Markup'}</button>
+      {source && (
+        <NoteImageMarkupModal
+          source={source}
+          onCancel={() => {
+            URL.revokeObjectURL(source);
+            setSource('');
+          }}
+          onSave={async (dataUrl) => {
+            const stored = await saveBytesFile(`markup-${photo.name || 'photo.png'}`, `project-photos/${projectId}/markup`, dataUrlToBytes(dataUrl));
+            let markupThumbnailPath = '';
+            try {
+              const thumbnail = await savePhotoThumbnail(new Blob([dataUrlToBytes(dataUrl)], { type: imageMimeType(photo.name) }), photo.name, `project-photos/${projectId}/thumbs`);
+              markupThumbnailPath = thumbnail.path;
+            } catch (error) {
+              console.warn('Could not create markup thumbnail', error);
+            }
+            onSave({ markupPath: stored.path, markupThumbnailPath });
+            URL.revokeObjectURL(source);
+            setSource('');
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+function BusyNotice({ label }) {
+  if (!label) return null;
+  return (
+    <div className="busy-notice" role="status" aria-live="polite">
+      <span className="busy-spinner" />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+function ProjectPhotosTab({ project, onUpdate }) {
+  const [newFolderName, setNewFolderName] = useState('');
+  const [selectedFolderId, setSelectedFolderId] = useState(project.photoFolders?.[0]?.id || '');
+  const [expandedPhoto, setExpandedPhoto] = useState(null);
+  const [photoBusy, setPhotoBusy] = useState('');
+  const folders = project.photoFolders || [];
+  const selectedFolder = folders.find((folder) => folder.id === selectedFolderId) || folders[0];
+  const thumbnailJobsRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!selectedFolderId && folders[0]) setSelectedFolderId(folders[0].id);
+  }, [selectedFolderId, folders]);
+
+  const setFolders = (photoFolders) => onUpdate({ photoFolders });
+
+  const addFolder = () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    const folder = { id: makeId('photo-folder'), name, photos: [] };
+    setFolders([...folders, folder]);
+    setSelectedFolderId(folder.id);
+    setNewFolderName('');
+  };
+
+  const uploadPhotos = async (files) => {
+    if (!selectedFolder || !files?.length) return;
+    setPhotoBusy(`Uploading ${files.length} photo${files.length === 1 ? '' : 's'}...`);
+    try {
+      const uploaded = await Promise.all([...files].map(async (file) => {
+        const stored = await savePickedFile(file, `project-photos/${project.id}/${selectedFolder.id}`);
+        let thumbnailPath = '';
+        try {
+          const thumbnail = await savePhotoThumbnail(file, stored.name, `project-photos/${project.id}/thumbs`);
+          thumbnailPath = thumbnail.path;
+        } catch (error) {
+          console.warn('Could not create photo thumbnail', error);
+        }
+        return { id: makeId('photo'), name: stored.name, path: stored.path, thumbnailPath, note: '', createdAt: new Date().toISOString() };
+      }));
+      setFolders(folders.map((folder) => folder.id === selectedFolder.id ? { ...folder, photos: [...(folder.photos || []), ...uploaded] } : folder));
+    } finally {
+      setPhotoBusy('');
+    }
+  };
+
+  useEffect(() => {
+    if (!selectedFolder) return;
+    const missing = (selectedFolder.photos || []).filter((photo) => {
+      const sourcePath = photo.markupPath || photo.path;
+      const previewPath = photo.markupPath ? photo.markupThumbnailPath : photo.thumbnailPath;
+      return sourcePath && !previewPath && !thumbnailJobsRef.current.has(photo.id);
+    });
+    if (!missing.length) return undefined;
+    return runWhenIdle(() => {
+      missing.slice(0, 2).forEach((photo) => {
+        thumbnailJobsRef.current.add(photo.id);
+        savePhotoThumbnailFromPath(photo.markupPath || photo.path, photo.name, `project-photos/${project.id}/thumbs`)
+          .then((thumbnail) => {
+            updatePhoto(photo.id, photo.markupPath ? { markupThumbnailPath: thumbnail.path } : { thumbnailPath: thumbnail.path });
+          })
+          .finally(() => thumbnailJobsRef.current.delete(photo.id));
+      });
+    });
+  }, [selectedFolder, project.id]);
+
+  const updatePhoto = (photoId, patch) => {
+    setFolders(folders.map((folder) => folder.id === selectedFolder.id ? {
+      ...folder,
+      photos: (folder.photos || []).map((photo) => photo.id === photoId ? { ...photo, ...patch } : photo),
+    } : folder));
+  };
+
+  const removePhoto = (photoId) => {
+    setFolders(folders.map((folder) => folder.id === selectedFolder.id ? {
+      ...folder,
+      photos: (folder.photos || []).filter((photo) => photo.id !== photoId),
+    } : folder));
+  };
+
+  const downloadPhoto = async (photo) => {
+    setPhotoBusy(`Preparing ${photo.name || 'photo'}...`);
+    try {
+      const path = photo.markupPath || photo.path;
+      const bytes = await readStoredFile(path);
+      downloadBytes(photo.name || 'photo', bytes, imageMimeType(photo.name));
+    } finally {
+      setPhotoBusy('');
+    }
+  };
+
+  return (
+    <div className="photo-library-layout">
+      <section className="panel photo-folder-panel">
+        <h3>Photo Folders</h3>
+        <div className="inline-entry">
+          <input value={newFolderName} onChange={(event) => setNewFolderName(event.target.value)} placeholder="Folder name" />
+          <button onClick={addFolder}>Add</button>
+        </div>
+        {folders.map((folder) => (
+          <button key={folder.id} className={selectedFolder?.id === folder.id ? '' : 'secondary'} onClick={() => setSelectedFolderId(folder.id)}>
+            {folder.name} ({folder.photos?.length || 0})
+          </button>
+        ))}
+      </section>
+      <section className="panel">
+        <div className="section-title">
+          <h3>{selectedFolder?.name || 'Photos'}</h3>
+          {selectedFolder && (
+            <label className="file-picker compact-picker">
+              <input disabled={!!photoBusy} type="file" accept="image/*" multiple onChange={(event) => { uploadPhotos(event.target.files); event.target.value = ''; }} />
+              {photoBusy ? 'Working...' : 'Upload Photos'}
+            </label>
+          )}
+        </div>
+        <BusyNotice label={photoBusy} />
+        {!selectedFolder ? <p>Create a folder to start adding project photos.</p> : (
+          <div className="photo-grid">
+            {(selectedFolder.photos || []).map((photo) => (
+              <article key={photo.id} className="photo-card">
+                <button className="photo-card-image" onClick={() => setExpandedPhoto({ name: photo.name, path: photo.markupPath || photo.path, previewType: 'image' })}>
+                  {photo.markupThumbnailPath || photo.thumbnailPath
+                    ? <StoredImage path={photo.markupThumbnailPath || photo.thumbnailPath} alt={photo.name} />
+                    : <span>Preview loading</span>}
+                </button>
+                <strong>{photo.name}</strong>
+                <textarea value={photo.note || ''} onChange={(event) => updatePhoto(photo.id, { note: event.target.value })} placeholder="Photo note" />
+                <div className="row-actions">
+                  <button className="ghost" onClick={() => downloadPhoto(photo)}>Download</button>
+                  <PhotoMarkupButton photo={photo} projectId={project.id} onSave={(patch) => updatePhoto(photo.id, patch)} />
+                  <button className="ghost danger-button" onClick={() => removePhoto(photo.id)}>Delete</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+      {expandedPhoto && <ExpandedPartFileModal file={expandedPhoto} onClose={() => setExpandedPhoto(null)} />}
+    </div>
+  );
+}
+
+function ProjectInstructionsTab({ project, parts, categories, onUpdate, onCreatePart }) {
+  const [newPart, setNewPart] = useState({ name: '', quantity: 1, categoryId: 'cat-unassigned' });
+  const [linkPart, setLinkPart] = useState({ partId: '', quantity: 1 });
+  const photos = (project.photoFolders || []).flatMap((folder) => (folder.photos || []).map((photo) => ({ ...photo, folderName: folder.name })));
+  const linkedParts = project.partIds.map((id) => parts.find((part) => part.id === id)).filter(Boolean);
+  const availableParts = parts.filter((part) => !project.partIds.includes(part.id));
+  const instructions = project.instructions || { intro: '', steps: [] };
+
+  const updateInstructions = (patch) => onUpdate({ instructions: { ...instructions, ...patch } });
+  const updateStep = (stepId, patch) => updateInstructions({
+    steps: instructions.steps.map((step) => step.id === stepId ? { ...step, ...patch } : step),
+  });
+
+  const addStep = () => {
+    updateInstructions({
+      steps: [
+        ...instructions.steps,
+        { id: makeId('instruction-step'), title: `Step ${instructions.steps.length + 1}`, body: '', photoId: '' },
+      ],
+    });
+  };
+
+  const createInstructionPart = () => {
+    if (!newPart.name.trim()) return;
+    onCreatePart(project.id, newPart);
+    setNewPart({ name: '', quantity: 1, categoryId: 'cat-unassigned' });
+  };
+
+  const linkInstructionPart = () => {
+    if (!linkPart.partId) return;
+    onUpdate({
+      partIds: [...project.partIds, linkPart.partId],
+      partQuantities: { ...(project.partQuantities || {}), [linkPart.partId]: Number(linkPart.quantity) || 1 },
+    });
+    setLinkPart({ partId: '', quantity: 1 });
+  };
+
+  return (
+    <div className="instructions-layout">
+      <section className="panel instruction-intro-panel">
+        <h3>Intro</h3>
+        <RichTextEditor value={instructions.intro || ''} onChange={(intro) => updateInstructions({ intro })} onUploadImage={(file) => savePickedFile(file, `project-instructions/${project.id}/intro`)} placeholder="Introduce the build, tools, safety notes, and final result..." />
+      </section>
+      <section className="panel instruction-parts-panel">
+        <h3>Parts List</h3>
+        <div className="instruction-parts-list">
+          {linkedParts.map((part) => (
+            <div key={part.id} className="instruction-part-row">
+              <span>{part.name}</span>
+              <strong>Qty {Number(project.partQuantities?.[part.id]) || 1}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="instruction-link-part">
+          <select value={linkPart.partId} onChange={(event) => setLinkPart((current) => ({ ...current, partId: event.target.value }))}>
+            <option value="">Link part from library</option>
+            {availableParts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
+          </select>
+          <input type="number" min="1" value={linkPart.quantity} onChange={(event) => setLinkPart((current) => ({ ...current, quantity: Number(event.target.value) || 1 }))} />
+          <button onClick={linkInstructionPart} disabled={!linkPart.partId}>Link Part</button>
+        </div>
+        <div className="instruction-new-part">
+          <input value={newPart.name} onChange={(event) => setNewPart((current) => ({ ...current, name: event.target.value }))} placeholder="Create and link part" />
+          <input type="number" min="1" value={newPart.quantity} onChange={(event) => setNewPart((current) => ({ ...current, quantity: Number(event.target.value) || 1 }))} />
+          <select value={newPart.categoryId} onChange={(event) => setNewPart((current) => ({ ...current, categoryId: event.target.value }))}>
+            {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{category.fullLabel}</option>)}
+          </select>
+          <button onClick={createInstructionPart}>Add Part</button>
+        </div>
+      </section>
+      <section className="panel wide">
+        <div className="section-title">
+          <h3>Steps</h3>
+          <button onClick={addStep}>{instructions.steps.length ? 'Add Another Step' : 'Add Step 1'}</button>
+        </div>
+        <div className="instruction-steps">
+          {instructions.steps.map((step, index) => {
+            const photo = photos.find((item) => item.id === step.photoId);
+            return (
+              <article key={step.id} className="instruction-step-card">
+                <div className="instruction-step-number">Step {index + 1}</div>
+                <input value={step.title || ''} onChange={(event) => updateStep(step.id, { title: event.target.value })} placeholder="Step header" />
+                <select value={step.photoId || ''} onChange={(event) => updateStep(step.id, { photoId: event.target.value })}>
+                  <option value="">No linked photo</option>
+                  {photos.map((item) => <option key={item.id} value={item.id}>{item.folderName} / {item.name}</option>)}
+                </select>
+                {photo && <div className="instruction-step-photo"><StoredImage path={photo.markupPath || photo.path} alt={photo.name} /></div>}
+                <RichTextEditor value={step.body || ''} onChange={(body) => updateStep(step.id, { body })} onUploadImage={(file) => savePickedFile(file, `project-instructions/${project.id}/steps`)} placeholder="Write this step like an Instructables build step..." />
+              </article>
+            );
+          })}
+        </div>
+      </section>
     </div>
   );
 }
@@ -2474,7 +3224,7 @@ async function createImageThumbnailDataUrl(path, width = 480, height = 270) {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#21262d';
+  context.fillStyle = cssColor('--surface-raised', '#21262d');
   context.fillRect(0, 0, width, height);
   const scale = Math.max(width / bitmap.width, height / bitmap.height);
   const drawWidth = bitmap.width * scale;
@@ -2621,6 +3371,28 @@ function ShellThumbnailPreview({ file }) {
   );
 }
 
+const PREVIEW_CACHE_LIMIT = 32;
+const previewCache = new Map();
+
+function previewCacheKey(file, type) {
+  return `${type}:${file?.path || ''}:${file?.contentHash || ''}:${file?.size || ''}:${file?.createdAt || ''}`;
+}
+
+function getPreviewCache(key) {
+  if (!previewCache.has(key)) return null;
+  const value = previewCache.get(key);
+  previewCache.delete(key);
+  previewCache.set(key, value);
+  return value;
+}
+
+function setPreviewCache(key, value) {
+  previewCache.set(key, value);
+  while (previewCache.size > PREVIEW_CACHE_LIMIT) {
+    previewCache.delete(previewCache.keys().next().value);
+  }
+}
+
 function PdfPreview({ path, title, className = 'file-preview-frame' }) {
   const [src, setSrc] = useState('');
   const [error, setError] = useState('');
@@ -2678,6 +3450,14 @@ function TextFilePreview({ file }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'text');
+    const cached = getPreviewCache(cacheKey);
+    if (cached) {
+      setContent(cached.content || '');
+      setError(cached.error || '');
+      return undefined;
+    }
+
     let active = true;
     setContent('');
     setError('');
@@ -2685,16 +3465,20 @@ function TextFilePreview({ file }) {
     readStoredFile(file.path)
       .then((bytes) => new TextDecoder().decode(bytes))
       .then((text) => {
-        if (active) setContent(text.slice(0, 20000));
+        const nextContent = text.slice(0, 20000);
+        setPreviewCache(cacheKey, { content: nextContent, error: '' });
+        if (active) setContent(nextContent);
       })
       .catch(() => {
-        if (active) setError('Preview is not available for this file yet.');
+        const nextError = 'Preview is not available for this file yet.';
+        setPreviewCache(cacheKey, { content: '', error: nextError });
+        if (active) setError(nextError);
       });
 
     return () => {
       active = false;
     };
-  }, [file.path]);
+  }, [file]);
 
   if (error) {
     return (
@@ -2712,19 +3496,29 @@ function CsvPreview({ file }) {
   const [rows, setRows] = useState([]);
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'csv');
+    const cached = getPreviewCache(cacheKey);
+    if (cached) {
+      setRows(cached.rows || []);
+      return undefined;
+    }
+
     let active = true;
     readStoredFile(file.path)
       .then((bytes) => new TextDecoder().decode(bytes))
       .then((text) => {
-        if (active) setRows(parseCsv(text).slice(0, 40).map((row) => row.slice(0, 12)));
+        const nextRows = parseCsv(text).slice(0, 40).map((row) => row.slice(0, 12));
+        setPreviewCache(cacheKey, { rows: nextRows });
+        if (active) setRows(nextRows);
       })
       .catch(() => {
+        setPreviewCache(cacheKey, { rows: [] });
         if (active) setRows([]);
       });
     return () => {
       active = false;
     };
-  }, [file.path]);
+  }, [file]);
 
   if (!rows.length) return <div className="file-preview-empty">Spreadsheet preview is available for CSV files. Open Excel files in their app.</div>;
 
@@ -2841,31 +3635,45 @@ function XlsxPreview({ file }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'xlsx');
+    const cached = getPreviewCache(cacheKey);
+    if (cached) {
+      setRows(cached.rows || []);
+      setError(cached.error || '');
+      return undefined;
+    }
+
     let active = true;
     setRows([]);
     setError('');
 
-    readStoredFile(file.path)
-      .then(async (bytes) => {
-        const entries = await readZipEntries(bytes);
-        const sharedStrings = parseSharedStrings(await zipEntryText(entries, 'xl/sharedStrings.xml'));
-        const sheetPath = firstWorksheetPath(
-          await zipEntryText(entries, 'xl/workbook.xml'),
-          await zipEntryText(entries, 'xl/_rels/workbook.xml.rels'),
-        );
-        return parseXlsxRows(await zipEntryText(entries, sheetPath), sharedStrings);
-      })
-      .then((nextRows) => {
-        if (active) setRows(nextRows);
-      })
-      .catch((nextError) => {
-        if (active) setError(String(nextError));
-      });
+    const cancelIdle = runWhenIdle(() => {
+      readStoredFile(file.path)
+        .then(async (bytes) => {
+          const entries = await readZipEntries(bytes);
+          const sharedStrings = parseSharedStrings(await zipEntryText(entries, 'xl/sharedStrings.xml'));
+          const sheetPath = firstWorksheetPath(
+            await zipEntryText(entries, 'xl/workbook.xml'),
+            await zipEntryText(entries, 'xl/_rels/workbook.xml.rels'),
+          );
+          return parseXlsxRows(await zipEntryText(entries, sheetPath), sharedStrings);
+        })
+        .then((nextRows) => {
+          setPreviewCache(cacheKey, { rows: nextRows, error: '' });
+          if (active) setRows(nextRows);
+        })
+        .catch((nextError) => {
+          const errorText = String(nextError);
+          setPreviewCache(cacheKey, { rows: [], error: errorText });
+          if (active) setError(errorText);
+        });
+    });
 
     return () => {
       active = false;
+      cancelIdle();
     };
-  }, [file.path]);
+  }, [file]);
 
   if (error) return <div className="file-preview-empty">{error}</div>;
   if (!rows.length) return <div className="file-preview-empty">Loading Excel preview...</div>;
@@ -2916,32 +3724,47 @@ function StlPreview({ file }) {
   };
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'stl');
+    const cached = getPreviewCache(cacheKey);
+    if (cached?.triangles?.length) {
+      trianglesRef.current = cached.triangles;
+      viewRef.current = { rotationX: -0.55, rotationY: 0.65, zoom: 1 };
+      setError('');
+      setReady(true);
+      requestAnimationFrame(redraw);
+      return undefined;
+    }
+
     let active = true;
     setError('');
     setReady(false);
 
-    readStoredFile(file.path)
-      .then((bytes) => {
-        if (!active) return;
-        const triangles = limitTriangles(parseStl(bytes), MODEL_TRIANGLE_LIMIT);
-        if (!triangles.length) {
-          setError('No previewable STL geometry was found.');
-          return;
-        }
-        trianglesRef.current = triangles;
-        viewRef.current = { rotationX: -0.55, rotationY: 0.65, zoom: 1 };
-        setReady(true);
-        requestAnimationFrame(redraw);
-      })
-      .catch(() => {
-        if (active) setError('Could not preview this STL.');
-      });
+    const cancelIdle = runWhenIdle(() => {
+      readStoredFile(file.path)
+        .then((bytes) => {
+          if (!active) return;
+          const triangles = limitTriangles(parseStl(bytes), MODEL_TRIANGLE_LIMIT);
+          if (!triangles.length) {
+            setError('No previewable STL geometry was found.');
+            return;
+          }
+          setPreviewCache(cacheKey, { triangles });
+          trianglesRef.current = triangles;
+          viewRef.current = { rotationX: -0.55, rotationY: 0.65, zoom: 1 };
+          setReady(true);
+          requestAnimationFrame(redraw);
+        })
+        .catch(() => {
+          if (active) setError('Could not preview this STL.');
+        });
+    });
 
     return () => {
       active = false;
+      cancelIdle();
       trianglesRef.current = [];
     };
-  }, [file.path]);
+  }, [file]);
 
   useEffect(() => {
     if (ready) redraw();
@@ -3008,28 +3831,40 @@ function ObjPreview({ file }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'obj');
+    const cached = getPreviewCache(cacheKey);
+    if (cached?.triangles?.length) {
+      setError('');
+      requestAnimationFrame(() => drawStl(canvasRef.current, cached.triangles));
+      return undefined;
+    }
+
     let active = true;
     setError('');
 
-    readStoredFile(file.path)
-      .then((bytes) => new TextDecoder().decode(bytes))
-      .then((text) => {
-        if (!active) return;
-        const triangles = limitTriangles(parseObj(text), MODEL_TRIANGLE_LIMIT);
-        if (!triangles.length) {
-          setError('No previewable OBJ geometry was found.');
-          return;
-        }
-        drawStl(canvasRef.current, triangles);
-      })
-      .catch(() => {
-        if (active) setError('Could not preview this OBJ.');
-      });
+    const cancelIdle = runWhenIdle(() => {
+      readStoredFile(file.path)
+        .then((bytes) => new TextDecoder().decode(bytes))
+        .then((text) => {
+          if (!active) return;
+          const triangles = limitTriangles(parseObj(text), MODEL_TRIANGLE_LIMIT);
+          if (!triangles.length) {
+            setError('No previewable OBJ geometry was found.');
+            return;
+          }
+          setPreviewCache(cacheKey, { triangles });
+          drawStl(canvasRef.current, triangles);
+        })
+        .catch(() => {
+          if (active) setError('Could not preview this OBJ.');
+        });
+    });
 
     return () => {
       active = false;
+      cancelIdle();
     };
-  }, [file.path]);
+  }, [file]);
 
   if (error) {
     return (
@@ -3053,28 +3888,40 @@ function DxfPreview({ file }) {
   const [error, setError] = useState('');
 
   useEffect(() => {
+    const cacheKey = previewCacheKey(file, 'dxf');
+    const cached = getPreviewCache(cacheKey);
+    if (cached?.shapes?.length) {
+      setError('');
+      requestAnimationFrame(() => drawDxf(canvasRef.current, cached.shapes));
+      return undefined;
+    }
+
     let active = true;
     setError('');
 
-    readStoredFile(file.path)
-      .then((bytes) => new TextDecoder().decode(bytes))
-      .then((text) => {
-        if (!active) return;
-        const shapes = parseDxf(text);
-        if (!shapes.length) {
-          setError('No previewable DXF geometry was found.');
-          return;
-        }
-        drawDxf(canvasRef.current, shapes);
-      })
-      .catch(() => {
-        if (active) setError('Could not preview this DXF.');
-      });
+    const cancelIdle = runWhenIdle(() => {
+      readStoredFile(file.path)
+        .then((bytes) => new TextDecoder().decode(bytes))
+        .then((text) => {
+          if (!active) return;
+          const shapes = parseDxf(text);
+          if (!shapes.length) {
+            setError('No previewable DXF geometry was found.');
+            return;
+          }
+          setPreviewCache(cacheKey, { shapes });
+          drawDxf(canvasRef.current, shapes);
+        })
+        .catch(() => {
+          if (active) setError('Could not preview this DXF.');
+        });
+    });
 
     return () => {
       active = false;
+      cancelIdle();
     };
-  }, [file.path]);
+  }, [file]);
 
   if (error) {
     return (
@@ -3160,7 +4007,7 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#0d1117';
+  context.fillStyle = cssColor('--field', '#0d1117');
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!triangles.length) return;
 
@@ -3202,9 +4049,9 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
     context.lineTo(pts[1][0], pts[1][1]);
     context.lineTo(pts[2][0], pts[2][1]);
     context.closePath();
-    context.fillStyle = '#58a6ff';
+    context.fillStyle = cssColor('--accent', '#58a6ff');
     context.fill();
-    context.strokeStyle = 'rgba(201,209,217,0.16)';
+    context.strokeStyle = cssColor('--text-soft', '#c9d1d9');
     context.stroke();
   });
 }
@@ -3257,7 +4104,7 @@ function drawDxf(canvas, shapes) {
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = '#0d1117';
+  context.fillStyle = cssColor('--field', '#0d1117');
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!shapes.length) return;
 
@@ -3280,7 +4127,7 @@ function drawDxf(canvas, shapes) {
   const scale = Math.min((canvas.width - 56) / width, (canvas.height - 56) / height);
   const map = ([x, y]) => [28 + (x - minX) * scale, canvas.height - 28 - (y - minY) * scale];
 
-  context.strokeStyle = '#58a6ff';
+  context.strokeStyle = cssColor('--accent', '#58a6ff');
   context.lineWidth = 2;
   shapes.forEach((shape) => {
     context.beginPath();
@@ -3538,8 +4385,9 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
   const [query, setQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const categoryOptions = flattenCategoryOptions(categories);
+  const categoryFilterIds = categoryFilter ? new Set([categoryFilter, ...descendantCategoryIds(categories, categoryFilter)]) : null;
   const visibleParts = parts.filter((part) => {
-    if (categoryFilter && part.categoryId !== categoryFilter) return false;
+    if (categoryFilterIds && !categoryFilterIds.has(part.categoryId)) return false;
     if (!query.trim()) return true;
     const text = query.trim().toLowerCase();
     return [part.name, categoryLabel(categories, part.categoryId), part.storageLocation, part.specSummary, part.notes]
@@ -3571,7 +4419,7 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
             return (
               <div key={part.id} className="link-part-row">
                 <div className="link-part-thumb">
-                  {part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}
+                  {part.image ? <PartPreviewImage part={part} /> : <div className="image-placeholder">Part</div>}
                 </div>
                 <div className="link-part-copy">
                   <strong>{part.name}</strong>
@@ -3594,6 +4442,7 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
 function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart }) {
   const [selectedPart, setSelectedPart] = useState(null);
   const [linkingPart, setLinkingPart] = useState(false);
+  const thumbnailJobsRef = useRef(new Set());
   const linkedParts = project.partIds.map((id) => parts.find((part) => part.id === id)).filter(Boolean);
 
   useEffect(() => {
@@ -3601,6 +4450,20 @@ function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart })
     const refreshed = parts.find((part) => part.id === selectedPart.id);
     if (refreshed && refreshed !== selectedPart) setSelectedPart(refreshed);
   }, [parts, selectedPart]);
+
+  useEffect(() => {
+    const missing = linkedParts.filter((part) => part.image && !part.imageThumbnail && !thumbnailJobsRef.current.has(part.id));
+    if (!missing.length) return undefined;
+    return runWhenIdle(() => {
+      missing.slice(0, 2).forEach((part) => {
+        thumbnailJobsRef.current.add(part.id);
+        savePhotoThumbnailFromPath(part.image, part.name, `part-images/${part.id}/thumbs`)
+          .then((thumbnail) => onUpdatePart(part.id, { imageThumbnail: thumbnail.path }))
+          .catch((error) => console.warn('Could not create part thumbnail', error))
+          .finally(() => thumbnailJobsRef.current.delete(part.id));
+      });
+    });
+  }, [linkedParts, onUpdatePart]);
 
   const linkPart = (partId) => {
     if (!partId || project.partIds.includes(partId)) return;
@@ -3633,7 +4496,7 @@ function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart })
           <div className="linked-part-grid">
             {linkedParts.map((part) => (
               <button key={part.id} className="linked-part-card" onClick={() => setSelectedPart(part)}>
-                <div className="part-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+                <div className="part-image">{part.image ? <PartPreviewImage part={part} /> : part.name.slice(0, 2).toUpperCase()}</div>
                 <strong>{part.name}</strong>
                 <span>{categoryLabel(categories, part.categoryId)}</span>
                 <small>{part.storageLocation || 'No location set'}</small>
@@ -3696,6 +4559,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const [selectedFileId, setSelectedFileId] = useState('');
   const [viewerScope, setViewerScope] = useState('latest');
   const [expandedFileGroups, setExpandedFileGroups] = useState({});
+  const [replaceTargetFileId, setReplaceTargetFileId] = useState('');
   const autoIntegrityBusyRef = useRef(false);
   const projectFilesRef = useRef(project.files);
 
@@ -3703,8 +4567,12 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     projectFilesRef.current = project.files;
   }, [project.files]);
 
+  const trackedItemKey = (file) => file.trackedItemId || file.id;
+  const replaceTargetFile = project.files.find((file) => file.id === replaceTargetFileId) || null;
+
   const attachProjectFile = async (pickedFile = null, linkedPath = '') => {
-    const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
+    const trackerId = replaceTargetFile?.trackerId || fileTrackerId;
+    const tracker = template.fileTrackers.find((item) => item.id === trackerId);
     const trimmedPath = linkedPath.trim();
     if ((!trimmedPath && !pickedFile) || !tracker) return;
 
@@ -3721,12 +4589,16 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         ? await savePickedFile(pickedFile, `project-files/${project.id}/${tracker.id}`)
         : linkedLocalFile(trimmedPath);
       const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
-      const resetFiles = project.files.map((file) => file.trackerId === tracker.id ? { ...file, latest: false } : file);
+      const trackedItemId = replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file');
+      const baseFiles = replaceTargetFile
+        ? project.files.map((file) => trackedItemKey(file) === trackedItemId ? { ...file, latest: false } : file)
+        : project.files;
       onUpdate({
         files: [
-          ...resetFiles,
+          ...baseFiles,
           {
             id: makeId('file'),
+            trackedItemId,
             trackerId: tracker.id,
             name: stored.name,
             path: stored.path,
@@ -3742,6 +4614,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       });
       setFileUploadNotes('');
       setStagedAttachment(null);
+      setReplaceTargetFileId('');
     } catch (error) {
       setFileError(String(error));
     } finally {
@@ -3776,7 +4649,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   };
 
   const attachProjectFolder = async (pickedFiles = []) => {
-    const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
+    const trackerId = replaceTargetFile?.trackerId || fileTrackerId;
+    const tracker = template.fileTrackers.find((item) => item.id === trackerId);
     const allPickedFiles = [...pickedFiles];
     const hasExtensionFilter = Boolean((tracker?.extensions || '').split(',').map((item) => item.trim()).filter(Boolean).length);
     const files = hasExtensionFilter ? allPickedFiles.filter((file) => extensionAllowed(file.name, tracker?.extensions || '')) : allPickedFiles;
@@ -3810,6 +4684,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       }));
       const folderRecord = {
         id: makeId('file'),
+        trackedItemId: replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file'),
         trackerId: tracker.id,
         type: 'folder',
         name: folderName,
@@ -3825,12 +4700,15 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       };
       onUpdate({
         files: [
-          ...project.files.map((file) => file.trackerId === tracker.id ? { ...file, latest: false } : file),
+          ...(replaceTargetFile
+            ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
+            : project.files),
           folderRecord,
         ],
       });
       setFileUploadNotes('');
       setStagedAttachment(null);
+      setReplaceTargetFileId('');
       if (hasExtensionFilter && files.length !== allPickedFiles.length) setFileError(`Uploaded folder "${folderName}" with ${files.length} matching files. Some files did not match this file type.`);
     } catch (error) {
       setFileError(String(error));
@@ -3840,7 +4718,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   };
 
   const attachLinkedProjectFolder = async (folderPath) => {
-    const tracker = template.fileTrackers.find((item) => item.id === fileTrackerId);
+    const trackerId = replaceTargetFile?.trackerId || fileTrackerId;
+    const tracker = template.fileTrackers.find((item) => item.id === trackerId);
     if (!tracker || !folderPath) return;
     setFileBusy(true);
     setFileError('');
@@ -3864,9 +4743,12 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       })));
       onUpdate({
         files: [
-          ...project.files.map((file) => file.trackerId === tracker.id ? { ...file, latest: false } : file),
+          ...(replaceTargetFile
+            ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
+            : project.files),
           {
             id: makeId('file'),
+            trackedItemId: replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file'),
             trackerId: tracker.id,
             type: 'folder',
             name: folderName,
@@ -3884,6 +4766,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       });
       setFileUploadNotes('');
       setStagedAttachment(null);
+      setReplaceTargetFileId('');
       if (hasExtensionFilter && files.length !== allFiles.length) setFileError(`Linked folder "${folderName}" with ${files.length} matching files. Some files did not match this file type.`);
     } catch (error) {
       setFileError(String(error));
@@ -3900,14 +4783,21 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     if (stagedAttachment.type === 'link-folder') attachLinkedProjectFolder(stagedAttachment.path);
   };
 
+  const beginReplaceFile = (file) => {
+    setReplaceTargetFileId(file.id);
+    setFileTrackerId(file.trackerId);
+    setSelectedFileId(file.id);
+  };
+
   const toggleLatest = (fileId) => {
     const target = project.files.find((file) => file.id === fileId);
     if (!target) return;
+    const targetItemKey = trackedItemKey(target);
     onUpdate({
       files: project.files.map((file) =>
         file.id === fileId
           ? { ...file, latest: !file.latest }
-          : file.trackerId === target.trackerId && !target.latest
+          : trackedItemKey(file) === targetItemKey && !target.latest
             ? { ...file, latest: false }
             : file,
       ),
@@ -4068,6 +4958,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           baseHash,
           name: file.name,
           trackerId: file.trackerId,
+          trackedItemId: trackedItemKey(file),
           sourcePath: file.storageMode === 'link' ? file.path : '',
         },
       }));
@@ -4088,10 +4979,31 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         return false;
       }
 
+      if (file.storageMode === 'link') {
+        onUpdate({
+          files: project.files.map((item) => item.id === file.id ? {
+            ...item,
+            contentHash: currentHash,
+            integrityStatus: 'ok',
+            integrityCheckedAt: new Date().toISOString(),
+          } : item),
+        });
+        setEditSessions((current) => ({
+          ...current,
+          [file.id]: {
+            ...providedSession,
+            baseHash: currentHash,
+          },
+        }));
+        if (!options.quiet) setFileError(`Updated linked file status for ${file.name}.`);
+        return true;
+      }
+
       const bytes = await readStoredFile(providedSession.path);
       const now = new Date().toISOString();
       if (providedSession.versionFileId && providedSession.versionPath) {
         const stored = await overwriteBytesFile(providedSession.versionPath, bytes, file.name);
+        const sessionItemKey = providedSession.trackedItemId || trackedItemKey(file);
         onUpdate({
           files: project.files.map((item) =>
             item.id === providedSession.versionFileId
@@ -4104,7 +5016,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                 notes: withLatestVersionNote(item.notes || file.notes, new Date(now)),
                 createdAt: now,
               }
-              : item.trackerId === file.trackerId
+              : trackedItemKey(item) === sessionItemKey
                 ? { ...item, latest: false }
                 : item,
           ),
@@ -4126,6 +5038,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       const newFile = {
         ...file,
         id: newFileId,
+        trackedItemId: trackedItemKey(file),
         path: stored.path,
         sourcePath: providedSession.sourcePath || file.sourcePath || '',
         storageMode: 'copy',
@@ -4135,7 +5048,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         notes: withLatestVersionNote(file.notes, new Date(now)),
         createdAt: now,
       };
-      const resetFiles = project.files.map((item) => item.trackerId === file.trackerId ? { ...item, latest: false } : item);
+      const itemKey = trackedItemKey(file);
+      const resetFiles = project.files.map((item) => trackedItemKey(item) === itemKey ? { ...item, latest: false } : item);
       onUpdate({
         files: [
           ...resetFiles,
@@ -4150,6 +5064,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           baseHash: currentHash,
           name: file.name,
           trackerId: file.trackerId,
+          trackedItemId: itemKey,
           versionFileId: newFileId,
           versionPath: stored.path,
         };
@@ -4194,6 +5109,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const selectedExtension = fileExtension(selectedFile?.name || '');
   const fullViewerExtensions = new Set(['.pdf', '.stl', '.obj', '.dxf', ...TEXT_EXTENSIONS]);
   const viewerMode = selectedFile && (selectedFile.type === 'folder' || fullViewerExtensions.has(selectedExtension)) ? 'full' : 'compact';
+  const fileBusyLabel = fileBusy ? 'Working on file operation...' : '';
 
   useEffect(() => {
     if (!selectedFile) {
@@ -4208,7 +5124,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       <div className="file-list-pane">
         <section className="panel upload-card">
           <div className="upload-type-row">
-            <select value={fileTrackerId} onChange={(event) => setFileTrackerId(event.target.value)}>
+            <select value={fileTrackerId} onChange={(event) => { setFileTrackerId(event.target.value); setReplaceTargetFileId(''); }}>
               {template.fileTrackers.map((tracker) => (
                 <option key={tracker.id} value={tracker.id}>
                   {tracker.name}{tracker.extensions ? ` (${tracker.extensions})` : ''}
@@ -4217,6 +5133,12 @@ function ProjectFilesTab({ project, template, onUpdate }) {
             </select>
             <input value={fileUploadNotes} onChange={(event) => setFileUploadNotes(event.target.value)} placeholder="Upload notes" />
           </div>
+          {replaceTargetFile && (
+            <div className="replace-file-notice">
+              <span>Changing: {replaceTargetFile.name}</span>
+              <button className="ghost" onClick={() => setReplaceTargetFileId('')}>Cancel Change</button>
+            </div>
+          )}
           <div className="upload-action-row">
             <div className="upload-buttons">
               <label className="file-picker compact-picker">
@@ -4252,6 +5174,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
               {fileBusy ? 'Loading...' : stagedAttachment?.type?.includes('folder') ? 'Load Folder' : 'Load File'}
             </button>
           </div>
+          <BusyNotice label={fileBusyLabel} />
           {fileError && <p className="error-text">{fileError}</p>}
         </section>
 
@@ -4295,6 +5218,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                   <div className="file-row-right">
                     {visibleIntegrityStatus(file) && <span className={`integrity-pill ${file.integrityStatus}`}>{integrityLabel(file.integrityStatus)}</span>}
                     <span className="file-date">{file.createdAt ? new Date(file.createdAt).toLocaleDateString() : ''}</span>
+                    {file.latest && <button className="ghost" onClick={() => beginReplaceFile(file)}>Change</button>}
                     <button className={file.latest ? 'latest-pill' : 'mark-latest-button'} onClick={() => { toggleLatest(file.id); setSelectedFileId(file.id); }}>{file.latest ? 'Latest' : 'Mark Latest'}</button>
                     <button className="file-delete-button" onClick={() => removeFile(file.id)} aria-label={`Delete ${file.name}`}>x</button>
                   </div>
@@ -4650,6 +5574,7 @@ function Parts({ state, updateState }) {
   const [draggingPartId, setDraggingPartId] = useState('');
   const [partDragGhost, setPartDragGhost] = useState(null);
   const partDragRef = useRef(null);
+  const thumbnailJobsRef = useRef(new Set());
   const suppressPartClickRef = useRef(false);
   const selected = state.parts.find((part) => part.id === selectedId) || null;
 
@@ -4676,14 +5601,15 @@ function Parts({ state, updateState }) {
     if (!draft.name.trim()) return;
     const now = new Date().toISOString();
     const partId = makeId('part');
-    const image = draft.imageFile ? await savePickedFile(draft.imageFile, `part-images/${partId}`) : null;
+    const image = draft.imageFile ? await savePartImageWithThumbnail(draft.imageFile, partId) : null;
     const document = draft.documentFile ? await savePickedFile(draft.documentFile, `part-documents/${partId}`) : null;
     const documentHash = document?.path ? await fileHash(document.path).catch(() => '') : '';
     const part = {
       id: partId,
       name: draft.name.trim(),
       categoryId: draft.categoryId || 'cat-unassigned',
-      image: image?.path || '',
+      image: image?.image || '',
+      imageThumbnail: image?.imageThumbnail || '',
       productUrl: draft.productUrl.trim(),
       storageLocation: draft.storageLocation.trim(),
       specSummary: draft.specSummary.trim(),
@@ -4723,6 +5649,20 @@ function Parts({ state, updateState }) {
       ),
     }));
   };
+
+  useEffect(() => {
+    const missing = visible.filter((part) => part.image && !part.imageThumbnail && !thumbnailJobsRef.current.has(part.id));
+    if (!missing.length) return undefined;
+    return runWhenIdle(() => {
+      missing.slice(0, 2).forEach((part) => {
+        thumbnailJobsRef.current.add(part.id);
+        savePhotoThumbnailFromPath(part.image, part.name, `part-images/${part.id}/thumbs`)
+          .then((thumbnail) => updatePart(part.id, { imageThumbnail: thumbnail.path }))
+          .catch((error) => console.warn('Could not create part thumbnail', error))
+          .finally(() => thumbnailJobsRef.current.delete(part.id));
+      });
+    });
+  }, [visible]);
 
   const movePartToCategory = (categoryId, droppedPartId = '') => {
     const partId = droppedPartId || draggingPartId;
@@ -4933,7 +5873,7 @@ function Parts({ state, updateState }) {
                     }
                   }}
                 >
-                  <div className="part-card-image" draggable={false}>{part.image ? <StoredImage path={part.image} alt="" /> : <div className="image-placeholder">Part</div>}</div>
+                  <div className="part-card-image" draggable={false}>{part.image ? <PartPreviewImage part={part} /> : <div className="image-placeholder">Part</div>}</div>
                   <div className="part-card-body">
                     <span>{categoryLabel(state.categories, part.categoryId)}</span>
                     <strong>{part.name}</strong>
@@ -4977,7 +5917,7 @@ function Parts({ state, updateState }) {
         if (!part) return null;
         return (
           <div className="part-drag-ghost" style={{ left: partDragGhost.x + 14, top: partDragGhost.y + 14 }}>
-            <div className="part-drag-ghost-image">{part.image ? <StoredImage path={part.image} alt="" /> : part.name.slice(0, 2).toUpperCase()}</div>
+            <div className="part-drag-ghost-image">{part.image ? <PartPreviewImage part={part} /> : part.name.slice(0, 2).toUpperCase()}</div>
             <div>
               <strong>{part.name}</strong>
               <span>{categoryLabel(state.categories, part.categoryId)}</span>
@@ -5139,8 +6079,7 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
     if (!file) return;
     setImageBusy(true);
     try {
-      const stored = await savePickedFile(file, `part-images/${part.id}`);
-      onUpdate({ image: stored.path });
+      onUpdate(await savePartImageWithThumbnail(file, part.id));
     } finally {
       setImageBusy(false);
     }
@@ -5313,12 +6252,15 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
 function Imports({ state, updateState }) {
   const [importError, setImportError] = useState('');
   const [imageBusy, setImageBusy] = useState('');
+  const [importBusy, setImportBusy] = useState('');
+  const [itemBusy, setItemBusy] = useState('');
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const selectedBatch = state.importBatches.find((batch) => batch.id === selectedBatchId) || null;
 
   const createBatch = async (file) => {
     if (!file) return;
     setImportError('');
+    setImportBusy(`Reading ${file.name}...`);
     try {
       const lowerName = file.name.toLowerCase();
       const text = lowerName.endsWith('.pdf') ? await extractBasicPdfText(file) : await file.text();
@@ -5336,6 +6278,8 @@ function Imports({ state, updateState }) {
       setSelectedBatchId('');
     } catch (error) {
       setImportError(String(error));
+    } finally {
+      setImportBusy('');
     }
   };
 
@@ -5366,46 +6310,51 @@ function Imports({ state, updateState }) {
   };
 
   const completeItem = async (batchId, item, forcedAction = item.action) => {
-    const action = forcedAction === 'merge' && !item.matchId ? 'create' : forcedAction;
-    const imagePath = action === 'skip' ? '' : item.imagePath || await fetchItemImage(batchId, item);
+    setItemBusy(item.id);
+    try {
+      const action = forcedAction === 'merge' && !item.matchId ? 'create' : forcedAction;
+      const imagePath = action === 'skip' ? '' : item.imagePath || await fetchItemImage(batchId, item);
 
-    updateState((current) => {
-      const partPatch = {
-        name: item.name,
-        categoryId: item.categoryId || 'cat-unassigned',
-        productUrl: item.productUrl || '',
-        ...(imagePath ? { image: imagePath } : {}),
-        notes: [
-          item.sku ? `Imported SKU: ${item.sku}` : '',
-          item.imageUrl ? `Imported image URL: ${item.imageUrl}` : '',
-        ].filter(Boolean).join('\n'),
-        updatedAt: new Date().toISOString(),
-      };
-      let parts = current.parts;
+      updateState((current) => {
+        const partPatch = {
+          name: item.name,
+          categoryId: item.categoryId || 'cat-unassigned',
+          productUrl: item.productUrl || '',
+          ...(imagePath ? { image: imagePath } : {}),
+          notes: [
+            item.sku ? `Imported SKU: ${item.sku}` : '',
+            item.imageUrl ? `Imported image URL: ${item.imageUrl}` : '',
+          ].filter(Boolean).join('\n'),
+          updatedAt: new Date().toISOString(),
+        };
+        let parts = current.parts;
 
-      if (action === 'create') {
-        parts = [{
-          id: makeId('part'),
-          image: '',
-          storageLocation: '',
-          specSummary: '',
-          documents: [],
-          createdAt: new Date().toISOString(),
-          ...partPatch,
-        }, ...parts];
-      } else if (action === 'merge' && item.matchId) {
-        parts = parts.map((part) => part.id === item.matchId ? { ...part, ...partPatch, notes: [part.notes, partPatch.notes].filter(Boolean).join('\n') } : part);
-      }
+        if (action === 'create') {
+          parts = [{
+            id: makeId('part'),
+            image: '',
+            storageLocation: '',
+            specSummary: '',
+            documents: [],
+            createdAt: new Date().toISOString(),
+            ...partPatch,
+          }, ...parts];
+        } else if (action === 'merge' && item.matchId) {
+          parts = parts.map((part) => part.id === item.matchId ? { ...part, ...partPatch, notes: [part.notes, partPatch.notes].filter(Boolean).join('\n') } : part);
+        }
 
-      return {
-        ...current,
-        parts,
-        importBatches: current.importBatches.map((batch) => batch.id === batchId ? {
-          ...batch,
-          items: batch.items.map((draft) => draft.id === item.id ? { ...draft, imagePath, status: action === 'skip' ? 'skipped' : 'imported', action } : draft),
-        } : batch),
-      };
-    });
+        return {
+          ...current,
+          parts,
+          importBatches: current.importBatches.map((batch) => batch.id === batchId ? {
+            ...batch,
+            items: batch.items.map((draft) => draft.id === item.id ? { ...draft, imagePath, status: action === 'skip' ? 'skipped' : 'imported', action } : draft),
+          } : batch),
+        };
+      });
+    } finally {
+      setItemBusy('');
+    }
   };
 
   const categoryOptions = flattenCategoryOptions(state.categories);
@@ -5418,6 +6367,7 @@ function Imports({ state, updateState }) {
     <div>
       <Header title="Imports" subtitle="Turn online order exports into draft parts for the library." />
       {importError && <section className="alert alert-error">{importError}</section>}
+      <BusyNotice label={importBusy} />
       <section className="panel upload-card">
         <div>
           <h3>Import CSV or PDF</h3>
@@ -5425,6 +6375,7 @@ function Imports({ state, updateState }) {
         </div>
         <label className="file-picker header-picker">
           <input
+            disabled={!!importBusy}
             type="file"
             accept=".csv,.txt,.pdf"
             onChange={(event) => {
@@ -5432,7 +6383,7 @@ function Imports({ state, updateState }) {
               event.target.value = '';
             }}
           />
-          Import File
+          {importBusy ? 'Importing...' : 'Import File'}
         </label>
       </section>
       <div className="imports-layout">
@@ -5491,8 +6442,8 @@ function Imports({ state, updateState }) {
                   {item.status === 'draft' ? (
                     <>
                       {item.imageUrl && !item.imagePath && <button className="ghost" disabled={imageBusy === item.id} onClick={() => fetchItemImage(selectedBatch.id, item)}>{imageBusy === item.id ? 'Fetching...' : 'Fetch Image'}</button>}
-                      <button onClick={() => completeItem(selectedBatch.id, item, item.action)}>Apply</button>
-                      <button className="ghost" onClick={() => completeItem(selectedBatch.id, item, 'skip')}>Skip</button>
+                      <button disabled={itemBusy === item.id} onClick={() => completeItem(selectedBatch.id, item, item.action)}>{itemBusy === item.id ? 'Applying...' : 'Apply'}</button>
+                      <button className="ghost" disabled={itemBusy === item.id} onClick={() => completeItem(selectedBatch.id, item, 'skip')}>Skip</button>
                     </>
                   ) : <span className="status-badge">{item.status}</span>}
                 </div>
@@ -5517,6 +6468,10 @@ function Settings({ state, updateState }) {
   const [lanBusy, setLanBusy] = useState(false);
   const [lanQr, setLanQr] = useState('');
   const [lanAccessUrl, setLanAccessUrl] = useState('');
+  const [storageScan, setStorageScan] = useState(null);
+  const [storageBusy, setStorageBusy] = useState(false);
+  const [storageError, setStorageError] = useState('');
+  const [selectedOrphans, setSelectedOrphans] = useState(new Set());
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -5617,6 +6572,46 @@ function Settings({ state, updateState }) {
     }
   };
 
+  const runStorageScan = async () => {
+    setStorageBusy(true);
+    setStorageError('');
+    try {
+      const scan = await scanStorage(collectReferencedPaths(state));
+      setStorageScan(scan);
+      setSelectedOrphans(new Set((scan.orphans || []).slice(0, 80).map((file) => file.path)));
+    } catch (error) {
+      setStorageError(String(error));
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  const runStorageCleanup = async () => {
+    const deletePaths = [...selectedOrphans];
+    if (!deletePaths.length) return;
+    if (!window.confirm(`Delete ${deletePaths.length} selected unreferenced stored files?`)) return;
+    setStorageBusy(true);
+    setStorageError('');
+    try {
+      const scan = await cleanupOrphanedFiles(collectReferencedPaths(state), deletePaths);
+      setStorageScan(scan);
+      setSelectedOrphans(new Set((scan.orphans || []).slice(0, 80).map((file) => file.path)));
+    } catch (error) {
+      setStorageError(String(error));
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  const toggleOrphan = (path) => {
+    setSelectedOrphans((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
   return (
     <div>
       <Header title="Settings" subtitle="Defaults and safeguards for documenting electronics projects." />
@@ -5650,6 +6645,55 @@ function Settings({ state, updateState }) {
         </div>
         {backupNotice && <p className="success-text">{backupNotice}</p>}
         {restoreError && <p className="error-text">{restoreError}</p>}
+      </section>
+      <section className="panel settings-section">
+        <h2>Storage Cleanup</h2>
+        <p>Scan copied BuildBook files and generated thumbnails for orphaned files no longer referenced by app data.</p>
+        <div className="button-row backup-actions">
+          <button className="secondary" onClick={runStorageScan} disabled={storageBusy}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
+          <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Clean Selected</button>
+        </div>
+        {storageScan && (
+          <div className="settings-list">
+            <span>{storageScan.fileCount} stored files, {Math.round(storageScan.totalBytes / 1024 / 1024)} MB total.</span>
+            <span>{storageScan.orphanCount} orphan files, {Math.round(storageScan.orphanBytes / 1024 / 1024)} MB recoverable.</span>
+            {storageScan.deletedCount ? <span>{storageScan.deletedCount} files deleted.</span> : null}
+          </div>
+        )}
+        {storageScan?.orphans?.length ? (
+          <div className="orphan-file-list">
+            <div className="orphan-toolbar">
+              <button type="button" className="ghost" onClick={() => setSelectedOrphans(new Set((storageScan.orphans || []).slice(0, 80).map((file) => file.path)))}>Select Visible</button>
+              <button type="button" className="ghost" onClick={() => setSelectedOrphans(new Set())}>Select None</button>
+              <span>{selectedOrphans.size} selected</span>
+            </div>
+            {storageScan.orphans.slice(0, 80).map((file) => (
+              <label key={file.path} className="orphan-file-row">
+                <input type="checkbox" checked={selectedOrphans.has(file.path)} onChange={() => toggleOrphan(file.path)} />
+                <span>{file.relativePath || file.name}</span>
+                <small>{Math.max(1, Math.round(file.size / 1024))} KB</small>
+                <small>{file.modifiedAt ? new Date(Number(file.modifiedAt)).toLocaleDateString() : ''}</small>
+                <button
+                  type="button"
+                  className="ghost"
+                  onClick={async (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    try {
+                      await openStoredFile(file.path);
+                    } catch (error) {
+                      setStorageError(String(error));
+                    }
+                  }}
+                >
+                  Open
+                </button>
+              </label>
+            ))}
+            {storageScan.orphans.length > 80 && <p>{storageScan.orphans.length - 80} more orphan files hidden. Only visible checked files will be cleaned.</p>}
+          </div>
+        ) : null}
+        {storageError && <p className="error-text">{storageError}</p>}
       </section>
       <section className="panel settings-section">
         <h2>Local Network Access</h2>
@@ -5844,7 +6888,7 @@ function ThemeEditorModal({ theme, onClose, onSave }) {
 function TemplatePreviewModal({ template, onClose, onUpdate }) {
   const [newStep, setNewStep] = useState('');
   const [newChecklist, setNewChecklist] = useState('');
-  const [newTracker, setNewTracker] = useState({ name: '', extensions: '' });
+  const [newTracker, setNewTracker] = useState({ name: '', extensions: '', color: '#58a6ff' });
   const [selectedSteps, setSelectedSteps] = useState([]);
   const [dragTrackerId, setDragTrackerId] = useState('');
   const [dragTrackerOverId, setDragTrackerOverId] = useState('');
@@ -5880,10 +6924,10 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
     onUpdate({
       fileTrackers: [
         ...template.fileTrackers,
-        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), programPath: '' },
+        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), color: newTracker.color || '#58a6ff', programPath: '' },
       ],
     });
-    setNewTracker({ name: '', extensions: '' });
+    setNewTracker({ name: '', extensions: '', color: '#58a6ff' });
   };
 
   const updateTracker = (trackerId, patch) => {
@@ -6006,6 +7050,7 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
               <div className="tracker-row">
                 <input value={newTracker.name} onChange={(event) => setNewTracker((current) => ({ ...current, name: event.target.value }))} placeholder="Tracker name" />
                 <input value={newTracker.extensions} onChange={(event) => setNewTracker((current) => ({ ...current, extensions: event.target.value }))} placeholder=".pdf,.dxf" />
+                <input aria-label="Tracker color" type="color" value={validHexColor(newTracker.color) ? newTracker.color : '#58a6ff'} onChange={(event) => setNewTracker((current) => ({ ...current, color: event.target.value }))} />
                 <button onClick={addTracker}>Add</button>
               </div>
               {template.fileTrackers.map((tracker) => (
@@ -6026,6 +7071,7 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
                   </span>
                   <input value={tracker.name} onChange={(event) => updateTracker(tracker.id, { name: event.target.value })} placeholder="Tracker name" />
                   <input value={tracker.extensions || ''} onChange={(event) => updateTracker(tracker.id, { extensions: event.target.value })} placeholder=".pdf,.dxf" />
+                  <input aria-label={`${tracker.name} color`} type="color" value={validHexColor(tracker.color) ? tracker.color : '#58a6ff'} onChange={(event) => updateTracker(tracker.id, { color: event.target.value })} />
                   <button className="ghost danger-button" onClick={() => onUpdate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
                 </div>
               ))}

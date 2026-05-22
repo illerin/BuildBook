@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.101';
+export const APP_VERSION = '0.3.127';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -21,11 +21,11 @@ export const DEFAULT_CATEGORIES = [
 ];
 
 export const DEFAULT_FILE_TRACKERS = [
-  { id: 'tracker-datasheets', name: 'Datasheets', extensions: '.pdf', viewer: 'pdf', programPath: '' },
-  { id: 'tracker-firmware', name: 'Firmware', extensions: '.ino,.cpp,.h', viewer: 'text', programPath: '' },
-  { id: 'tracker-drawings', name: 'Drawings', extensions: '.dxf,.dwg', viewer: 'cad', programPath: '' },
-  { id: 'tracker-models', name: '3D Models', extensions: '.stl,.step,.obj', viewer: 'model', programPath: '' },
-  { id: 'tracker-bom', name: 'PCB BOM', extensions: '.xlsx,.xls,.csv', viewer: 'spreadsheet', programPath: '' },
+  { id: 'tracker-datasheets', name: 'Datasheets', extensions: '.pdf', viewer: 'pdf', programPath: '', color: '#58a6ff' },
+  { id: 'tracker-firmware', name: 'Firmware', extensions: '.ino,.cpp,.h', viewer: 'text', programPath: '', color: '#56d364' },
+  { id: 'tracker-drawings', name: 'Drawings', extensions: '.dxf,.dwg', viewer: 'cad', programPath: '', color: '#d29922' },
+  { id: 'tracker-models', name: '3D Models', extensions: '.stl,.step,.obj', viewer: 'model', programPath: '', color: '#f778ba' },
+  { id: 'tracker-bom', name: 'PCB BOM', extensions: '.xlsx,.xls,.csv', viewer: 'spreadsheet', programPath: '', color: '#bc8cff' },
 ];
 
 export const DEFAULT_PROJECT_STEPS = [
@@ -48,6 +48,7 @@ export const DEFAULT_THEME = {
   surfaceRaised: '#21262d',
   field: '#0d1117',
   border: '#30363d',
+  borderSoft: '#21262d',
   text: '#e1e4e8',
   textMuted: '#8b949e',
   textSoft: '#c9d1d9',
@@ -58,6 +59,18 @@ export const DEFAULT_THEME = {
   danger: '#da3633',
   dangerHover: '#f85149',
   warning: '#d29922',
+  projectTagBg: '#1b3a5a',
+  projectTagText: '#79c0ff',
+  statusActiveBg: '#1f6231',
+  statusActiveText: '#7ee787',
+  statusPausedBg: '#2d333b',
+  statusPausedText: '#adbac7',
+  statusWaitingBg: '#5a3e1b',
+  statusWaitingText: '#d29922',
+  statusCompletedBg: '#1b3a5a',
+  statusCompletedText: '#79c0ff',
+  statusArchivedBg: '#3d2a6b',
+  statusArchivedText: '#d2a8ff',
 };
 
 const now = () => new Date().toISOString();
@@ -92,6 +105,8 @@ export const DEFAULT_STATE = {
       nextSteps: ['Verify ADS1115 gain setting', 'Attach final schematic PDF'],
       partIds: ['part-ads1115', 'part-oled'],
       partQuantities: {},
+      photoFolders: [],
+      instructions: { intro: '', steps: [] },
       files: [
         {
           id: 'file-ads1115-datasheet',
@@ -175,17 +190,32 @@ export function normalizeState(raw) {
       ...template,
       steps: rawSteps.length ? rawSteps : DEFAULT_STATE.template.steps,
       checklist: Array.isArray(template.checklist) ? template.checklist : DEFAULT_STATE.template.checklist,
-      fileTrackers: Array.isArray(template.fileTrackers) ? template.fileTrackers : DEFAULT_FILE_TRACKERS,
+      fileTrackers: (Array.isArray(template.fileTrackers) ? template.fileTrackers : DEFAULT_FILE_TRACKERS).map((tracker, index) => ({
+        ...tracker,
+        color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
+      })),
     },
     projects: (Array.isArray(state.projects) ? state.projects : DEFAULT_STATE.projects).map((project) => ({
       ...project,
       noteImages: Array.isArray(project.noteImages) ? project.noteImages : [],
-      files: Array.isArray(project.files) ? project.files : [],
+      files: Array.isArray(project.files) ? project.files.map((file) => ({
+        ...file,
+        trackedItemId: file.trackedItemId || file.id,
+      })) : [],
       partIds: Array.isArray(project.partIds) ? project.partIds : [],
       partQuantities: project.partQuantities && typeof project.partQuantities === 'object' ? project.partQuantities : {},
+      photoFolders: Array.isArray(project.photoFolders) ? project.photoFolders.map((folder) => ({
+        ...folder,
+        photos: Array.isArray(folder.photos) ? folder.photos : [],
+      })) : [],
+      instructions: project.instructions && typeof project.instructions === 'object' ? {
+        intro: project.instructions.intro || '',
+        steps: Array.isArray(project.instructions.steps) ? project.instructions.steps : [],
+      } : { intro: '', steps: [] },
     })),
     parts: (Array.isArray(state.parts) ? state.parts : DEFAULT_STATE.parts).map((part) => ({
       ...part,
+      imageThumbnail: part.imageThumbnail || '',
       categoryId: validCategoryIds.has(part.categoryId) ? part.categoryId : 'cat-unassigned',
       documents: Array.isArray(part.documents) ? part.documents : [],
     })),
