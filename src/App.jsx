@@ -33,6 +33,7 @@ import {
   scanStorage,
   saveBytesFile,
   savePickedFile,
+  setCloseToTray,
   startLanServer,
   stopLanServer,
 } from './desktop';
@@ -1832,6 +1833,11 @@ export default function App() {
     stopLanServer().catch(() => {});
   }, [state?.lanServer?.enabled, state?.lanServer?.port, state?.lanServer?.token, state?.lanServer?.requireToken]);
 
+  useEffect(() => {
+    if (!state) return;
+    setCloseToTray(state.closeToTray).catch((error) => console.error(error));
+  }, [state?.closeToTray]);
+
   if (!state) return <div className="loading">Loading BuildBook...</div>;
 
   const handlePointerDownCapture = (event) => {
@@ -2303,6 +2309,7 @@ function NoteImageMarkupModal({ source, onCancel, onSave }) {
   const canvasRef = useRef(null);
   const drawingRef = useRef(false);
   const lastPointRef = useRef(null);
+  const [strokeColor, setStrokeColor] = useState(() => cssColor('--danger-hover', '#f85149'));
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -2333,7 +2340,7 @@ function NoteImageMarkupModal({ source, onCancel, onSave }) {
     const point = canvasPoint(event);
     const previous = lastPointRef.current || point;
     const context = canvasRef.current.getContext('2d');
-    context.strokeStyle = cssColor('--danger-hover', '#f85149');
+    context.strokeStyle = strokeColor;
     context.lineWidth = 5;
     context.lineCap = 'round';
     context.beginPath();
@@ -2348,7 +2355,13 @@ function NoteImageMarkupModal({ source, onCancel, onSave }) {
       <div className="modal markup-modal">
         <div className="section-title">
           <h2>Markup Image</h2>
-          <button className="ghost" onClick={onCancel}>Close</button>
+          <div className="markup-toolbar">
+            <label className="markup-color-control">
+              <span>Color</span>
+              <input type="color" value={strokeColor} onChange={(event) => setStrokeColor(event.target.value)} />
+            </label>
+            <button className="ghost" onClick={onCancel}>Close</button>
+          </div>
         </div>
         <canvas
           ref={canvasRef}
@@ -2461,8 +2474,8 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => fileInputRef.current?.click()}>Image</button>
         {selectedImage && (
           <div className="rich-image-tools">
-            <span>Image size</span>
-            <input type="range" min="20" max="100" value={imageWidth} onChange={(event) => updateImageWidth(Number(event.target.value))} />
+            <span>Image size {imageWidth}%</span>
+            <input type="range" min="5" max="100" step="5" value={imageWidth} onChange={(event) => updateImageWidth(Number(event.target.value))} />
             <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => setMarkupSource(selectedImage.src)}>Markup</button>
           </div>
         )}
@@ -6904,6 +6917,18 @@ function Settings({ state, updateState }) {
         {lanNotice && <p className="success-text">{lanNotice}</p>}
         {lanError && <p className="error-text">{lanError}</p>}
         <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
+      </section>
+      <section className="panel settings-section">
+        <h2>Background Operation</h2>
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={Boolean(state.closeToTray)}
+            onChange={(event) => updateState((current) => ({ ...current, closeToTray: event.target.checked }))}
+          />
+          Keep running in the system tray when the window is closed
+        </label>
+        <p>When enabled, the tray icon can reopen BuildBook or quit it completely.</p>
       </section>
       <section className="panel settings-section">
         <h2>Quick Notes</h2>

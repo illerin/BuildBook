@@ -232,6 +232,11 @@ export async function lanServerStatus() {
   return invoke('lan_server_status');
 }
 
+export async function setCloseToTray(enabled) {
+  if (!isTauri()) return;
+  await invoke('set_close_to_tray', { enabled: Boolean(enabled) });
+}
+
 export function extensionAllowed(fileName, extensions) {
   const rules = extensions
     .split(',')

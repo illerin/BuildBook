@@ -1,9 +1,16 @@
-use tauri::Manager;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    Manager,
+    WindowEvent,
+};
+
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -11,6 +18,42 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .setup(|app| {
+            let open_item = MenuItem::with_id(app, "open", "Open BuildBook", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit BuildBook", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let tray = TrayIconBuilder::with_id("buildbook-tray")
+                .icon(app.default_window_icon().expect("BuildBook tray icon is missing").clone())
+                .tooltip("BuildBook")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "open" => show_main_window(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        show_main_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
+            tray.set_visible(false)?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if CLOSE_TO_TRAY.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             read_app_state,
             write_app_state,
@@ -30,10 +73,27 @@ pub fn run() {
             shell_thumbnail_bytes,
             start_lan_server,
             stop_lan_server,
-            lan_server_status
+            lan_server_status,
+            set_close_to_tray
         ])
         .run(tauri::generate_context!())
         .expect("error while running BuildBook");
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+#[tauri::command]
+fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) {
+    CLOSE_TO_TRAY.store(enabled, Ordering::SeqCst);
+    if let Some(tray) = app.tray_by_id("buildbook-tray") {
+        let _ = tray.set_visible(enabled);
+    }
 }
 
 fn state_file_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {

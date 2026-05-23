@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.133';
+export const APP_VERSION = '0.3.135';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -77,6 +77,7 @@ const now = () => new Date().toISOString();
 
 export const DEFAULT_STATE = {
   version: APP_VERSION,
+  closeToTray: false,
   lanServer: {
     enabled: false,
     port: 8787,
@@ -180,6 +181,7 @@ export function normalizeState(raw) {
     ...DEFAULT_STATE,
     ...state,
     version: APP_VERSION,
+    closeToTray: Boolean(state.closeToTray),
     categories,
     theme: {
       ...DEFAULT_THEME,
