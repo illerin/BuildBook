@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
+import { relaunch } from '@tauri-apps/plugin-process';
+import { check as checkForTauriUpdate } from '@tauri-apps/plugin-updater';
 import {
   APP_VERSION,
   DEFAULT_THEME,
@@ -6525,6 +6527,8 @@ function Settings({ state, updateState }) {
   const [updateNotice, setUpdateNotice] = useState('');
   const [updateError, setUpdateError] = useState('');
   const [availableReleaseUrl, setAvailableReleaseUrl] = useState('');
+  const [availableUpdate, setAvailableUpdate] = useState(null);
+  const [updateProgress, setUpdateProgress] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -6678,7 +6682,19 @@ function Settings({ state, updateState }) {
     setUpdateNotice('');
     setUpdateError('');
     setAvailableReleaseUrl('');
+    setAvailableUpdate(null);
+    setUpdateProgress('');
     try {
+      if (window.__TAURI_INTERNALS__) {
+        const update = await checkForTauriUpdate();
+        if (update) {
+          setAvailableUpdate(update);
+          setUpdateNotice(`Update available: v${update.version}. Installed: v${APP_VERSION}.`);
+        } else {
+          setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
+        }
+        return;
+      }
       const response = await fetch(GITHUB_LATEST_RELEASE_API, {
         headers: { Accept: 'application/vnd.github+json' },
       });
@@ -6696,6 +6712,36 @@ function Settings({ state, updateState }) {
         setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
       }
     } catch (error) {
+      setUpdateError(String(error));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!availableUpdate) return;
+    setUpdateBusy(true);
+    setUpdateError('');
+    setUpdateProgress('Preparing update download...');
+    try {
+      let received = 0;
+      let total = 0;
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === 'Started') {
+          total = event.data.contentLength || 0;
+          setUpdateProgress('Downloading update...');
+        } else if (event.event === 'Progress') {
+          received += event.data.chunkLength || 0;
+          const percent = total ? Math.min(100, Math.round((received / total) * 100)) : 0;
+          setUpdateProgress(total ? `Downloading update... ${percent}%` : 'Downloading update...');
+        } else if (event.event === 'Finished') {
+          setUpdateProgress('Installing update...');
+        }
+      });
+      setUpdateNotice('Update installed. Restarting BuildBook...');
+      await relaunch();
+    } catch (error) {
+      setUpdateProgress('');
       setUpdateError(String(error));
     } finally {
       setUpdateBusy(false);
@@ -6726,12 +6772,13 @@ function Settings({ state, updateState }) {
       </section>
       <section className="panel settings-section">
         <h2>Software Updates</h2>
-        <p>Check GitHub Releases for a newer BuildBook installer.</p>
+        <p>Check for a signed BuildBook update and install it from the desktop app.</p>
         <div className="button-row">
           <button className="secondary" onClick={checkForUpdates} disabled={updateBusy}>{updateBusy ? 'Checking...' : 'Check for Updates'}</button>
+          {availableUpdate && <button onClick={installUpdate} disabled={updateBusy}>Install Update</button>}
           {availableReleaseUrl && <button onClick={() => openExternalUrl(availableReleaseUrl)}>Open Download Page</button>}
         </div>
-        {updateBusy && <BusyNotice label="Checking for updates..." />}
+        {updateBusy && <BusyNotice label={updateProgress || 'Checking for updates...'} />}
         {updateNotice && <p className="success-text">{updateNotice}</p>}
         {updateError && <p className="error-text">{updateError}</p>}
       </section>
