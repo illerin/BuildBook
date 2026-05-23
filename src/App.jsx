@@ -2734,7 +2734,16 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
         <article>
           <h3>Checklist</h3>
           <div className="inline-entry checklist-toolbar">
-            <input value={newChecklist} onChange={(event) => setNewChecklist(event.target.value)} placeholder="Add checklist item" />
+            <input
+              value={newChecklist}
+              onChange={(event) => setNewChecklist(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter') return;
+                event.preventDefault();
+                addChecklistItem();
+              }}
+              placeholder="Add checklist item"
+            />
             <button onClick={addChecklistItem}>Add</button>
             <button className="secondary checklist-toggle" onClick={() => setShowCompleted((value) => !value)}>
               {showCompleted ? 'Hide Completed' : 'Show Completed'}
