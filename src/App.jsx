@@ -671,12 +671,12 @@ async function restoreWebNoteImages(entries, html, projectId) {
   return nextHtml;
 }
 
-async function packageInlineNoteImages(entries, html, projectId) {
+async function packageInlineNoteImages(entries, html, projectId, packageFolder = 'note-images') {
   let nextHtml = String(html || '');
   const matches = [...nextHtml.matchAll(/data-project-image-path="([^"]+)"/g)];
   for (const [index, match] of matches.entries()) {
     const path = match[1];
-    const packagePath = await addFileEntry(entries, path, `projects/${safeName(projectId)}/note-images/inline-${index}${fileExtension(path) || '.image'}`);
+    const packagePath = await addFileEntry(entries, path, `projects/${safeName(projectId)}/${packageFolder}/inline-${index}${fileExtension(path) || '.image'}`);
     if (packagePath) {
       nextHtml = nextHtml.replace(match[0], `${match[0]} data-project-image-package-path="${escapeHtml(packagePath)}"`);
     }
@@ -684,13 +684,13 @@ async function packageInlineNoteImages(entries, html, projectId) {
   return nextHtml;
 }
 
-async function restoreInlineNoteImages(entries, html, projectId) {
+async function restoreInlineNoteImages(entries, html, projectId, library = `project-note-images/${projectId}`) {
   let nextHtml = String(html || '');
   const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-package-path="([^"]+)"[^>]*>/g)];
   for (const match of matches) {
     const tag = match[0];
     const packagePath = match[1];
-    const restoredPath = await saveZipAsset(entries, packagePath, packagePath.split('/').pop(), `project-note-images/${projectId}`);
+    const restoredPath = await saveZipAsset(entries, packagePath, packagePath.split('/').pop(), library);
     if (!restoredPath) continue;
     let restoredTag = tag.replace(/src="[^"]*"/, `src="${escapeHtml(assetUrl(restoredPath))}"`);
     restoredTag = /data-project-image-path="/.test(restoredTag)
@@ -702,7 +702,7 @@ async function restoreInlineNoteImages(entries, html, projectId) {
   return nextHtml;
 }
 
-async function buildFullBackupPackage(state) {
+async function buildFullBackupEntries(state) {
   const entries = [];
   const backupState = JSON.parse(JSON.stringify(state));
 
@@ -710,6 +710,14 @@ async function buildFullBackupPackage(state) {
     project.imagePackagePath = await addFileEntry(entries, project.image, `projects/${safeName(project.id)}/image/${safeName(project.name)}${fileExtension(project.image) || '.image'}`);
     if (project.imagePackagePath) project.image = '';
     project.notes = await packageInlineNoteImages(entries, project.notes, project.id);
+    project.instructions = project.instructions ? {
+      ...project.instructions,
+      intro: await packageInlineNoteImages(entries, project.instructions.intro, project.id, 'instructions/intro-images'),
+      steps: await Promise.all((project.instructions.steps || []).map(async (step) => ({
+        ...step,
+        body: await packageInlineNoteImages(entries, step.body, project.id, `instructions/steps/${safeName(step.id)}`),
+      }))),
+    } : project.instructions;
 
     project.noteImages = await Promise.all((project.noteImages || []).map(async (image) => {
       const packagePath = await addFileEntry(entries, image.path, `projects/${safeName(project.id)}/note-images/${safeName(image.name || image.id)}${fileExtension(image.path) || ''}`);
@@ -775,7 +783,11 @@ async function buildFullBackupPackage(state) {
     state: backupState,
   };
   entries.unshift({ name: 'buildbook-backup.json', data: JSON.stringify(manifest, null, 2) });
-  return createZip(entries);
+  return entries;
+}
+
+async function buildFullBackupPackage(state) {
+  return createZip(await buildFullBackupEntries(state));
 }
 
 async function readFullBackupPackage(file) {
@@ -789,6 +801,14 @@ async function readFullBackupPackage(file) {
     project.image = await saveZipAsset(entries, project.imagePackagePath, `${project.name}-image`, `project-images/${project.id}`) || project.image || '';
     delete project.imagePackagePath;
     project.notes = await restoreInlineNoteImages(entries, project.notes, project.id);
+    project.instructions = project.instructions ? {
+      ...project.instructions,
+      intro: await restoreInlineNoteImages(entries, project.instructions.intro, project.id, `project-instructions/${project.id}/intro`),
+      steps: await Promise.all((project.instructions.steps || []).map(async (step) => ({
+        ...step,
+        body: await restoreInlineNoteImages(entries, step.body, project.id, `project-instructions/${project.id}/steps`),
+      }))),
+    } : project.instructions;
 
     project.noteImages = await Promise.all((project.noteImages || []).map(async (image) => {
       const path = await saveZipAsset(entries, image.packagePath, image.name, `project-note-images/${project.id}`);
@@ -1471,6 +1491,11 @@ async function buildWebFullBackupPackage(state) {
   }
 
   entries.unshift({ name: 'backup.json', data: JSON.stringify(backup, null, 2) });
+  const packagedNames = new Set(entries.map((entry) => entry.name));
+  const desktopEntries = await buildFullBackupEntries(state);
+  desktopEntries.forEach((entry) => {
+    if (!packagedNames.has(entry.name)) entries.push(entry);
+  });
   return createZip(entries);
 }
 
@@ -6485,7 +6510,8 @@ function Settings({ state, updateState }) {
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [backupNotice, setBackupNotice] = useState('');
-  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupExportBusy, setBackupExportBusy] = useState(false);
+  const [backupRestoreBusy, setBackupRestoreBusy] = useState(false);
   const [lanNotice, setLanNotice] = useState('');
   const [lanError, setLanError] = useState('');
   const [lanBusy, setLanBusy] = useState(false);
@@ -6566,7 +6592,7 @@ function Settings({ state, updateState }) {
   }, [state.lanServer?.enabled, state.lanServer?.port, state.lanServer?.token, state.lanServer?.requireToken]);
 
   const exportBackup = async () => {
-    setBackupBusy(true);
+    setBackupExportBusy(true);
     setRestoreError('');
     setBackupNotice('');
     try {
@@ -6576,14 +6602,14 @@ function Settings({ state, updateState }) {
     } catch (error) {
       setRestoreError(String(error));
     } finally {
-      setBackupBusy(false);
+      setBackupExportBusy(false);
     }
   };
 
   const restoreBackup = async (file) => {
     if (!file) return;
     if (!window.confirm('Restore will replace all current BuildBook data with this backup, including projects, parts, files, images, documents, imports, and settings. Continue?')) return;
-    setBackupBusy(true);
+    setBackupRestoreBusy(true);
     setRestoreError('');
     setBackupNotice('');
     try {
@@ -6595,7 +6621,7 @@ function Settings({ state, updateState }) {
     } catch (error) {
       setRestoreError(String(error));
     } finally {
-      setBackupBusy(false);
+      setBackupRestoreBusy(false);
     }
   };
 
@@ -6623,6 +6649,23 @@ function Settings({ state, updateState }) {
       const scan = await cleanupOrphanedFiles(collectReferencedPaths(state), deletePaths);
       setStorageScan(scan);
       setSelectedOrphans(new Set((scan.orphans || []).slice(0, 80).map((file) => file.path)));
+    } catch (error) {
+      setStorageError(String(error));
+    } finally {
+      setStorageBusy(false);
+    }
+  };
+
+  const runFullStorageCleanup = async () => {
+    const deletePaths = (storageScan?.orphans || []).map((file) => file.path);
+    if (!deletePaths.length) return;
+    if (!window.confirm(`Delete all ${deletePaths.length} orphaned stored files? This cannot be undone.`)) return;
+    setStorageBusy(true);
+    setStorageError('');
+    try {
+      const scan = await cleanupOrphanedFiles(collectReferencedPaths(state), deletePaths);
+      setStorageScan(scan);
+      setSelectedOrphans(new Set());
     } catch (error) {
       setStorageError(String(error));
     } finally {
@@ -6694,22 +6737,23 @@ function Settings({ state, updateState }) {
       </section>
       <section className="panel settings-section">
         <h2>Backup and Restore</h2>
-        <p>Backup downloads a portable zip containing app records, files, photos, documents, imports, and settings.</p>
+        <p>Backup downloads a portable zip containing all desktop data and assets, plus web-compatible restore data.</p>
         <div className="button-row backup-actions">
-          <button className="secondary" onClick={exportBackup} disabled={backupBusy}>{backupBusy ? 'Working...' : 'Export Backup'}</button>
-          <label className={`file-picker header-picker backup-button ${backupBusy ? 'disabled-picker' : ''}`}>
+          <button className="secondary" onClick={exportBackup} disabled={backupExportBusy || backupRestoreBusy}>{backupExportBusy ? 'Exporting...' : 'Export Backup'}</button>
+          <label className={`file-picker header-picker backup-button ${backupExportBusy || backupRestoreBusy ? 'disabled-picker' : ''}`}>
             <input
               type="file"
               accept=".zip,.json"
-              disabled={backupBusy}
+              disabled={backupExportBusy || backupRestoreBusy}
               onChange={(event) => {
                 restoreBackup(event.target.files?.[0]);
                 event.target.value = '';
               }}
             />
-            Restore Backup
+            {backupRestoreBusy ? 'Restoring...' : 'Restore Backup'}
           </label>
         </div>
+        {backupRestoreBusy && <BusyNotice label="Restoring backup..." />}
         {backupNotice && <p className="success-text">{backupNotice}</p>}
         {restoreError && <p className="error-text">{restoreError}</p>}
       </section>
@@ -6718,7 +6762,8 @@ function Settings({ state, updateState }) {
         <p>Scan copied BuildBook files and generated thumbnails for orphaned files no longer referenced by app data.</p>
         <div className="button-row backup-actions">
           <button className="secondary" onClick={runStorageScan} disabled={storageBusy}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
-          <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Clean Selected</button>
+          <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Delete Selected</button>
+          <button className="danger-fill" onClick={runFullStorageCleanup} disabled={storageBusy || !storageScan?.orphans?.length}>Delete All Orphaned Files</button>
         </div>
         {storageScan && (
           <div className="settings-list">
