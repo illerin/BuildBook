@@ -62,6 +62,20 @@ const FULL_PROJECT_EXPORT_OPTIONS = {
   allFileVersions: true,
 };
 
+const GITHUB_RELEASES_URL = 'https://github.com/illerin/BuildBook/releases';
+const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBook/releases/latest';
+
+function versionNumbers(version = '') {
+  return String(version).replace(/^v/i, '').split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
+}
+
+function isNewerVersion(candidate, current) {
+  const next = versionNumbers(candidate);
+  const installed = versionNumbers(current);
+  return next.some((number, index) => number > (installed[index] || 0)
+    && next.slice(0, index).every((previous, previousIndex) => previous === (installed[previousIndex] || 0)));
+}
+
 const THEME_FIELDS = [
   ['bg', 'App background'],
   ['sidebar', 'Sidebar background'],
@@ -6481,6 +6495,10 @@ function Settings({ state, updateState }) {
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageError, setStorageError] = useState('');
   const [selectedOrphans, setSelectedOrphans] = useState(new Set());
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState('');
+  const [updateError, setUpdateError] = useState('');
+  const [availableReleaseUrl, setAvailableReleaseUrl] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -6612,6 +6630,35 @@ function Settings({ state, updateState }) {
     }
   };
 
+  const checkForUpdates = async () => {
+    setUpdateBusy(true);
+    setUpdateNotice('');
+    setUpdateError('');
+    setAvailableReleaseUrl('');
+    try {
+      const response = await fetch(GITHUB_LATEST_RELEASE_API, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+      if (response.status === 404) {
+        setUpdateNotice('No published BuildBook releases found yet.');
+        return;
+      }
+      if (!response.ok) throw new Error(`Could not check updates. GitHub returned ${response.status}.`);
+      const release = await response.json();
+      const latestVersion = release.tag_name || release.name || '';
+      if (isNewerVersion(latestVersion, APP_VERSION)) {
+        setUpdateNotice(`Update available: ${latestVersion}. Installed: v${APP_VERSION}.`);
+        setAvailableReleaseUrl(release.html_url || GITHUB_RELEASES_URL);
+      } else {
+        setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
+      }
+    } catch (error) {
+      setUpdateError(String(error));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
   const toggleOrphan = (path) => {
     setSelectedOrphans((current) => {
       const next = new Set(current);
@@ -6633,6 +6680,17 @@ function Settings({ state, updateState }) {
         <h2>Color Theme</h2>
         <p>Review current app colors, adjust theme tokens, and export or import a portable theme file.</p>
         <button className="settings-template-button" onClick={() => setShowThemeEditor(true)}>Theme Editor</button>
+      </section>
+      <section className="panel settings-section">
+        <h2>Software Updates</h2>
+        <p>Check GitHub Releases for a newer BuildBook installer.</p>
+        <div className="button-row">
+          <button className="secondary" onClick={checkForUpdates} disabled={updateBusy}>{updateBusy ? 'Checking...' : 'Check for Updates'}</button>
+          {availableReleaseUrl && <button onClick={() => openExternalUrl(availableReleaseUrl)}>Open Download Page</button>}
+        </div>
+        {updateBusy && <BusyNotice label="Checking for updates..." />}
+        {updateNotice && <p className="success-text">{updateNotice}</p>}
+        {updateError && <p className="error-text">{updateError}</p>}
       </section>
       <section className="panel settings-section">
         <h2>Backup and Restore</h2>
