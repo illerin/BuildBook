@@ -52,6 +52,15 @@ npm run tauri build
 
 Build output is written under `src-tauri/target/release/bundle/`. The Windows installer is generated in `src-tauri/target/release/bundle/nsis/`.
 
+### Publish a release
+
+1. Commit and push the completed changes to the `main` branch.
+2. Confirm the version has been advanced for the release.
+3. Double-click `Publish Release.bat`.
+4. Type `RELEASE` when prompted.
+
+The launcher reads the current app version, verifies the repo is clean and pushed, then sends the version tag to GitHub. GitHub Actions builds and publishes the Windows installer.
+
 ## Update a source build
 
 If you are running BuildBook from source and want the latest code:
