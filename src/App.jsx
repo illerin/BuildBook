@@ -4,6 +4,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { check as checkForTauriUpdate } from '@tauri-apps/plugin-updater';
 import {
   APP_VERSION,
+  DEFAULT_STATE,
   DEFAULT_THEME,
   STATUSES,
   categoryLabel,
@@ -30,6 +31,7 @@ import {
   prepareEditableFile,
   readShellThumbnail,
   readStoredFile,
+  resetManagedStorage,
   scanStorage,
   saveBytesFile,
   savePickedFile,
@@ -65,7 +67,7 @@ const FULL_PROJECT_EXPORT_OPTIONS = {
   allFileVersions: true,
 };
 
-const GITHUB_RELEASES_URL = 'https://github.com/illerin/BuildBook/releases';
+const GITHUB_REPOSITORY_URL = 'https://github.com/illerin/BuildBook';
 const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBook/releases/latest';
 
 function versionNumbers(version = '') {
@@ -202,17 +204,21 @@ function findCategoryByPath(categories, path) {
 function suggestCategoryId(name, categories) {
   const text = String(name || '').toLowerCase();
   const rules = [
-    ['cat-boards', ['arduino', 'esp32', 'esp8266', 'raspberry', 'module', 'board', 'mcu', 'development']],
-    ['cat-sensors', ['sensor', 'temperature', 'humidity', 'imu', 'accelerometer', 'gyro', 'pressure', 'distance']],
-    ['cat-power', ['battery', 'charger', 'buck', 'boost', 'regulator', 'power', 'voltage', 'current', 'dc-dc']],
-    ['cat-connectors', ['connector', 'terminal', 'header', 'socket', 'plug', 'jack', 'usb', 'wire']],
-    ['cat-displays', ['display', 'oled', 'lcd', 'screen', 'tft', 'led matrix']],
-    ['cat-capacitors', ['capacitor', 'capacitance']],
-    ['cat-resistors', ['resistor', 'ohm']],
-    ['cat-switches', ['relay', 'switch']],
-    ['cat-motors', ['motor', 'servo', 'stepper', 'bearing', 'gear']],
-    ['cat-tools', ['tool', 'prototype', 'breadboard', 'crimper', 'solder']],
-    ['cat-mechanical', ['screw', 'bolt', 'nut', 'standoff', 'enclosure', 'case', 'bracket', 'hardware']],
+    ['cat-ac6da2e8-e4db-4c22-a1ac-dbe42f1b68d9', ['esp32', 'esp8266']],
+    ['cat-3db2c34e-ee9d-43e9-bcd9-936fbb4c7f6c', ['arduino']],
+    ['cat-web-13', ['raspberry', 'mcu', 'development board']],
+    ['cat-web-2', ['sensor', 'temperature', 'humidity', 'imu', 'accelerometer', 'gyro', 'pressure', 'distance']],
+    ['cat-web-14', ['battery', 'charger', 'buck', 'boost', 'regulator', 'power', 'voltage', 'current', 'dc-dc']],
+    ['cat-web-10', ['connector', 'terminal', 'header', 'socket', 'plug', 'jack', 'usb', 'wire']],
+    ['cat-281a2446-0b4c-4e29-b1f1-dbd2e099751e', ['display', 'oled', 'lcd', 'screen', 'tft', 'led matrix']],
+    ['cat-web-6', ['capacitor', 'capacitance']],
+    ['cat-web-1', ['resistor', 'ohm']],
+    ['cat-web-3', ['relay', 'switch']],
+    ['cat-web-5', ['motor', 'servo', 'stepper', 'bearing', 'gear']],
+    ['cat-web-9', ['tool', 'prototype', 'breadboard', 'crimper', 'solder']],
+    ['cat-web-34', ['screw', 'bolt', 'nut', 'standoff', 'hardware']],
+    ['cat-web-4', ['enclosure', 'case', 'bracket']],
+    ['cat-web-11', ['module', 'board']],
   ];
   const hit = rules.find(([, terms]) => terms.some((term) => text.includes(term)));
   return categories.some((category) => category.id === hit?.[0]) ? hit[0] : 'cat-unassigned';
@@ -546,9 +552,55 @@ async function addFileEntry(entries, path, packagePath) {
   }
 }
 
+function isKnownImageExtension(extension = '') {
+  return IMAGE_EXTENSIONS.includes(String(extension || '').toLowerCase());
+}
+
+function replaceFileExtension(fileName = '', nextExtension = '') {
+  const normalizedExtension = String(nextExtension || '').toLowerCase();
+  const baseName = String(fileName || '').split(/[\\/]/).pop() || 'file';
+  const withoutExtension = baseName.replace(/\.[^.]+$/, '');
+  return `${withoutExtension}${normalizedExtension}`;
+}
+
+function detectImageExtensionFromBytes(bytes) {
+  if (!bytes?.length) return '';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return '.jpg';
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return '.png';
+  if (bytes.length >= 6) {
+    const header = new TextDecoder().decode(bytes.slice(0, 6));
+    if (header === 'GIF87a' || header === 'GIF89a') return '.gif';
+  }
+  if (bytes.length >= 12) {
+    const riff = new TextDecoder().decode(bytes.slice(0, 4));
+    const webp = new TextDecoder().decode(bytes.slice(8, 12));
+    if (riff === 'RIFF' && webp === 'WEBP') return '.webp';
+  }
+  const text = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 256))).trimStart().toLowerCase();
+  if (text.startsWith('<svg') || text.startsWith('<?xml')) return '.svg';
+  return '';
+}
+
+async function imagePackageExtension(path, fallback = '.jpg') {
+  const extension = fileExtension(path);
+  if (isKnownImageExtension(extension)) return extension;
+  try {
+    return detectImageExtensionFromBytes(await readStoredFile(path)) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function saveZipAsset(entries, packagePath, name, library) {
   if (!packagePath || !entries.has(packagePath)) return '';
-  const stored = await saveBytesFile(name || packagePath.split('/').pop(), library, entries.get(packagePath));
+  const bytes = entries.get(packagePath);
+  let storedName = name || packagePath.split('/').pop();
+  const extension = fileExtension(storedName) || fileExtension(packagePath);
+  if (!isKnownImageExtension(extension)) {
+    const detectedExtension = detectImageExtensionFromBytes(bytes);
+    if (detectedExtension) storedName = replaceFileExtension(storedName, detectedExtension);
+  }
+  const stored = await saveBytesFile(storedName, library, bytes);
   return stored.path;
 }
 
@@ -628,7 +680,7 @@ async function rewriteNotesForWeb(entries, html, projectId, tableRows = []) {
   for (const [index, match] of matches.entries()) {
     const tag = match[0];
     const path = match[1];
-    const fileName = webUploadName('note', `${projectId}-${index + 1}`, path, fileExtension(path) || '.image');
+    const fileName = webUploadName('note', `${projectId}-${index + 1}`, path, await imagePackageExtension(path));
     const added = await addWebUploadEntry(entries, path, 'images', fileName);
     if (!added) continue;
     tableRows.push({ image_path: fileName, archive_path: `note-images/${fileName}` });
@@ -679,7 +731,7 @@ async function packageInlineNoteImages(entries, html, projectId, packageFolder =
   const matches = [...nextHtml.matchAll(/data-project-image-path="([^"]+)"/g)];
   for (const [index, match] of matches.entries()) {
     const path = match[1];
-    const packagePath = await addFileEntry(entries, path, `projects/${safeName(projectId)}/${packageFolder}/inline-${index}${fileExtension(path) || '.image'}`);
+    const packagePath = await addFileEntry(entries, path, `projects/${safeName(projectId)}/${packageFolder}/inline-${index}${await imagePackageExtension(path)}`);
     if (packagePath) {
       nextHtml = nextHtml.replace(match[0], `${match[0]} data-project-image-package-path="${escapeHtml(packagePath)}"`);
     }
@@ -710,7 +762,7 @@ async function buildFullBackupEntries(state) {
   const backupState = JSON.parse(JSON.stringify(state));
 
   for (const project of backupState.projects || []) {
-    project.imagePackagePath = await addFileEntry(entries, project.image, `projects/${safeName(project.id)}/image/${safeName(project.name)}${fileExtension(project.image) || '.image'}`);
+    project.imagePackagePath = await addFileEntry(entries, project.image, `projects/${safeName(project.id)}/image/${safeName(project.name)}${await imagePackageExtension(project.image)}`);
     if (project.imagePackagePath) project.image = '';
     project.notes = await packageInlineNoteImages(entries, project.notes, project.id);
     project.instructions = project.instructions ? {
@@ -723,15 +775,15 @@ async function buildFullBackupEntries(state) {
     } : project.instructions;
 
     project.noteImages = await Promise.all((project.noteImages || []).map(async (image) => {
-      const packagePath = await addFileEntry(entries, image.path, `projects/${safeName(project.id)}/note-images/${safeName(image.name || image.id)}${fileExtension(image.path) || ''}`);
+      const packagePath = await addFileEntry(entries, image.path, `projects/${safeName(project.id)}/note-images/${safeName(image.name || image.id)}${await imagePackageExtension(image.path)}`);
       return packagePath ? { ...image, path: '', packagePath } : image;
     }));
 
     project.photoFolders = await Promise.all((project.photoFolders || []).map(async (folder) => ({
       ...folder,
       photos: await Promise.all((folder.photos || []).map(async (photo) => {
-        const packagePath = await addFileEntry(entries, photo.path, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/${safeName(photo.id)}-${safeName(photo.name)}`);
-        const markupPackagePath = await addFileEntry(entries, photo.markupPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/markup-${safeName(photo.id)}-${safeName(photo.name)}`);
+        const packagePath = await addFileEntry(entries, photo.path, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/${safeName(photo.id)}-${safeName(photo.name)}${await imagePackageExtension(photo.path)}`);
+        const markupPackagePath = await addFileEntry(entries, photo.markupPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/markup-${safeName(photo.id)}-${safeName(photo.name)}${await imagePackageExtension(photo.markupPath)}`);
         const thumbnailPackagePath = await addFileEntry(entries, photo.thumbnailPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/thumb-${safeName(photo.id)}.jpg`);
         const markupThumbnailPackagePath = await addFileEntry(entries, photo.markupThumbnailPath, `projects/${safeName(project.id)}/photos/${safeName(folder.id)}/markup-thumb-${safeName(photo.id)}.jpg`);
         return {
@@ -762,7 +814,7 @@ async function buildFullBackupEntries(state) {
   }
 
   for (const part of backupState.parts || []) {
-    part.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.id)}/image/${safeName(part.name)}${fileExtension(part.image) || '.image'}`);
+    part.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.id)}/image/${safeName(part.name)}${await imagePackageExtension(part.image)}`);
     if (part.imagePackagePath) part.image = '';
     part.imageThumbnailPackagePath = await addFileEntry(entries, part.imageThumbnail, `parts/${safeName(part.id)}/image/thumb-${safeName(part.name)}.jpg`);
     if (part.imageThumbnailPackagePath) part.imageThumbnail = '';
@@ -774,7 +826,7 @@ async function buildFullBackupEntries(state) {
 
   for (const batch of backupState.importBatches || []) {
     batch.items = await Promise.all((batch.items || []).map(async (item) => {
-      const packagePath = await addFileEntry(entries, item.imagePath, `imports/${safeName(batch.id)}/images/${safeName(item.id)}${fileExtension(item.imagePath) || '.image'}`);
+      const packagePath = await addFileEntry(entries, item.imagePath, `imports/${safeName(batch.id)}/images/${safeName(item.id)}${await imagePackageExtension(item.imagePath)}`);
       return packagePath ? { ...item, imagePath: '', imagePackagePath: packagePath } : item;
     }));
   }
@@ -881,7 +933,7 @@ async function readFullBackupPackage(file) {
     }));
   }
 
-  return normalizeState(restoredState);
+  return normalizeState(restoredState, { preserveImportedCategories: true });
 }
 
 async function readWebBackupPackage(entries) {
@@ -1064,7 +1116,7 @@ async function readWebBackupPackage(entries) {
     projects,
     parts,
     importBatches,
-  });
+  }, { preserveImportedCategories: true });
 }
 
 function webFileTrackersFromProjectManifest(manifest) {
@@ -1194,7 +1246,7 @@ async function buildWebProjectPackage(state, project, exportOptions = {}) {
   const linkedParts = options.linkedParts ? project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean) : [];
   const noteImages = [];
   const notes = options.overviewNotes ? await rewriteNotesForWeb(entries, project.notes, project.id, noteImages) : '';
-  const projectImageName = options.overviewNotes && project.image ? webUploadName('project', project.id, `${project.name}${fileExtension(project.image) || '.image'}`) : '';
+  const projectImageName = options.overviewNotes && project.image ? webUploadName('project', project.id, `${project.name}${await imagePackageExtension(project.image)}`) : '';
   const projectImageArchive = projectImageName ? `project-image/${projectImageName}` : '';
   if (project.image && projectImageName) await addFileEntry(entries, project.image, projectImageArchive);
   const photoArchiveById = new Map();
@@ -1204,9 +1256,9 @@ async function buildWebProjectPackage(state, project, exportOptions = {}) {
     for (const folder of project.photoFolders || []) {
       const exportedPhotos = [];
       for (const photo of folder.photos || []) {
-        const archivePath = `project-photos/${safeName(folder.name)}/${safeName(photo.name)}`;
+        const archivePath = `project-photos/${safeName(folder.name)}/${safeName(photo.name)}${await imagePackageExtension(photo.path)}`;
         await addFileEntry(entries, photo.path, archivePath);
-        const markupArchivePath = photo.markupPath ? `project-photos/${safeName(folder.name)}/markup-${safeName(photo.name)}` : '';
+        const markupArchivePath = photo.markupPath ? `project-photos/${safeName(folder.name)}/markup-${safeName(photo.name)}${await imagePackageExtension(photo.markupPath)}` : '';
         if (photo.markupPath) await addFileEntry(entries, photo.markupPath, markupArchivePath);
         photoArchiveById.set(photo.id, markupArchivePath || archivePath);
         if (options.photos) exportedPhotos.push({ ...photo, path: '', markupPath: '', thumbnailPath: '', markupThumbnailPath: '', archive_path: archivePath, markup_archive_path: markupArchivePath });
@@ -1252,7 +1304,7 @@ async function buildWebProjectPackage(state, project, exportOptions = {}) {
 
   const parts = [];
   for (const [partIndex, part] of linkedParts.entries()) {
-    const partImageName = part.image ? webUploadName('part', part.id, `${part.name}${fileExtension(part.image) || '.image'}`) : '';
+    const partImageName = part.image ? webUploadName('part', part.id, `${part.name}${await imagePackageExtension(part.image)}`) : '';
     const partImageArchive = partImageName ? `part-images/${partImageName}` : '';
     if (part.image && partImageArchive) await addFileEntry(entries, part.image, partImageArchive);
     const documents = [];
@@ -1380,7 +1432,7 @@ async function buildWebFullBackupPackage(state) {
   for (const part of state.parts) partIds.set(part.id, alloc());
   for (const part of state.parts) {
     const id = partIds.get(part.id);
-    const imageName = part.image ? webUploadName('part', id, `${part.name}${fileExtension(part.image) || '.image'}`) : null;
+    const imageName = part.image ? webUploadName('part', id, `${part.name}${await imagePackageExtension(part.image)}`) : null;
     if (part.image && imageName) await addWebUploadEntry(entries, part.image, 'images', imageName);
     backup.part.push({
       id,
@@ -1414,7 +1466,7 @@ async function buildWebFullBackupPackage(state) {
   for (const project of state.projects) projectIds.set(project.id, alloc());
   for (const project of state.projects) {
     const id = projectIds.get(project.id);
-    const imageName = project.image ? webUploadName('project', id, `${project.name}${fileExtension(project.image) || '.image'}`) : null;
+    const imageName = project.image ? webUploadName('project', id, `${project.name}${await imagePackageExtension(project.image)}`) : null;
     if (project.image && imageName) await addWebUploadEntry(entries, project.image, 'images', imageName);
     const notes = await rewriteNotesForWeb(entries, project.notes, id, []);
     backup.project.push({
@@ -1512,7 +1564,7 @@ async function buildProjectPackage(state, project) {
     noteImages: [],
   };
 
-  exportedProject.imagePackagePath = await addFileEntry(entries, project.image, `project/image/${safeName(project.name)}${fileExtension(project.image) || '.image'}`);
+  exportedProject.imagePackagePath = await addFileEntry(entries, project.image, `project/image/${safeName(project.name)}${await imagePackageExtension(project.image)}`);
 
   for (const image of project.noteImages || []) {
     const packagePath = await addFileEntry(entries, image.path, `project/note-images/${safeName(image.name)}`);
@@ -1545,7 +1597,7 @@ async function buildProjectPackage(state, project) {
       categoryPath: categoryPath(state.categories, part.categoryId),
       documents: [],
     };
-    exportedPart.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.name)}/image${fileExtension(part.image) || '.image'}`);
+    exportedPart.imagePackagePath = await addFileEntry(entries, part.image, `parts/${safeName(part.name)}/image${await imagePackageExtension(part.image)}`);
     exportedPart.imageThumbnailPackagePath = await addFileEntry(entries, part.imageThumbnail, `parts/${safeName(part.name)}/thumb.jpg`);
     entries.push({ name: `parts/${safeName(part.name)}/part-info.txt`, data: partInfoText(part, state.categories) });
     for (const doc of part.documents || []) {
@@ -4472,7 +4524,9 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
           <select value={categoryFilter} onChange={(event) => setCategoryFilter(event.target.value)}>
             <option value="">All categories</option>
             {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
-              <option key={category.id} value={category.id}>{category.label}</option>
+              <option key={category.id} value={category.id}>
+                {category.depth ? `${'-'.repeat(category.depth)} ${category.name}` : category.name}
+              </option>
             ))}
           </select>
         </label>
@@ -6536,6 +6590,10 @@ function Settings({ state, updateState }) {
   const [storageBusy, setStorageBusy] = useState(false);
   const [storageError, setStorageError] = useState('');
   const [selectedOrphans, setSelectedOrphans] = useState(new Set());
+  const [showFullReset, setShowFullReset] = useState(false);
+  const [resetPhrase, setResetPhrase] = useState('');
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetError, setResetError] = useState('');
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateNotice, setUpdateNotice] = useState('');
   const [updateError, setUpdateError] = useState('');
@@ -6553,6 +6611,14 @@ function Settings({ state, updateState }) {
 
   const updateTheme = (theme) => {
     updateState((current) => ({ ...current, theme: normalizeTheme(theme) }));
+  };
+
+  const exportTheme = () => {
+    downloadBytes(
+      `buildbook-theme-v${APP_VERSION}.json`,
+      new TextEncoder().encode(JSON.stringify(normalizeTheme(state.theme), null, 2)),
+      'application/json',
+    );
   };
 
   const regenerateLanToken = () => {
@@ -6632,7 +6698,7 @@ function Settings({ state, updateState }) {
     try {
       const restored = file.name.toLowerCase().endsWith('.zip')
         ? await readFullBackupPackage(file)
-        : normalizeState(JSON.parse(await file.text()));
+        : normalizeState(JSON.parse(await file.text()), { preserveImportedCategories: true });
       updateState(() => restored);
       setBackupNotice('Backup restored successfully.');
     } catch (error) {
@@ -6690,6 +6756,25 @@ function Settings({ state, updateState }) {
     }
   };
 
+  const runFullReset = async () => {
+    if (resetPhrase.trim() !== 'delete all') return;
+    setResetBusy(true);
+    setResetError('');
+    try {
+      await resetManagedStorage();
+      updateState(() => normalizeState(JSON.parse(JSON.stringify(DEFAULT_STATE))));
+      setStorageScan(null);
+      setSelectedOrphans(new Set());
+      setBackupNotice('BuildBook has been reset to first-install defaults.');
+      setShowFullReset(false);
+      setResetPhrase('');
+    } catch (error) {
+      setResetError(String(error));
+    } finally {
+      setResetBusy(false);
+    }
+  };
+
   const checkForUpdates = async () => {
     setUpdateBusy(true);
     setUpdateNotice('');
@@ -6702,6 +6787,7 @@ function Settings({ state, updateState }) {
         const update = await checkForTauriUpdate();
         if (update) {
           setAvailableUpdate(update);
+          setAvailableReleaseUrl(GITHUB_REPOSITORY_URL);
           setUpdateNotice(`Update available: v${update.version}. Installed: v${APP_VERSION}.`);
         } else {
           setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
@@ -6720,7 +6806,7 @@ function Settings({ state, updateState }) {
       const latestVersion = release.tag_name || release.name || '';
       if (isNewerVersion(latestVersion, APP_VERSION)) {
         setUpdateNotice(`Update available: ${latestVersion}. Installed: v${APP_VERSION}.`);
-        setAvailableReleaseUrl(release.html_url || GITHUB_RELEASES_URL);
+        setAvailableReleaseUrl(GITHUB_REPOSITORY_URL);
       } else {
         setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
       }
@@ -6771,59 +6857,84 @@ function Settings({ state, updateState }) {
   };
 
   return (
-    <div>
-      <Header title="Settings" subtitle="Defaults and safeguards for documenting electronics projects." />
+    <div className="settings-page">
+      <Header title="Settings" subtitle="Manage workspace defaults, appearance, and system preferences." />
       <section className="panel settings-section">
-        <h2>Project Template</h2>
-        <p>Set the default project step tags, starter checklist items, and tracked file types used for project workspaces.</p>
-        <button className="settings-template-button" onClick={() => setShowTemplatePreview(true)}>Project Template</button>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Project Template</h2>
+            <p>Configure default step tags, checklist starters, and file tracking for new projects.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={() => setShowTemplatePreview(true)}>Edit Template</button>
+          </div>
+        </div>
       </section>
       <section className="panel settings-section">
-        <h2>Color Theme</h2>
-        <p>Review current app colors, adjust theme tokens, and export or import a portable theme file.</p>
-        <button className="settings-template-button" onClick={() => setShowThemeEditor(true)}>Theme Editor</button>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Color Theme</h2>
+            <p>Adjust colors, preview theme tokens, or export a portable theme file.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={exportTheme}>Export</button>
+            <button className="secondary" onClick={() => setShowThemeEditor(true)}>Open Editor</button>
+          </div>
+        </div>
       </section>
       <section className="panel settings-section">
-        <h2>Software Updates</h2>
-        <p>Check for a signed BuildBook update and install it from the desktop app.</p>
-        <div className="button-row">
-          <button className="secondary" onClick={checkForUpdates} disabled={updateBusy}>{updateBusy ? 'Checking...' : 'Check for Updates'}</button>
-          {availableUpdate && <button onClick={installUpdate} disabled={updateBusy}>Install Update</button>}
-          {availableReleaseUrl && <button onClick={() => openExternalUrl(availableReleaseUrl)}>Open Download Page</button>}
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Software Updates</h2>
+            <p>Check GitHub Releases for a newer BuildBook installer.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={checkForUpdates} disabled={updateBusy}>{updateBusy ? 'Checking...' : 'Check for Updates'}</button>
+            {availableUpdate && <button onClick={installUpdate} disabled={updateBusy}>Install Update</button>}
+            {availableReleaseUrl && <button className="secondary" onClick={() => openExternalUrl(availableReleaseUrl)}>Open Repo Page</button>}
+          </div>
         </div>
         {updateBusy && <BusyNotice label={updateProgress || 'Checking for updates...'} />}
         {updateNotice && <p className="success-text">{updateNotice}</p>}
         {updateError && <p className="error-text">{updateError}</p>}
       </section>
       <section className="panel settings-section">
-        <h2>Backup and Restore</h2>
-        <p>Backup downloads a portable zip containing all desktop data and assets, plus web-compatible restore data.</p>
-        <div className="button-row backup-actions">
-          <button className="secondary" onClick={exportBackup} disabled={backupExportBusy || backupRestoreBusy}>{backupExportBusy ? 'Exporting...' : 'Export Backup'}</button>
-          <label className={`file-picker header-picker backup-button ${backupExportBusy || backupRestoreBusy ? 'disabled-picker' : ''}`}>
-            <input
-              type="file"
-              accept=".zip,.json"
-              disabled={backupExportBusy || backupRestoreBusy}
-              onChange={(event) => {
-                restoreBackup(event.target.files?.[0]);
-                event.target.value = '';
-              }}
-            />
-            {backupRestoreBusy ? 'Restoring...' : 'Restore Backup'}
-          </label>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Backup and Restore</h2>
+            <p>Export a portable zip of project data and assets, or restore from a prior backup.</p>
+          </div>
+          <div className="settings-actions">
+            <label className={`file-picker header-picker settings-file-action ${backupExportBusy || backupRestoreBusy ? 'disabled-picker' : ''}`}>
+              <input
+                type="file"
+                accept=".zip,.json"
+                disabled={backupExportBusy || backupRestoreBusy}
+                onChange={(event) => {
+                  restoreBackup(event.target.files?.[0]);
+                  event.target.value = '';
+                }}
+              />
+              {backupRestoreBusy ? 'Restoring...' : 'Restore'}
+            </label>
+            <button className="secondary" onClick={exportBackup} disabled={backupExportBusy || backupRestoreBusy}>{backupExportBusy ? 'Exporting...' : 'Export Backup'}</button>
+          </div>
         </div>
         {backupRestoreBusy && <BusyNotice label="Restoring backup..." />}
         {backupNotice && <p className="success-text">{backupNotice}</p>}
         {restoreError && <p className="error-text">{restoreError}</p>}
       </section>
       <section className="panel settings-section">
-        <h2>Storage Cleanup</h2>
-        <p>Scan copied BuildBook files and generated thumbnails for orphaned files no longer referenced by app data.</p>
-        <div className="button-row backup-actions">
-          <button className="secondary" onClick={runStorageScan} disabled={storageBusy}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
-          <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Delete Selected</button>
-          <button className="danger-fill" onClick={runFullStorageCleanup} disabled={storageBusy || !storageScan?.orphans?.length}>Delete All Orphaned Files</button>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Storage Cleanup</h2>
+            <p>Find orphaned files and thumbnails no longer referenced by any project.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={runStorageScan} disabled={storageBusy}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
+            {storageScan && <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Delete Selected</button>}
+            {storageScan && <button className="danger-fill" onClick={runFullStorageCleanup} disabled={storageBusy || !storageScan.orphans?.length}>Delete All Orphaned Files</button>}
+          </div>
         </div>
         {storageScan && (
           <div className="settings-list">
@@ -6868,8 +6979,21 @@ function Settings({ state, updateState }) {
         {storageError && <p className="error-text">{storageError}</p>}
       </section>
       <section className="panel settings-section">
-        <h2>Local Network Access</h2>
-        <p>Serve BuildBook to devices on this local network. Leave this off unless you are actively using it.</p>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Local Network Access</h2>
+            <p>Serve BuildBook to devices on your Wi-Fi. Leave off unless actively in use.</p>
+          </div>
+          <div className="settings-actions">
+            <button
+              className={state.lanServer?.enabled ? 'danger-fill' : 'secondary'}
+              onClick={toggleLanServer}
+              disabled={lanBusy}
+            >
+              {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
+            </button>
+          </div>
+        </div>
         <div className="lan-settings-grid">
           <label>
             Port
@@ -6882,13 +7006,6 @@ function Settings({ state, updateState }) {
               disabled={state.lanServer?.enabled}
             />
           </label>
-          <button
-            className={state.lanServer?.enabled ? 'danger-fill' : ''}
-            onClick={toggleLanServer}
-            disabled={lanBusy}
-          >
-            {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
-          </button>
           <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled}>
             Regenerate Access Code
           </button>
@@ -6919,24 +7036,34 @@ function Settings({ state, updateState }) {
         <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
       </section>
       <section className="panel settings-section">
-        <h2>Background Operation</h2>
-        <label className="check-row">
-          <input
-            type="checkbox"
-            checked={Boolean(state.closeToTray)}
-            onChange={(event) => updateState((current) => ({ ...current, closeToTray: event.target.checked }))}
-          />
-          Keep running in the system tray when the window is closed
-        </label>
-        <p>When enabled, the tray icon can reopen BuildBook or quit it completely.</p>
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Background Operation</h2>
+            <p>Keep BuildBook available from the tray when the desktop window is closed.</p>
+          </div>
+          <label className="check-row settings-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(state.closeToTray)}
+              onChange={(event) => updateState((current) => ({ ...current, closeToTray: event.target.checked }))}
+            />
+            Keep running in tray
+          </label>
+        </div>
       </section>
-      <section className="panel settings-section">
-        <h2>Quick Notes</h2>
-        <p>BuildBook is for electronics project documentation. Projects are the workspace; parts are reusable reference records for datasheets, product info, storage location, and related documents.</p>
-        <div className="settings-list">
-          <span>Use Project Template to tune default workflow tags, checklist starters, and file tracking labels.</span>
-          <span>Use project exports when sharing a build package with notes, latest files, linked parts, and documents.</span>
-          <span>Use Backup before major cleanup, restore testing, or category/template changes.</span>
+      <section className="panel settings-section danger-settings">
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Reset BuildBook</h2>
+            <p>Delete managed uploads and restore all projects, parts, categories, and settings to first-install defaults.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="danger-fill" onClick={() => {
+              setResetError('');
+              setResetPhrase('');
+              setShowFullReset(true);
+            }}>Full Reset</button>
+          </div>
         </div>
       </section>
       {showTemplatePreview && (
@@ -6952,6 +7079,25 @@ function Settings({ state, updateState }) {
           onClose={() => setShowThemeEditor(false)}
           onSave={updateTheme}
         />
+      )}
+      {showFullReset && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && !resetBusy && setShowFullReset(false)}>
+          <div className="modal compact-modal reset-modal">
+            <h2>Reset BuildBook</h2>
+            <p>This permanently deletes all uploaded BuildBook data and resets the app to default settings. Files linked outside BuildBook are not deleted.</p>
+            <label>
+              Type delete all to confirm
+              <input autoFocus value={resetPhrase} onChange={(event) => setResetPhrase(event.target.value)} placeholder="delete all" disabled={resetBusy} />
+            </label>
+            {resetError && <p className="error-text">{resetError}</p>}
+            <div className="modal-footer">
+              <button className="secondary" disabled={resetBusy} onClick={() => setShowFullReset(false)}>Cancel</button>
+              <button className="danger-fill" disabled={resetBusy || resetPhrase.trim() !== 'delete all'} onClick={runFullReset}>
+                {resetBusy ? 'Resetting...' : 'Delete All and Reset'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -70,6 +70,7 @@ pub fn run() {
             list_folder_files,
             scan_storage,
             cleanup_orphaned_files,
+            reset_managed_storage,
             shell_thumbnail_bytes,
             start_lan_server,
             stop_lan_server,
@@ -686,6 +687,20 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
     }
 
+    if path.starts_with("/api/reset-storage") {
+        if !request_is_authorized(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+            return;
+        }
+        if method == "POST" {
+            match reset_managed_storage(app) {
+                Ok(()) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}"),
+                Err(error) => send_response(&mut stream, "500 Internal Server Error", "text/plain; charset=utf-8", error.as_bytes()),
+            }
+            return;
+        }
+    }
+
     let Some(dist) = dist_dir(&app) else {
         send_response(&mut stream, "503 Service Unavailable", "text/plain; charset=utf-8", b"BuildBook web files are not available. Run a production build first.");
         return;
@@ -1058,6 +1073,17 @@ fn scan_storage(app: tauri::AppHandle, referenced_paths: Vec<String>) -> Result<
 #[tauri::command]
 fn cleanup_orphaned_files(app: tauri::AppHandle, referenced_paths: Vec<String>, delete_paths: Vec<String>) -> Result<StorageScan, String> {
     scan_storage_inner(app, referenced_paths, delete_paths)
+}
+
+#[tauri::command]
+fn reset_managed_storage(app: tauri::AppHandle) -> Result<(), String> {
+    for root in storage_roots(&app)? {
+        if root.exists() {
+            std::fs::remove_dir_all(&root)
+                .map_err(|error| format!("Could not delete BuildBook managed files: {error}"))?;
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

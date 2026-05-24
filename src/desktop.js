@@ -138,6 +138,16 @@ export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
   return invoke('cleanup_orphaned_files', { referencedPaths, deletePaths });
 }
 
+export async function resetManagedStorage() {
+  if (isLanWebClient()) {
+    const response = await fetch('/api/reset-storage', { method: 'POST', headers: { 'X-BuildBook-Token': lanToken() } });
+    if (!response.ok) throw new Error(await response.text());
+    return;
+  }
+  if (!isTauri()) return;
+  await invoke('reset_managed_storage');
+}
+
 export async function readShellThumbnail(path, size = 512) {
   if (!path || !isTauri()) return new Uint8Array();
   return new Uint8Array(await invoke('shell_thumbnail_bytes', { path, size }));

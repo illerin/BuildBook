@@ -1,23 +1,45 @@
-export const APP_VERSION = '0.3.135';
+export const APP_VERSION = '0.3.140';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
 export const DEFAULT_CATEGORIES = [
   { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
-  { id: 'cat-capacitors', name: 'Capacitors', parentId: null, sortOrder: 1 },
-  { id: 'cat-connectors', name: 'Connectors & Wiring', parentId: null, sortOrder: 2 },
-  { id: 'cat-displays', name: 'LEDs & Displays', parentId: null, sortOrder: 3 },
-  { id: 'cat-mechanical', name: 'Mechanical & Hardware', parentId: null, sortOrder: 4 },
-  { id: 'cat-boards', name: 'Microcontrollers & Development Boards', parentId: null, sortOrder: 5 },
-  { id: 'cat-misc', name: 'Miscellaneous', parentId: null, sortOrder: 6 },
-  { id: 'cat-modules', name: 'Modules', parentId: null, sortOrder: 7 },
-  { id: 'cat-motors', name: 'Motors & Motion', parentId: null, sortOrder: 8 },
-  { id: 'cat-optics', name: 'Optics & Physics', parentId: null, sortOrder: 9 },
-  { id: 'cat-power', name: 'Power', parentId: null, sortOrder: 10 },
-  { id: 'cat-tools', name: 'Prototyping & Tools', parentId: null, sortOrder: 11 },
-  { id: 'cat-resistors', name: 'Resistors', parentId: null, sortOrder: 12 },
-  { id: 'cat-sensors', name: 'Sensors', parentId: null, sortOrder: 13 },
-  { id: 'cat-switches', name: 'Switches & Relays', parentId: null, sortOrder: 14 },
+  { id: 'cat-3c9d9111-0569-4a10-8fc8-470ded424aeb', name: "Custom PCB's", parentId: null, sortOrder: 1 },
+  { id: 'cat-web-13', name: 'Microcontrollers & Development Boards', parentId: null, sortOrder: 2 },
+  { id: 'cat-ac6da2e8-e4db-4c22-a1ac-dbe42f1b68d9', name: 'ESP32', parentId: 'cat-web-13', sortOrder: 3 },
+  { id: 'cat-3db2c34e-ee9d-43e9-bcd9-936fbb4c7f6c', name: 'Arduino', parentId: 'cat-web-13', sortOrder: 4 },
+  { id: 'cat-web-11', name: 'Modules', parentId: null, sortOrder: 5 },
+  { id: 'cat-281a2446-0b4c-4e29-b1f1-dbd2e099751e', name: 'Displays', parentId: 'cat-web-11', sortOrder: 6 },
+  { id: 'cat-web-2', name: 'Sensors', parentId: 'cat-web-11', sortOrder: 7 },
+  { id: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', name: 'Circuit Board Parts', parentId: null, sortOrder: 8 },
+  { id: 'cat-2f679848-6122-4a15-9e23-ed078ad116c7', name: "IC's", parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 9 },
+  { id: 'cat-web-7', name: 'LEDs', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 10 },
+  { id: 'cat-77762324-17ab-4447-8e42-41e3fe55b863', name: 'Diodes', parentId: 'cat-web-7', sortOrder: 11 },
+  { id: 'cat-fcd7a999-4a1c-43c1-8286-97e05e9d68ee', name: 'LED Strings', parentId: 'cat-web-7', sortOrder: 12 },
+  { id: 'cat-web-1', name: 'Resistors', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 13 },
+  { id: 'cat-web-6', name: 'Capacitors', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 14 },
+  { id: 'cat-606b7d9c-9708-4a94-a0e7-f7bd610ff299', name: 'Inductors', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 15 },
+  { id: 'cat-ccf6892a-0f10-46d5-97c2-b14f79f58aa0', name: 'Diodes', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 16 },
+  { id: 'cat-web-3', name: 'Switches & Relays', parentId: 'cat-8fc83b9e-3e60-4a58-92db-38940d1801e6', sortOrder: 17 },
+  { id: 'cat-web-14', name: 'Power', parentId: null, sortOrder: 18 },
+  { id: 'cat-fc1396e8-bb2f-4cae-ba6f-4cec780ba629', name: 'Power Supplies', parentId: 'cat-web-14', sortOrder: 19 },
+  { id: 'cat-54051390-3617-46a2-af17-90fa243a4451', name: 'Power Modules', parentId: 'cat-web-14', sortOrder: 20 },
+  { id: 'cat-1257d198-70de-4bd2-add4-a8938cc0ef93', name: 'LED Current Supplies', parentId: 'cat-web-14', sortOrder: 21 },
+  { id: 'cat-a6de9175-7170-418e-9fff-3192b71089f7', name: 'Battery', parentId: 'cat-web-14', sortOrder: 22 },
+  { id: 'cat-web-4', name: 'Mechanical & Hardware', parentId: null, sortOrder: 23 },
+  { id: 'cat-web-34', name: 'Nuts, Bolts & Screws', parentId: 'cat-web-4', sortOrder: 24 },
+  { id: 'cat-web-35', name: 'Nuts', parentId: 'cat-web-34', sortOrder: 25 },
+  { id: 'cat-web-36', name: 'Bolts', parentId: 'cat-web-34', sortOrder: 26 },
+  { id: 'cat-web-37', name: 'Screws', parentId: 'cat-web-34', sortOrder: 27 },
+  { id: 'cat-web-5', name: 'Motors & Motion', parentId: null, sortOrder: 28 },
+  { id: 'cat-83ddc78b-8aca-41de-9d86-c19c7c445b68', name: 'Magnets', parentId: null, sortOrder: 29 },
+  { id: 'cat-d93e885b-19ca-4b9e-9e48-7af0f9457ba1', name: 'Cooling', parentId: null, sortOrder: 30 },
+  { id: 'cat-c4e3c424-ad01-4402-a6e4-03d5946ff05e', name: 'Sound', parentId: null, sortOrder: 31 },
+  { id: 'cat-web-12', name: 'Optics & Physics', parentId: null, sortOrder: 32 },
+  { id: 'cat-web-10', name: 'Connectors & Wiring', parentId: null, sortOrder: 33 },
+  { id: 'cat-web-9', name: 'Prototyping & Tools', parentId: null, sortOrder: 34 },
+  { id: 'cat-web-8', name: 'Miscellaneous', parentId: null, sortOrder: 35 },
+  { id: 'cat-4cfcf916-3b15-4e31-9b98-d3084857bb61', name: 'Tape', parentId: 'cat-web-8', sortOrder: 36 },
 ];
 
 export const DEFAULT_FILE_TRACKERS = [
@@ -136,7 +158,7 @@ export const DEFAULT_STATE = {
     {
       id: 'part-ads1115',
       name: 'ADS1115 Module',
-      categoryId: 'cat-boards',
+      categoryId: 'cat-web-11',
       image: '',
       productUrl: '',
       storageLocation: 'Drawer A3',
@@ -149,7 +171,7 @@ export const DEFAULT_STATE = {
     {
       id: 'part-oled',
       name: 'OLED Display',
-      categoryId: 'cat-displays',
+      categoryId: 'cat-281a2446-0b4c-4e29-b1f1-dbd2e099751e',
       image: '',
       productUrl: '',
       storageLocation: 'Drawer B1',
@@ -168,11 +190,16 @@ export function makeId(prefix) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function normalizeState(raw) {
+export function normalizeState(raw, options = {}) {
   const state = raw && typeof raw === 'object' ? raw : {};
   const template = state.template || {};
   const rawCategories = Array.isArray(state.categories) && state.categories.length ? state.categories : [];
-  const categories = (rawCategories.length ? rawCategories : DEFAULT_CATEGORIES)
+  const importedCategories = options.preserveImportedCategories && Array.isArray(state.categories)
+    ? (state.categories.some((category) => category.id === 'cat-unassigned')
+        ? state.categories
+        : [{ id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 }, ...state.categories])
+    : null;
+  const categories = (importedCategories || (rawCategories.length ? rawCategories : DEFAULT_CATEGORIES))
     .map((category, index) => ({ sortOrder: index, ...category }));
   const validCategoryIds = new Set(categories.map((category) => category.id));
   const rawSteps = Array.isArray(template.steps) ? template.steps : [];

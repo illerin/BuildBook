@@ -2584,15 +2584,104 @@ article h3,
   gap: 10px;
 }
 
-.settings-section {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 12px;
-  justify-items: start;
+.settings-page {
+  max-width: 980px;
 }
 
-.settings-template-button {
-  width: fit-content;
+.settings-section {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 18px 20px;
+}
+
+.settings-section-row {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+}
+
+.settings-copy h2 {
+  margin: 0 0 4px;
+}
+
+.settings-copy p {
+  margin: 0;
+  max-width: 500px;
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-actions > button,
+.settings-actions > .file-picker {
+  min-height: 38px;
+  padding: 8px 14px;
+}
+
+.settings-actions > .settings-file-action {
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text-soft);
+}
+
+.settings-actions > .settings-file-action:hover {
+  background: var(--border);
+}
+
+.settings-toggle {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  text-transform: none;
+}
+
+.settings-section .check-row {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  text-transform: none;
+}
+
+.settings-toggle input,
+.settings-section .check-row input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.danger-settings {
+  border-color: var(--danger);
+}
+
+.danger-settings h2 {
+  color: var(--danger-hover);
+}
+
+.reset-modal {
+  display: grid;
+  gap: 14px;
+}
+
+.reset-modal p {
+  margin: 0;
+}
+
+.reset-modal label {
+  margin: 0;
 }
 
 .lan-settings-grid {
@@ -2636,11 +2725,6 @@ article h3,
 .lan-access-box span {
   color: var(--text-muted);
   font-size: 12px;
-}
-
-.backup-actions > button,
-.backup-actions > .backup-button {
-  width: 150px;
 }
 
 .disabled-picker {
@@ -3644,8 +3728,17 @@ article h3,
     height: 160px;
   }
 
-  .backup-actions > button,
-  .backup-actions > .backup-button {
+  .settings-section-row {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  .settings-actions {
+    justify-content: stretch;
+  }
+
+  .settings-actions > button,
+  .settings-actions > .file-picker {
     width: 100%;
   }
 }
