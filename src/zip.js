@@ -74,7 +74,7 @@ export function createZip(entries) {
     const localView = new DataView(local.buffer);
     writeUint32(localView, 0, 0x04034b50);
     writeUint16(localView, 4, 20);
-    writeUint16(localView, 6, 0);
+    writeUint16(localView, 6, 0x0800);
     writeUint16(localView, 8, 0);
     writeUint16(localView, 10, stamp.time);
     writeUint16(localView, 12, stamp.date);
@@ -91,7 +91,7 @@ export function createZip(entries) {
     writeUint32(centralView, 0, 0x02014b50);
     writeUint16(centralView, 4, 20);
     writeUint16(centralView, 6, 20);
-    writeUint16(centralView, 8, 0);
+    writeUint16(centralView, 8, 0x0800);
     writeUint16(centralView, 10, 0);
     writeUint16(centralView, 12, stamp.time);
     writeUint16(centralView, 14, stamp.date);
@@ -178,3 +178,4 @@ export function zipText(entries, name) {
   const bytes = entries.get(name);
   return bytes ? decoder.decode(bytes) : '';
 }
+

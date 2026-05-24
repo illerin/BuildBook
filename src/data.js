@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.140';
+export const APP_VERSION = '0.3.142';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -113,75 +113,8 @@ export const DEFAULT_STATE = {
     checklist: ['Add project notes', 'Link parts', 'Attach latest schematic', 'Export build package'],
     fileTrackers: DEFAULT_FILE_TRACKERS,
   },
-  projects: [
-    {
-      id: 'project-bench-power-monitor',
-      name: 'Bench Power Monitor',
-      status: 'active',
-      image: '',
-      activeSteps: ['Schematic', 'Testing'],
-      notes: 'Document voltage divider values, ADC calibration, enclosure notes, and the final wiring layout.',
-      checklist: [
-        { id: 'check-1', text: 'Verify ADS1115 gain setting', completedAt: '' },
-        { id: 'check-2', text: 'Attach final schematic PDF', completedAt: '' },
-      ],
-      nextSteps: ['Verify ADS1115 gain setting', 'Attach final schematic PDF'],
-      partIds: ['part-ads1115', 'part-oled'],
-      partQuantities: {},
-      photoFolders: [],
-      instructions: { intro: '', steps: [] },
-      files: [
-        {
-          id: 'file-ads1115-datasheet',
-          trackerId: 'tracker-datasheets',
-          name: 'ADS1115.pdf',
-          path: '',
-          latest: true,
-          notes: 'Reference datasheet for gain and sample rate choices.',
-          createdAt: now(),
-        },
-        {
-          id: 'file-firmware',
-          trackerId: 'tracker-firmware',
-          name: 'power-monitor.ino',
-          path: '',
-          latest: true,
-          notes: '',
-          createdAt: now(),
-        },
-      ],
-      createdAt: now(),
-      updatedAt: now(),
-    },
-  ],
-  parts: [
-    {
-      id: 'part-ads1115',
-      name: 'ADS1115 Module',
-      categoryId: 'cat-web-11',
-      image: '',
-      productUrl: '',
-      storageLocation: 'Drawer A3',
-      specSummary: '16-bit I2C ADC module, configurable gain, 2.0V to 5.5V supply.',
-      notes: 'Used for slow precision voltage measurements.',
-      documents: [{ id: 'doc-ads1115', name: 'ADS1115.pdf', path: '', type: 'datasheet', createdAt: now() }],
-      createdAt: now(),
-      updatedAt: now(),
-    },
-    {
-      id: 'part-oled',
-      name: 'OLED Display',
-      categoryId: 'cat-281a2446-0b4c-4e29-b1f1-dbd2e099751e',
-      image: '',
-      productUrl: '',
-      storageLocation: 'Drawer B1',
-      specSummary: 'Small I2C display for status readouts.',
-      notes: '',
-      documents: [],
-      createdAt: now(),
-      updatedAt: now(),
-    },
-  ],
+  projects: [],
+  parts: [],
   importBatches: [],
 };
 
@@ -274,3 +207,5 @@ export function categoryLabel(categories, categoryId) {
 export function fileTrackerLabel(trackers, trackerId) {
   return trackers.find((tracker) => tracker.id === trackerId)?.name || 'Files';
 }
+
+
