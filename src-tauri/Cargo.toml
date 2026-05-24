@@ -1,6 +1,6 @@
 [package]
 name = "buildbook"
-version = "0.3.140"
+version = "0.3.143"
 description = "Desktop electronics project tracker"
 authors = ["BuildBook"]
 edition = "2021"
@@ -25,3 +25,4 @@ windows = { version = "0.61.3", features = [
 ] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
