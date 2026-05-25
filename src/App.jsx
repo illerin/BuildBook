@@ -196,6 +196,10 @@ function flattenCategoryOptions(categories) {
   return walk();
 }
 
+function nestedCategoryLabel(category) {
+  return category.depth ? `${'-'.repeat(category.depth)} ${category.name}` : category.name;
+}
+
 function findCategoryByPath(categories, path) {
   const normalized = path.map((part) => part.toLowerCase());
   return categories.find((category) => categoryPath(categories, category.id).map((part) => part.toLowerCase()).join('|') === normalized.join('|'));
@@ -203,6 +207,15 @@ function findCategoryByPath(categories, path) {
 
 function suggestCategoryId(name, categories) {
   const text = String(name || '').toLowerCase();
+  const coolingCategory = categories.find((category) => category.name.trim().toLowerCase() === 'cooling');
+  if (['fan', 'blower'].some((term) => text.includes(term))) {
+    const fanCategories = categories.filter((category) => /\bfans?\b/i.test(category.name));
+    const coolingFanCategory = fanCategories.find((category) => categoryPath(categories, category.id).some((part) => part.toLowerCase() === 'cooling'));
+    return coolingFanCategory?.id || fanCategories[0]?.id || coolingCategory?.id || 'cat-unassigned';
+  }
+  if (['heatsink', 'heat sink', 'heat-sink', 'cooler', 'cooling'].some((term) => text.includes(term))) {
+    return coolingCategory?.id || 'cat-unassigned';
+  }
   const rules = [
     ['cat-ac6da2e8-e4db-4c22-a1ac-dbe42f1b68d9', ['esp32', 'esp8266']],
     ['cat-3db2c34e-ee9d-43e9-bcd9-936fbb4c7f6c', ['arduino']],
@@ -1784,7 +1797,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
                 <label>
                   Exported Category: {(part.categoryPath || ['Unassigned']).join(' / ')}
                   <select value={categoryDecisions[part.id] || 'cat-unassigned'} onChange={(event) => setCategoryDecisions((current) => ({ ...current, [part.id]: event.target.value }))}>
-                    {categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+                    {categoryOptions.map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
                   </select>
                 </label>
                 <div className="import-part-summary">
@@ -4525,7 +4538,7 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
             <option value="">All categories</option>
             {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
               <option key={category.id} value={category.id}>
-                {category.depth ? `${'-'.repeat(category.depth)} ${category.name}` : category.name}
+                {nestedCategoryLabel(category)}
               </option>
             ))}
           </select>
@@ -5920,7 +5933,7 @@ function Parts({ state, updateState }) {
           <option value="">All categories</option>
           <option value="cat-unassigned">Unassigned</option>
           {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
-            <option key={category.id} value={category.id}>{category.label}</option>
+            <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>
           ))}
         </select>
       </div>
@@ -6247,14 +6260,14 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
           <label>
             Category
             <select value={part.categoryId} onChange={(event) => onUpdate({ categoryId: event.target.value })}>
-              {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+              {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
             </select>
           </label>
           <div className="mini-create-grid">
             <input value={newCategory.name} onChange={(event) => setNewCategory((current) => ({ ...current, name: event.target.value }))} placeholder="New category" />
             <select value={newCategory.parentId} onChange={(event) => setNewCategory((current) => ({ ...current, parentId: event.target.value }))}>
               <option value="">Root</option>
-              {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
+              {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
             </select>
             <button
               className="ghost"
@@ -6368,15 +6381,16 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
 
 function Imports({ state, updateState }) {
   const [importError, setImportError] = useState('');
+  const [importNotice, setImportNotice] = useState('');
   const [imageBusy, setImageBusy] = useState('');
   const [importBusy, setImportBusy] = useState('');
-  const [itemBusy, setItemBusy] = useState('');
   const [selectedBatchId, setSelectedBatchId] = useState('');
   const selectedBatch = state.importBatches.find((batch) => batch.id === selectedBatchId) || null;
 
   const createBatch = async (file) => {
     if (!file) return;
     setImportError('');
+    setImportNotice('');
     setImportBusy(`Reading ${file.name}...`);
     try {
       const lowerName = file.name.toLowerCase();
@@ -6392,7 +6406,7 @@ function Imports({ state, updateState }) {
         items,
       };
       updateState((current) => ({ ...current, importBatches: [batch, ...current.importBatches] }));
-      setSelectedBatchId('');
+      setSelectedBatchId(batch.id);
     } catch (error) {
       setImportError(String(error));
     } finally {
@@ -6427,8 +6441,6 @@ function Imports({ state, updateState }) {
   };
 
   const completeItem = async (batchId, item, forcedAction = item.action) => {
-    setItemBusy(item.id);
-    try {
       const action = forcedAction === 'merge' && !item.matchId ? 'create' : forcedAction;
       const imagePath = action === 'skip' ? '' : item.imagePath || await fetchItemImage(batchId, item);
 
@@ -6440,7 +6452,6 @@ function Imports({ state, updateState }) {
           ...(imagePath ? { image: imagePath } : {}),
           notes: [
             item.sku ? `Imported SKU: ${item.sku}` : '',
-            item.imageUrl ? `Imported image URL: ${item.imageUrl}` : '',
           ].filter(Boolean).join('\n'),
           updatedAt: new Date().toISOString(),
         };
@@ -6469,9 +6480,6 @@ function Imports({ state, updateState }) {
           } : batch),
         };
       });
-    } finally {
-      setItemBusy('');
-    }
   };
 
   const categoryOptions = flattenCategoryOptions(state.categories);
@@ -6479,11 +6487,34 @@ function Imports({ state, updateState }) {
     const rank = { none: 0, recommended: 1, exact: 2 };
     return (rank[a.matchQuality] ?? 0) - (rank[b.matchQuality] ?? 0) || a.name.localeCompare(b.name);
   });
+  const draftCount = selectedBatch?.items.filter((item) => item.status === 'draft').length || 0;
+
+  const applyBatch = async () => {
+    if (!selectedBatch) return;
+    const pendingItems = sortedItems(selectedBatch.items).filter((item) => item.status === 'draft');
+    if (!pendingItems.length) return;
+    setImportError('');
+    setImportNotice('');
+    try {
+      for (let index = 0; index < pendingItems.length; index += 1) {
+        const item = pendingItems[index];
+        setImportBusy(`Applying ${index + 1} of ${pendingItems.length}: ${item.name}`);
+        await completeItem(selectedBatch.id, item, item.action);
+      }
+      setImportNotice(`Applied ${pendingItems.length} item${pendingItems.length === 1 ? '' : 's'} from ${selectedBatch.name}.`);
+      setSelectedBatchId('');
+    } catch (error) {
+      setImportError(`Could not finish import batch: ${String(error)}`);
+    } finally {
+      setImportBusy('');
+    }
+  };
 
   return (
     <div>
       <Header title="Imports" subtitle="Turn online order exports into draft parts for the library." />
       {importError && <section className="alert alert-error">{importError}</section>}
+      {importNotice && <section className="alert alert-success">{importNotice}</section>}
       <BusyNotice label={importBusy} />
       <section className="panel upload-card">
         <div>
@@ -6518,58 +6549,65 @@ function Imports({ state, updateState }) {
             </button>
           ))}
         </aside>
-        {!selectedBatch ? <section className="panel empty-panel">Select an import batch.</section> : (
-        <section className="panel import-batch">
-          <div className="section-title">
-            <h2>{selectedBatch.name}</h2>
-            <span>{selectedBatch.source} - {new Date(selectedBatch.createdAt).toLocaleDateString()}</span>
-          </div>
-          <div className="import-review-list">
-            {sortedItems(selectedBatch.items).map((item) => (
-              <div key={item.id} className={`import-part-row match-${item.matchQuality}`}>
-                <label>
-                  Category
-                  <select value={item.categoryId || 'cat-unassigned'} onChange={(event) => updateItem(selectedBatch.id, item.id, { categoryId: event.target.value })}>
-                    {categoryOptions.map((category) => <option key={category.id} value={category.id}>{category.label}</option>)}
-                  </select>
-                </label>
-                <div className="import-part-summary">
-                  {(item.imagePath || item.imageUrl) && (
-                    <div className="import-image-preview">
-                      {item.imagePath ? <StoredImage path={item.imagePath} alt="" /> : <img src={item.imageUrl} alt="" />}
-                    </div>
-                  )}
-                  <input value={item.name} onChange={(event) => updateItem(selectedBatch.id, item.id, { name: event.target.value })} disabled={item.status !== 'draft'} />
-                  <span>{item.matchQuality === 'none' ? 'No suggestion' : item.matchQuality === 'exact' ? 'Exact match' : 'Recommended match'}</span>
-                  {item.productUrl && <small>{item.productUrl}</small>}
-                  {item.imageUrl && <small>{item.imagePath ? 'Image saved locally' : item.imageUrl}</small>}
-                </div>
-                <div className="import-action-grid">
-                  <select value={item.action} disabled={item.status !== 'draft'} onChange={(event) => updateItem(selectedBatch.id, item.id, { action: event.target.value })}>
-                    <option value="create">Create new part</option>
-                    <option value="merge">Merge into existing</option>
-                    <option value="skip">Skip</option>
-                  </select>
-                  {item.action === 'merge' && (
-                    <select value={item.matchId || ''} disabled={item.status !== 'draft'} onChange={(event) => updateItem(selectedBatch.id, item.id, { matchId: event.target.value })}>
-                      <option value="">Choose part...</option>
-                      {state.parts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
-                    </select>
-                  )}
-                  {item.status === 'draft' ? (
-                    <>
-                      {item.imageUrl && !item.imagePath && <button className="ghost" disabled={imageBusy === item.id} onClick={() => fetchItemImage(selectedBatch.id, item)}>{imageBusy === item.id ? 'Fetching...' : 'Fetch Image'}</button>}
-                      <button disabled={itemBusy === item.id} onClick={() => completeItem(selectedBatch.id, item, item.action)}>{itemBusy === item.id ? 'Applying...' : 'Apply'}</button>
-                      <button className="ghost" disabled={itemBusy === item.id} onClick={() => completeItem(selectedBatch.id, item, 'skip')}>Skip</button>
-                    </>
-                  ) : <span className="status-badge">{item.status}</span>}
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-        )}
+        <section className="panel empty-panel">Select an import batch to review or apply it.</section>
       </div>
+      {selectedBatch && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && !importBusy && setSelectedBatchId('')}>
+          <section className="modal import-review-modal import-batch">
+            <div className="section-title">
+              <div>
+                <h2>{selectedBatch.name}</h2>
+                <span>{selectedBatch.source} - {new Date(selectedBatch.createdAt).toLocaleDateString()}</span>
+              </div>
+              <button className="secondary" disabled={!!importBusy} onClick={() => setSelectedBatchId('')}>Close</button>
+            </div>
+            <BusyNotice label={importBusy} />
+            <div className="import-review-list">
+              {sortedItems(selectedBatch.items).map((item) => (
+                <div key={item.id} className={`import-part-row match-${item.matchQuality}`}>
+                  <label>
+                    Category
+                    <select value={item.categoryId || 'cat-unassigned'} onChange={(event) => updateItem(selectedBatch.id, item.id, { categoryId: event.target.value })}>
+                      {categoryOptions.map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
+                    </select>
+                  </label>
+                  <div className="import-part-summary">
+                    {(item.imagePath || item.imageUrl) && (
+                      <div className="import-image-preview">
+                        {item.imagePath ? <StoredImage path={item.imagePath} alt="" /> : <img src={item.imageUrl} alt="" />}
+                      </div>
+                    )}
+                    <input value={item.name} onChange={(event) => updateItem(selectedBatch.id, item.id, { name: event.target.value })} disabled={item.status !== 'draft'} />
+                    <span>{item.matchQuality === 'none' ? 'No suggestion' : item.matchQuality === 'exact' ? 'Exact match' : 'Recommended match'}</span>
+                    {item.productUrl && <small>{item.productUrl}</small>}
+                    {item.imageUrl && <small>{item.imagePath ? 'Image saved locally' : item.imageUrl}</small>}
+                  </div>
+                  <div className="import-action-grid">
+                    <select value={item.action} disabled={item.status !== 'draft' || !!importBusy} onChange={(event) => updateItem(selectedBatch.id, item.id, { action: event.target.value })}>
+                      <option value="create">Create new part</option>
+                      <option value="merge">Merge into existing</option>
+                      <option value="skip">Skip</option>
+                    </select>
+                    {item.action === 'merge' && (
+                      <select value={item.matchId || ''} disabled={item.status !== 'draft' || !!importBusy} onChange={(event) => updateItem(selectedBatch.id, item.id, { matchId: event.target.value })}>
+                        <option value="">Choose part...</option>
+                        {state.parts.map((part) => <option key={part.id} value={part.id}>{part.name}</option>)}
+                      </select>
+                    )}
+                    {item.status === 'draft' ? (
+                      item.imageUrl && !item.imagePath && <button className="ghost" disabled={imageBusy === item.id || !!importBusy} onClick={() => fetchItemImage(selectedBatch.id, item)}>{imageBusy === item.id ? 'Fetching...' : 'Fetch Image'}</button>
+                    ) : <span className="status-badge">{item.status}</span>}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="modal-actions import-batch-actions">
+              <button className="secondary" disabled={!!importBusy} onClick={() => setSelectedBatchId('')}>Close</button>
+              <button disabled={!draftCount || !!importBusy} onClick={applyBatch}>{importBusy ? 'Applying...' : `Apply Batch (${draftCount})`}</button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -6761,11 +6799,14 @@ function Settings({ state, updateState }) {
     setResetBusy(true);
     setResetError('');
     try {
-      await resetManagedStorage();
+      const resetResult = await resetManagedStorage();
       updateState(() => normalizeState(JSON.parse(JSON.stringify(DEFAULT_STATE))));
       setStorageScan(null);
       setSelectedOrphans(new Set());
-      setBackupNotice('BuildBook has been reset to first-install defaults.');
+      const retainedCount = resetResult?.retainedFiles?.length || 0;
+      setBackupNotice(retainedCount
+        ? `BuildBook has been reset. ${retainedCount} file${retainedCount === 1 ? '' : 's'} still in use could not be deleted; close other programs and run storage cleanup later.`
+        : 'BuildBook has been reset to first-install defaults.');
       setShowFullReset(false);
       setResetPhrase('');
     } catch (error) {

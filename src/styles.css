@@ -2514,6 +2514,13 @@ article h3,
   width: min(1040px, 94vw);
 }
 
+.import-batch-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+}
+
 .import-review-list {
   display: grid;
   gap: 10px;

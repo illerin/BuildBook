@@ -142,10 +142,10 @@ export async function resetManagedStorage() {
   if (isLanWebClient()) {
     const response = await fetch('/api/reset-storage', { method: 'POST', headers: { 'X-BuildBook-Token': lanToken() } });
     if (!response.ok) throw new Error(await response.text());
-    return;
+    return response.json();
   }
-  if (!isTauri()) return;
-  await invoke('reset_managed_storage');
+  if (!isTauri()) return { retainedFiles: [] };
+  return invoke('reset_managed_storage');
 }
 
 export async function readShellThumbnail(path, size = 512) {

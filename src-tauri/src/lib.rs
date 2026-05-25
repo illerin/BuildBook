@@ -12,6 +12,9 @@ use tauri::{
 
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -167,6 +170,12 @@ struct StorageScan {
     deleted_count: usize,
     deleted_bytes: u64,
     orphans: Vec<OrphanFile>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResetStorageResult {
+    retained_files: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -697,7 +706,7 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
         if method == "POST" {
             match reset_managed_storage(app) {
-                Ok(()) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}"),
+                Ok(result) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", serde_json::to_string(&result).unwrap_or_default().as_bytes()),
                 Err(error) => send_response(&mut stream, "500 Internal Server Error", "text/plain; charset=utf-8", error.as_bytes()),
             }
             return;
@@ -835,11 +844,13 @@ fn download_url_to_file(
 
     #[cfg(target_os = "windows")]
     let mut command = {
+        use std::os::windows::process::CommandExt;
         let mut cmd = std::process::Command::new("curl.exe");
         cmd.args(["-L", "--fail", "--silent", "--show-error"])
             .arg(&url)
             .args(["--output"])
             .arg(&target);
+        cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     };
 
@@ -889,6 +900,7 @@ fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
 fn pick_file_path() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -902,6 +914,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 "#;
         let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-STA", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|error| format!("Could not open file picker: {error}"))?;
         if !output.status.success() {
@@ -920,6 +933,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 fn pick_folder_path() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         let script = r#"
 Add-Type -AssemblyName System.Windows.Forms
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -932,6 +946,7 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 "#;
         let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-STA", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|error| format!("Could not open folder picker: {error}"))?;
         if !output.status.success() {
@@ -1079,14 +1094,31 @@ fn cleanup_orphaned_files(app: tauri::AppHandle, referenced_paths: Vec<String>, 
 }
 
 #[tauri::command]
-fn reset_managed_storage(app: tauri::AppHandle) -> Result<(), String> {
+fn reset_managed_storage(app: tauri::AppHandle) -> Result<ResetStorageResult, String> {
+    let mut retained_files = Vec::new();
     for root in storage_roots(&app)? {
         if root.exists() {
-            std::fs::remove_dir_all(&root)
-                .map_err(|error| format!("Could not delete BuildBook managed files: {error}"))?;
+            remove_managed_contents(&root, &mut retained_files);
+            let _ = std::fs::remove_dir(&root);
         }
     }
-    Ok(())
+    Ok(ResetStorageResult { retained_files })
+}
+
+fn remove_managed_contents(path: &std::path::Path, retained_files: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        retained_files.push(path.to_string_lossy().to_string());
+        return;
+    };
+    for entry in entries.flatten() {
+        let child = entry.path();
+        if child.is_dir() {
+            remove_managed_contents(&child, retained_files);
+            let _ = std::fs::remove_dir(&child);
+        } else if child.is_file() && std::fs::remove_file(&child).is_err() {
+            retained_files.push(child.to_string_lossy().to_string());
+        }
+    }
 }
 
 #[tauri::command]
@@ -1099,9 +1131,11 @@ fn open_file_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         std::process::Command::new("cmd")
             .args(["/C", "start", ""])
             .arg(&target)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|error| format!("Could not open file: {error}"))?;
     }
