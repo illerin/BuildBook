@@ -15,6 +15,44 @@ static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+#[cfg(target_os = "windows")]
+fn windows_shell_execute(target: &std::path::Path, parameters: Option<&std::path::Path>) -> Result<(), String> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
+
+    let operation: Vec<u16> = OsStr::new("open").encode_wide().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = target.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let parameters = parameters.map(|value| {
+        value.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>()
+    });
+
+    let result = unsafe {
+        ShellExecuteW(
+            None,
+            PCWSTR(operation.as_ptr()),
+            PCWSTR(file.as_ptr()),
+            parameters
+                .as_ref()
+                .map(|value| PCWSTR(value.as_ptr()))
+                .unwrap_or(PCWSTR::null()),
+            PCWSTR::null(),
+            SHOW_WINDOW_CMD(1),
+        )
+    };
+
+    if result.0 as usize <= 32 {
+        return Err("Could not open file.".to_string());
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1131,13 +1169,7 @@ fn open_file_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&target)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|error| format!("Could not open file: {error}"))?;
+        windows_shell_execute(&target, None)?;
     }
 
     #[cfg(target_os = "macos")]
@@ -1172,10 +1204,19 @@ fn open_file_with_program(program_path: String, file_path: String) -> Result<(),
         return Err("The saved file could not be found.".to_string());
     }
 
-    std::process::Command::new(program)
-        .arg(file)
-        .spawn()
-        .map_err(|error| format!("Could not launch program: {error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        windows_shell_execute(&program, Some(&file))
+            .map_err(|error| format!("Could not launch program: {error}"))?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new(program)
+            .arg(file)
+            .spawn()
+            .map_err(|error| format!("Could not launch program: {error}"))?;
+    }
 
     Ok(())
 }

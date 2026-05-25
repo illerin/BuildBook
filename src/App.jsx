@@ -2287,6 +2287,91 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
     return partId;
   };
 
+  const createCategory = (name, parentId = '') => {
+    const category = { id: makeId('cat'), name, parentId: parentId || null, sortOrder: state.categories.length };
+    updateState((current) => ({ ...current, categories: [...current.categories, category] }));
+    return category;
+  };
+
+  const duplicatePart = (part) => {
+    const copy = {
+      ...part,
+      id: makeId('part'),
+      name: `${part.name} Copy`,
+      documents: part.documents.map((doc) => ({ ...doc, id: makeId('doc') })),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    updateState((current) => ({ ...current, parts: [copy, ...current.parts] }));
+    return copy.id;
+  };
+
+  const deletePart = (partId) => {
+    if (!window.confirm('Delete this part from the Parts Library and unlink it from projects?')) return false;
+    updateState((current) => ({
+      ...current,
+      parts: current.parts.filter((part) => part.id !== partId),
+      projects: current.projects.map((project) => ({
+        ...project,
+        partIds: project.partIds.filter((id) => id !== partId),
+        partQuantities: Object.fromEntries(Object.entries(project.partQuantities || {}).filter(([id]) => id !== partId)),
+      })),
+    }));
+    return true;
+  };
+
+  const linkPartToProject = (projectId, partId) => {
+    if (!projectId || !partId) return;
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => (
+        project.id === projectId
+          ? {
+              ...project,
+              partIds: project.partIds.includes(partId) ? project.partIds : [...project.partIds, partId],
+              partQuantities: { ...(project.partQuantities || {}), [partId]: project.partQuantities?.[partId] || 1 },
+              updatedAt: new Date().toISOString(),
+            }
+          : project
+      )),
+    }));
+  };
+
+  const unlinkPartFromProject = (projectId, partId) => {
+    if (!projectId || !partId) return;
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => {
+        if (project.id !== projectId) return project;
+        const nextQuantities = { ...(project.partQuantities || {}) };
+        delete nextQuantities[partId];
+        return {
+          ...project,
+          partIds: project.partIds.filter((id) => id !== partId),
+          partQuantities: nextQuantities,
+          updatedAt: new Date().toISOString(),
+        };
+      }),
+    }));
+  };
+
+  const updateProjectPartQuantity = (projectId, partId, quantity) => {
+    if (!projectId || !partId) return;
+    const safeQuantity = Math.max(0, Number(quantity) || 0);
+    updateState((current) => ({
+      ...current,
+      projects: current.projects.map((project) => (
+        project.id === projectId
+          ? {
+              ...project,
+              partQuantities: { ...(project.partQuantities || {}), [partId]: safeQuantity },
+              updatedAt: new Date().toISOString(),
+            }
+          : project
+      )),
+    }));
+  };
+
   const duplicateProject = (project) => {
     const now = new Date().toISOString();
     const copy = {
@@ -2342,6 +2427,12 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
         onUpdate={(patch) => updateProject(selected.id, patch)}
         onUpdatePart={updatePart}
         onCreatePart={createPartForProject}
+        onCreateCategory={(name, parentId) => createCategory(name, parentId)}
+        onLinkProject={linkPartToProject}
+        onUnlinkProject={unlinkPartFromProject}
+        onProjectQuantityChange={updateProjectPartQuantity}
+        onDuplicatePart={duplicatePart}
+        onDeletePart={deletePart}
         onDuplicate={() => duplicateProject(selected)}
         onDelete={() => deleteProject(selected.id)}
       />
@@ -2883,7 +2974,25 @@ function ProjectExportModal({ project, onCancel, onExport }) {
   );
 }
 
-function ProjectWorkspace({ state, project, parts, template, categories, onBack, onUpdate, onUpdatePart, onCreatePart, onDuplicate, onDelete }) {
+function ProjectWorkspace({
+  state,
+  project,
+  parts,
+  template,
+  categories,
+  onBack,
+  onUpdate,
+  onUpdatePart,
+  onCreatePart,
+  onCreateCategory,
+  onLinkProject,
+  onUnlinkProject,
+  onProjectQuantityChange,
+  onDuplicatePart,
+  onDeletePart,
+  onDuplicate,
+  onDelete,
+}) {
   const [projectTab, setProjectTab] = useState('overview');
   const [imageBusy, setImageBusy] = useState(false);
   const [imagePreview, setImagePreview] = useState('');
@@ -2995,7 +3104,22 @@ function ProjectWorkspace({ state, project, parts, template, categories, onBack,
         <button className={`tab ${projectTab === 'files' ? 'active' : ''}`} onClick={() => setProjectTab('files')}>Files ({project.files.length})</button>
       </div>
       {projectTab === 'overview' && <ProjectOverviewTab project={project} template={template} onUpdate={onUpdate} />}
-      {projectTab === 'parts' && <ProjectPartsTab project={project} parts={parts} categories={categories} template={template} onUpdate={onUpdate} onUpdatePart={onUpdatePart} />}
+      {projectTab === 'parts' && (
+        <ProjectPartsTab
+          project={project}
+          parts={parts}
+          categories={categories}
+          projects={state.projects}
+          onUpdate={onUpdate}
+          onUpdatePart={onUpdatePart}
+          onCreateCategory={onCreateCategory}
+          onLinkProject={onLinkProject}
+          onUnlinkProject={onUnlinkProject}
+          onProjectQuantityChange={onProjectQuantityChange}
+          onDuplicatePart={onDuplicatePart}
+          onDeletePart={onDeletePart}
+        />
+      )}
       {projectTab === 'files' && <ProjectFilesTab project={project} template={template} onUpdate={onUpdate} />}
       {projectTab === 'photos' && <ProjectPhotosTab project={project} onUpdate={onUpdate} />}
       {projectTab === 'instructions' && <ProjectInstructionsTab project={project} parts={parts} categories={categories} onUpdate={onUpdate} onCreatePart={onCreatePart} />}
@@ -4595,7 +4719,7 @@ function ExpandablePdfPreview({ pdf, onExpand, className = 'pdf-preview compact'
   );
 }
 
-function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
+function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePart }) {
   const [expandedPreview, setExpandedPreview] = useState(null);
   const [documentBusy, setDocumentBusy] = useState(false);
   const [documentError, setDocumentError] = useState('');
@@ -4651,8 +4775,9 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onUpdatePart }) {
               <p>{part.storageLocation || 'No location set'}</p>
             </div>
           </div>
-          <div className="row-actions">
+          <div className="row-actions project-part-header-actions">
             <button className="danger-fill" onClick={() => onUnlink(part.id)}>Unlink</button>
+            <button className="ghost" onClick={() => onEdit(part.id)}>Edit</button>
             <button className="ghost" onClick={onClose}>Close</button>
           </div>
         </div>
@@ -4780,8 +4905,22 @@ function LinkPartModal({ parts, linkedIds, categories, onLink, onClose }) {
   );
 }
 
-function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart }) {
+function ProjectPartsTab({
+  project,
+  parts,
+  categories,
+  projects,
+  onUpdate,
+  onUpdatePart,
+  onCreateCategory,
+  onLinkProject,
+  onUnlinkProject,
+  onProjectQuantityChange,
+  onDuplicatePart,
+  onDeletePart,
+}) {
   const [selectedPart, setSelectedPart] = useState(null);
+  const [editingPartId, setEditingPartId] = useState('');
   const [linkingPart, setLinkingPart] = useState(false);
   const thumbnailJobsRef = useRef(new Set());
   const linkedParts = project.partIds.map((id) => parts.find((part) => part.id === id)).filter(Boolean);
@@ -4874,8 +5013,37 @@ function ProjectPartsTab({ project, parts, categories, onUpdate, onUpdatePart })
           categories={categories}
           onClose={() => setSelectedPart(null)}
           onUnlink={unlinkPart}
+          onEdit={(partId) => {
+            setSelectedPart(null);
+            setEditingPartId(partId);
+          }}
           onUpdatePart={onUpdatePart}
         />
+      )}
+      {editingPartId && parts.find((part) => part.id === editingPartId) && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && setEditingPartId('')}>
+          <div className="modal part-library-modal">
+            <PartEditor
+              part={parts.find((part) => part.id === editingPartId)}
+              categories={categories}
+              projects={projects}
+              onClose={() => setEditingPartId('')}
+              onUpdate={(patch) => onUpdatePart(editingPartId, patch)}
+              onLinkProject={onLinkProject}
+              onUnlinkProject={onUnlinkProject}
+              onProjectQuantityChange={onProjectQuantityChange}
+              onDuplicate={() => {
+                const target = parts.find((part) => part.id === editingPartId);
+                if (target) onDuplicatePart(target);
+              }}
+              onDelete={() => {
+                onDeletePart(editingPartId);
+                setEditingPartId('');
+              }}
+              onCreateCategory={onCreateCategory}
+            />
+          </div>
+        </div>
       )}
       {linkingPart && (
         <LinkPartModal
