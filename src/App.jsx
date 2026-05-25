@@ -4829,9 +4829,13 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
               {previewDocument?.path && <button className="ghost" onClick={() => openStoredFile(previewDocument.path)}>Open</button>}
             </div>
             {previewDocument ? (
-              <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
-                <FilePreview file={previewDocument} />
-              </button>
+              fileExtension(previewDocument.name) === '.pdf' ? (
+                <ExpandablePdfPreview pdf={previewDocument} onExpand={() => setExpandedPreview(previewDocument)} />
+              ) : (
+                <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
+                  <FilePreview file={previewDocument} />
+                </button>
+              )
             ) : <p>No previewable file attached yet.</p>}
           </section>
           <section className="project-part-panel notes-panel">
@@ -6541,6 +6545,9 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
   const [documentError, setDocumentError] = useState('');
   const [documentBusy, setDocumentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
+  const [imageError, setImageError] = useState('');
+  const [imageDropActive, setImageDropActive] = useState(false);
+  const [documentDropActive, setDocumentDropActive] = useState(false);
   const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
   const [projectToLink, setProjectToLink] = useState('');
   const [expandedPreview, setExpandedPreview] = useState(null);
@@ -6586,9 +6593,17 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
 
   const updateImage = async (file) => {
     if (!file) return;
+    const isImage = file.type.startsWith('image/') || /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name);
+    if (!isImage) {
+      setImageError('Only image files can be used as the part photo.');
+      return;
+    }
+    setImageError('');
     setImageBusy(true);
     try {
       onUpdate(await savePartImageWithThumbnail(file, part.id));
+    } catch (error) {
+      setImageError(String(error));
     } finally {
       setImageBusy(false);
     }
@@ -6605,7 +6620,22 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
       </div>
       <div className="part-editor-layout">
         <div className="part-editor-main">
-          <div className="part-editor-image">
+          <div
+            className={`part-editor-image drop-target ${imageDropActive ? 'drop-active' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setImageDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setImageDropActive(false);
+              updateImage(event.dataTransfer.files?.[0]);
+            }}
+          >
             <button
               className="image-expand-button"
               disabled={!part.image}
@@ -6634,6 +6664,7 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
                 Search web for Image
               </button>
             </div>
+            {imageError && <p className="error-text">{imageError}</p>}
           </div>
           <label>Name<input value={part.name} onChange={(event) => onUpdate({ name: event.target.value })} /></label>
           <label>
@@ -6715,13 +6746,32 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
                   <span>{previewDocument.name}</span>
                   <button className="ghost" onClick={() => openStoredFile(previewDocument.path)}>Open</button>
                 </div>
-                <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
-                  <FilePreview file={previewDocument} />
-                </button>
+                {fileExtension(previewDocument.name) === '.pdf' ? (
+                  <ExpandablePdfPreview pdf={previewDocument} onExpand={() => setExpandedPreview(previewDocument)} />
+                ) : (
+                  <button className="inline-preview-button" onClick={() => setExpandedPreview(previewDocument)}>
+                    <FilePreview file={previewDocument} />
+                  </button>
+                )}
               </>
             ) : <p>No previewable file attached yet.</p>}
           </div>
-          <div>
+          <div
+            className={`part-documents-panel drop-target ${documentDropActive ? 'drop-active' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDocumentDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              setDocumentDropActive(false);
+              attachDocument(event.dataTransfer.files?.[0]);
+            }}
+          >
             <h3>Documents</h3>
             <div className="attach-form vertical">
               <label className="file-picker wide-picker">

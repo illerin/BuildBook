@@ -1666,6 +1666,18 @@ article h3,
   gap: 8px;
 }
 
+.drop-target {
+  border: 1px dashed transparent;
+  border-radius: 8px;
+  padding: 8px;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.drop-target.drop-active {
+  border-color: var(--accent);
+  background: var(--field);
+}
+
 .part-image-actions {
   display: grid;
   grid-template-columns: minmax(92px, 0.85fr) minmax(138px, 1.15fr);
@@ -1975,6 +1987,7 @@ article h3,
 
 .modal.part-library-modal {
   width: min(1100px, 96vw);
+  overflow-x: hidden;
 }
 
 .modal.new-part-modal {
@@ -2029,6 +2042,35 @@ article h3,
 .part-editor-side {
   display: grid;
   gap: 12px;
+  min-width: 0;
+}
+
+.part-documents-panel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.preview-box {
+  min-width: 0;
+}
+
+.preview-box .list-line,
+.part-documents-panel .list-line {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.preview-box .list-line span,
+.part-documents-panel .list-line span {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.part-documents-panel .row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .part-project-usage {
