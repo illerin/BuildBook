@@ -4783,8 +4783,8 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
         </div>
         <div className="project-part-content">
           <section className="project-part-panel spec-panel">
-            <h3>Spec Summary</h3>
-            <p>{part.specSummary || 'No spec summary yet.'}</p>
+            <h3>Notes</h3>
+            <p>{part.notes || 'No notes yet.'}</p>
             <h3>Product URL</h3>
             {part.productUrl ? (
               <p>
@@ -4835,8 +4835,8 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
             ) : <p>No previewable file attached yet.</p>}
           </section>
           <section className="project-part-panel notes-panel">
-            <h3>Notes</h3>
-            <p>{part.notes || 'No notes yet.'}</p>
+            <h3>Spec Summary</h3>
+            <p>{part.specSummary || 'No spec summary yet.'}</p>
           </section>
         </div>
       </div>
