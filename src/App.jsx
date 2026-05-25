@@ -1133,6 +1133,7 @@ async function readWebBackupPackage(entries) {
 }
 
 function webFileTrackersFromProjectManifest(manifest) {
+  const explicitTrackers = Array.isArray(manifest.file_trackers) ? manifest.file_trackers : [];
   const byKey = new Map([
     ['datasheet', { id: webTrackerId('datasheet'), name: 'Datasheets', extensions: '.pdf', programPath: '' }],
     ['firmware', { id: webTrackerId('firmware'), name: 'Firmware', extensions: '.ino,.cpp,.h', programPath: '' }],
@@ -1141,12 +1142,25 @@ function webFileTrackersFromProjectManifest(manifest) {
     ['bom', { id: webTrackerId('bom'), name: 'PCB BOM', extensions: '.xlsx,.xls,.csv,.tsv', programPath: '' }],
     ['other', { id: webTrackerId('other'), name: 'Other', extensions: '', programPath: '' }],
   ]);
+  for (const tracker of explicitTrackers) {
+    const key = String(tracker.key || tracker.id || '').trim();
+    if (!key) continue;
+    byKey.set(key, {
+      id: webTrackerId(key),
+      name: tracker.label || tracker.name || key,
+      extensions: tracker.extensions || '',
+      programPath: '',
+    });
+  }
   for (const file of manifest.files || []) {
     const key = file.tracker_key || 'other';
     if (!byKey.has(key)) {
+      const derivedName = String(file.file_category || '').split('-')[0]?.trim();
       byKey.set(key, {
         id: webTrackerId(key),
-        name: file.file_category?.split('-')[0]?.trim() || key,
+        name: derivedName && derivedName.toLowerCase() !== 'imported'
+          ? derivedName
+          : (file.original_filename ? file.original_filename.split('.').slice(0, -1).join('.') || key : key),
         extensions: '',
         programPath: '',
       });
@@ -1191,6 +1205,37 @@ async function readWebProjectPackage(entries) {
     createdAt: webDate(file.uploaded_at),
     packagePath: file.archive_path || '',
   }));
+
+  const photoFolders = (webManifest.photo_library || []).map((folder, folderIndex) => ({
+    id: folder.id || webId('photo-folder', folderIndex + 1),
+    name: folder.name || `Photos ${folderIndex + 1}`,
+    photos: (folder.photos || []).map((photo, photoIndex) => ({
+      id: photo.id || webId('photo', `${folderIndex + 1}-${photoIndex + 1}`),
+      name: photo.name || `Photo ${photoIndex + 1}`,
+      note: photo.note || '',
+      createdAt: webDate(photo.createdAt || photo.created_at),
+      path: '',
+      markupPath: '',
+      thumbnailPath: '',
+      markupThumbnailPath: '',
+      packagePath: photo.archive_path || '',
+      markupPackagePath: photo.markup_archive_path || '',
+      thumbnailPackagePath: photo.thumbnail_archive_path || '',
+      markupThumbnailPackagePath: photo.markup_thumbnail_archive_path || '',
+    })),
+  }));
+
+  const instructions = webManifest.instructions && typeof webManifest.instructions === 'object'
+    ? {
+        intro: webManifest.instructions.intro || '',
+        steps: Array.isArray(webManifest.instructions.steps) ? webManifest.instructions.steps.map((step, index) => ({
+          id: step.id || webId('instruction-step', index + 1),
+          title: step.title || `Step ${index + 1}`,
+          body: step.body || '',
+          photoId: step.photoId || '',
+        })) : [],
+      }
+    : { intro: '', steps: [] };
 
   const parts = (webManifest.parts || []).map((part, index) => ({
     id: webId('part', index + 1),
@@ -1243,6 +1288,8 @@ async function readWebProjectPackage(entries) {
         partIds: parts.map((part) => part.id),
         partQuantities: Object.fromEntries(parts.map((part) => [part.id, part.quantity])),
         files,
+        photoFolders,
+        instructions,
         createdAt: now,
         updatedAt: now,
       },
@@ -1572,9 +1619,19 @@ async function buildProjectPackage(state, project) {
   const linkedParts = project.partIds.map((id) => state.parts.find((part) => part.id === id)).filter(Boolean);
   const exportedProject = {
     ...project,
+    notes: await packageInlineNoteImages(entries, project.notes, project.id),
+    instructions: project.instructions ? {
+      ...project.instructions,
+      intro: await packageInlineNoteImages(entries, project.instructions.intro, project.id, 'instructions/intro-images'),
+      steps: await Promise.all((project.instructions.steps || []).map(async (step) => ({
+        ...step,
+        body: await packageInlineNoteImages(entries, step.body, project.id, `instructions/steps/${safeName(step.id)}`),
+      }))),
+    } : project.instructions,
     imagePackagePath: '',
     files: [],
     noteImages: [],
+    photoFolders: [],
   };
 
   exportedProject.imagePackagePath = await addFileEntry(entries, project.image, `project/image/${safeName(project.name)}${await imagePackageExtension(project.image)}`);
@@ -1584,17 +1641,40 @@ async function buildProjectPackage(state, project) {
     exportedProject.noteImages.push({ ...image, path: '', packagePath });
   }
 
-  for (const file of project.files.filter((item) => item.latest)) {
+  for (const folder of project.photoFolders || []) {
+    const exportedPhotos = [];
+    for (const photo of folder.photos || []) {
+      const packagePath = await addFileEntry(entries, photo.path, `project/photos/${safeName(folder.id)}/${safeName(photo.id)}-${safeName(photo.name)}${await imagePackageExtension(photo.path)}`);
+      const markupPackagePath = await addFileEntry(entries, photo.markupPath, `project/photos/${safeName(folder.id)}/markup-${safeName(photo.id)}-${safeName(photo.name)}${await imagePackageExtension(photo.markupPath)}`);
+      const thumbnailPackagePath = await addFileEntry(entries, photo.thumbnailPath, `project/photos/${safeName(folder.id)}/thumb-${safeName(photo.id)}.jpg`);
+      const markupThumbnailPackagePath = await addFileEntry(entries, photo.markupThumbnailPath, `project/photos/${safeName(folder.id)}/markup-thumb-${safeName(photo.id)}.jpg`);
+      exportedPhotos.push({
+        ...photo,
+        path: '',
+        markupPath: '',
+        thumbnailPath: '',
+        markupThumbnailPath: '',
+        packagePath,
+        markupPackagePath,
+        thumbnailPackagePath,
+        markupThumbnailPackagePath,
+      });
+    }
+    exportedProject.photoFolders.push({ ...folder, photos: exportedPhotos });
+  }
+
+  for (const file of project.files) {
+    const fileRoot = file.latest ? 'project/latest-files' : 'project/older-files';
     if (file.type === 'folder') {
       const folderFiles = [];
       for (const child of file.folderFiles || []) {
-        const packagePath = await addFileEntry(entries, child.path, `project/latest-files/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}/${safeName(child.relativePath || child.name)}`);
+        const packagePath = await addFileEntry(entries, child.path, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}/${safeName(child.relativePath || child.name)}`);
         folderFiles.push({ ...child, path: '', sourcePath: '', packagePath });
       }
       exportedProject.files.push({ ...file, path: '', sourcePath: '', folderFiles });
       continue;
     }
-    const packagePath = await addFileEntry(entries, file.path, `project/latest-files/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}`);
+    const packagePath = await addFileEntry(entries, file.path, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}`);
     exportedProject.files.push({ ...file, path: '', sourcePath: '', packagePath });
   }
 
@@ -1646,9 +1726,46 @@ async function readProjectPackage(file) {
   return { manifest, entries };
 }
 
+function trackerExtensionsKey(extensions = '') {
+  return String(extensions || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(',');
+}
+
+function trackerSignature(tracker) {
+  return `${String(tracker?.name || '').trim().toLowerCase()}|${trackerExtensionsKey(tracker?.extensions)}`;
+}
+
+function trackerNameKey(name = '') {
+  return String(name || '').trim().toLowerCase();
+}
+
+function findMatchingTracker(trackers, importedTracker) {
+  return trackers.find((tracker) => tracker.id === importedTracker.id)
+    || trackers.find((tracker) => trackerSignature(tracker) === trackerSignature(importedTracker))
+    || trackers.find((tracker) => trackerNameKey(tracker.name) === trackerNameKey(importedTracker?.name))
+    || (trackerExtensionsKey(importedTracker?.extensions)
+      ? trackers.find((tracker) => trackerExtensionsKey(tracker.extensions) === trackerExtensionsKey(importedTracker.extensions))
+      : null)
+    || null;
+}
+
 function ProjectImportReview({ state, packageData, onCancel, onImport }) {
   const { manifest, entries } = packageData;
   const categoryOptions = flattenCategoryOptions(state.categories);
+  const importedTrackers = manifest.fileTrackers || [];
+  const filesByTracker = useMemo(() => {
+    const grouped = new Map();
+    for (const file of manifest.project?.files || []) {
+      const list = grouped.get(file.trackerId) || [];
+      list.push(file);
+      grouped.set(file.trackerId, list);
+    }
+    return grouped;
+  }, [manifest.project?.files]);
   const [projectName, setProjectName] = useState(
     state.projects.some((project) => project.name === manifest.project.name)
       ? `${manifest.project.name} (Imported)`
@@ -1663,6 +1780,10 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
   const [partActions, setPartActions] = useState(() => Object.fromEntries(manifest.parts.map((part) => {
     const match = findMatchingPart(state.parts, part);
     return [part.id, { action: match ? 'reuse' : 'create', partId: match?.id || '' }];
+  })));
+  const [trackerDecisions, setTrackerDecisions] = useState(() => Object.fromEntries(importedTrackers.map((tracker) => {
+    const match = findMatchingTracker(state.template.fileTrackers, tracker);
+    return [tracker.id, { action: match ? 'assign' : 'add', trackerId: match?.id || '' }];
   })));
 
   const sortedParts = [...manifest.parts].sort((a, b) => {
@@ -1689,7 +1810,11 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
       const importedPartQuantities = {};
       const createdParts = [];
       const updatedParts = [...state.parts];
-      const importedTrackers = (manifest.fileTrackers || []).filter((tracker) => !state.template.fileTrackers.some((current) => current.id === tracker.id));
+      const addedTrackers = importedTrackers.filter((tracker) => (trackerDecisions[tracker.id]?.action || 'add') === 'add');
+      const trackerIdMap = Object.fromEntries(importedTrackers.map((tracker) => {
+        const decision = trackerDecisions[tracker.id] || { action: 'add', trackerId: '' };
+        return [tracker.id, decision.action === 'assign' && decision.trackerId ? decision.trackerId : tracker.id];
+      }));
       const projectImage = await savePackagedAsset(manifest.project.imagePackagePath, `${projectName}-image`, `project-images/${projectId}`);
       const importedNoteImages = [];
 
@@ -1698,19 +1823,48 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         importedNoteImages.push({ ...image, id: makeId('note-img'), path, packagePath: '' });
       }
 
+      const importedPhotoFolders = [];
+      for (const folder of manifest.project.photoFolders || []) {
+        const photos = [];
+        for (const photo of folder.photos || []) {
+          const path = await savePackagedAsset(photo.packagePath, photo.name, `project-photos/${projectId}/${folder.id}`);
+          const markupPath = await savePackagedAsset(photo.markupPackagePath, `markup-${photo.name}`, `project-photos/${projectId}/markup`);
+          const thumbnailPath = await savePackagedAsset(photo.thumbnailPackagePath, `thumb-${photo.name}.jpg`, `project-photos/${projectId}/thumbs`);
+          const markupThumbnailPath = await savePackagedAsset(photo.markupThumbnailPackagePath, `markup-thumb-${photo.name}.jpg`, `project-photos/${projectId}/thumbs`);
+          photos.push({
+            ...photo,
+            id: photo.id || makeId('photo'),
+            path: path || '',
+            markupPath: markupPath || '',
+            thumbnailPath: thumbnailPath || '',
+            markupThumbnailPath: markupThumbnailPath || '',
+            packagePath: '',
+            markupPackagePath: '',
+            thumbnailPackagePath: '',
+            markupThumbnailPackagePath: '',
+          });
+        }
+        importedPhotoFolders.push({
+          ...folder,
+          id: folder.id || makeId('photo-folder'),
+          photos,
+        });
+      }
+
       const importedFiles = [];
       for (const file of manifest.project.files || []) {
+        const mappedTrackerId = trackerIdMap[file.trackerId] || file.trackerId;
         if (file.type === 'folder') {
           const folderFiles = [];
           for (const child of file.folderFiles || []) {
-            const path = await savePackagedAsset(child.packagePath, child.name, `project-files/${projectId}/${file.trackerId}/${file.name}`);
+            const path = await savePackagedAsset(child.packagePath, child.name, `project-files/${projectId}/${mappedTrackerId}/${file.name}`);
             folderFiles.push({ ...child, path, packagePath: '' });
           }
-          importedFiles.push({ ...file, id: makeId('file'), folderFiles, path: '', sourcePath: '', packagePath: '', latest: true, createdAt: new Date().toISOString() });
+          importedFiles.push({ ...file, id: makeId('file'), trackerId: mappedTrackerId, folderFiles, path: '', sourcePath: '', packagePath: '', latest: file.latest !== false, createdAt: file.createdAt || new Date().toISOString() });
           continue;
         }
-        const path = await savePackagedAsset(file.packagePath, file.name, `project-files/${projectId}/${file.trackerId}`);
-        importedFiles.push({ ...file, id: makeId('file'), path, sourcePath: '', packagePath: '', latest: true, createdAt: new Date().toISOString() });
+        const path = await savePackagedAsset(file.packagePath, file.name, `project-files/${projectId}/${mappedTrackerId}`);
+        importedFiles.push({ ...file, id: makeId('file'), trackerId: mappedTrackerId, path, sourcePath: '', packagePath: '', latest: file.latest !== false, createdAt: file.createdAt || new Date().toISOString() });
       }
 
       for (const part of manifest.parts || []) {
@@ -1760,6 +1914,15 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         files: importedFiles,
         noteImages: importedNoteImages,
         notes: await restoreInlineNoteImages(entries, manifest.project.notes, projectId),
+        photoFolders: importedPhotoFolders,
+        instructions: manifest.project.instructions ? {
+          ...manifest.project.instructions,
+          intro: await restoreInlineNoteImages(entries, manifest.project.instructions.intro, projectId, `project-instructions/${projectId}/intro`),
+          steps: await Promise.all((manifest.project.instructions.steps || []).map(async (step) => ({
+            ...step,
+            body: await restoreInlineNoteImages(entries, step.body, projectId, `project-instructions/${projectId}/steps`),
+          }))),
+        } : { intro: '', steps: [] },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -1768,7 +1931,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         ...state,
         template: {
           ...state.template,
-          fileTrackers: [...state.template.fileTrackers, ...importedTrackers],
+          fileTrackers: [...state.template.fileTrackers, ...addedTrackers],
         },
         parts: [...createdParts, ...updatedParts],
         projects: [importedProject, ...state.projects],
@@ -1780,6 +1943,14 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
     }
   };
 
+  const unresolvedTrackerAssignments = Object.values(trackerDecisions).some((decision) => decision.action === 'assign' && !decision.trackerId);
+  const newTrackerCount = importedTrackers.filter((tracker) => (trackerDecisions[tracker.id]?.action || 'add') === 'add').length;
+  const trackerImportLabel = (tracker) => {
+    if (tracker.extensions) return tracker.extensions;
+    const names = [...new Set((filesByTracker.get(tracker.id) || []).map((file) => file.name).filter(Boolean))];
+    return names.length ? names.slice(0, 2).join(', ') : 'No extension filter';
+  };
+
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onCancel()}>
       <div className="modal import-review-modal">
@@ -1788,6 +1959,45 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
           <button className="ghost" onClick={onCancel}>Close</button>
         </div>
         <label>Project Name<input value={projectName} onChange={(event) => setProjectName(event.target.value)} /></label>
+        {!!importedTrackers.length && (
+          <section className="panel tracker-import-panel">
+            <div className="section-title">
+              <div>
+                <h3>Tracked File Types</h3>
+                <span>{newTrackerCount ? `${newTrackerCount} tracked file type${newTrackerCount === 1 ? '' : 's'} will be added unless reassigned.` : 'Imported tracked file types will reuse matching local trackers.'}</span>
+              </div>
+            </div>
+            <div className="tracker-import-list">
+              {importedTrackers.map((tracker) => {
+                const decision = trackerDecisions[tracker.id] || { action: 'add', trackerId: '' };
+                return (
+                  <div key={tracker.id} className="tracker-import-row">
+                    <div className="tracker-import-summary">
+                      <strong>{tracker.name}</strong>
+                      <span>{trackerImportLabel(tracker)}</span>
+                    </div>
+                    <div className="tracker-import-actions">
+                      <select value={decision.action} onChange={(event) => setTrackerDecisions((current) => ({ ...current, [tracker.id]: { ...decision, action: event.target.value } }))}>
+                        <option value="add">Add tracked file type</option>
+                        <option value="assign">Assign to existing tracked file type</option>
+                      </select>
+                      {decision.action === 'assign' && (
+                        <select value={decision.trackerId} onChange={(event) => setTrackerDecisions((current) => ({ ...current, [tracker.id]: { ...decision, trackerId: event.target.value } }))}>
+                          <option value="">Choose tracked file type...</option>
+                          {state.template.fileTrackers.map((trackerOption) => (
+                            <option key={trackerOption.id} value={trackerOption.id}>
+                              {trackerOption.name}{trackerOption.extensions ? ` (${trackerOption.extensions})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
         <div className="import-review-list">
           {sortedParts.map((part) => {
             const exact = findCategoryByPath(state.categories, part.categoryPath || []);
@@ -1823,7 +2033,7 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         {error && <p className="error-text">{error}</p>}
         <div className="modal-footer">
           <button className="secondary" onClick={onCancel}>Cancel</button>
-          <button onClick={completeImport} disabled={busy}>{busy ? 'Importing...' : 'Import Project'}</button>
+          <button onClick={completeImport} disabled={busy || unresolvedTrackerAssignments}>{busy ? 'Importing...' : 'Import Project'}</button>
         </div>
       </div>
     </div>
@@ -4252,8 +4462,9 @@ function drawDxf(canvas, shapes) {
   const maxY = Math.max(...points.map((point) => point[1]));
   const width = maxX - minX || 1;
   const height = maxY - minY || 1;
-  const scale = Math.min((canvas.width - 56) / width, (canvas.height - 56) / height);
-  const map = ([x, y]) => [28 + (x - minX) * scale, canvas.height - 28 - (y - minY) * scale];
+  const margin = 28;
+  const scale = Math.min((canvas.width - margin * 2) / width, (canvas.height - margin * 2) / height);
+  const map = ([x, y]) => [margin + (x - minX) * scale, margin + (maxY - y) * scale];
 
   context.strokeStyle = cssColor('--accent', '#58a6ff');
   context.lineWidth = 2;

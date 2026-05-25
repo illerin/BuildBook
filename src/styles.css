@@ -2177,6 +2177,9 @@ article h3,
   grid-template-rows: minmax(0, 1fr) auto;
   gap: 8px;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
   color: var(--text-muted);
   font-size: 12px;
 }
@@ -2193,8 +2196,10 @@ article h3,
 
 .model-preview canvas,
 .cad-preview canvas {
+  display: block;
   width: 100%;
   height: auto;
+  max-width: 100%;
   aspect-ratio: 720 / 520;
   align-self: start;
   border: 1px solid var(--border);
@@ -2525,6 +2530,44 @@ article h3,
   display: grid;
   gap: 10px;
   margin-top: 14px;
+}
+
+.tracker-import-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.tracker-import-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tracker-import-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.tracker-import-summary {
+  display: grid;
+  gap: 4px;
+}
+
+.tracker-import-summary span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tracker-import-actions {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.9fr) minmax(200px, 1fr);
+  gap: 8px;
 }
 
 .import-part-row {
@@ -3686,6 +3729,8 @@ article h3,
   .category-merge-box,
   .category-edit-row,
   .note-image-controls,
+  .tracker-import-row,
+  .tracker-import-actions,
   .import-part-row,
   .import-action-grid,
   .mini-create-grid,
