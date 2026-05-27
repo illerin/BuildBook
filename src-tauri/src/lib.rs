@@ -633,10 +633,11 @@ fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body:
 }
 
 fn dist_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
-    let resource_dist = app.path().resource_dir().ok().map(|path| path.join("dist"));
+    let resource_root = app.path().resource_dir().ok();
+    let resource_dist = resource_root.as_ref().map(|path| path.join("dist"));
     let current_dist = std::env::current_dir().ok().map(|path| path.join("dist"));
     let parent_dist = std::env::current_dir().ok().and_then(|path| path.parent().map(|parent| parent.join("dist")));
-    [resource_dist, current_dist, parent_dist]
+    [resource_root, resource_dist, current_dist, parent_dist]
         .into_iter()
         .flatten()
         .find(|path| path.join("index.html").is_file())

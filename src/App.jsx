@@ -5623,6 +5623,11 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const fullViewerExtensions = new Set(['.pdf', '.stl', '.obj', '.dxf', ...TEXT_EXTENSIONS]);
   const viewerMode = selectedFile && (selectedFile.type === 'folder' || fullViewerExtensions.has(selectedExtension)) ? 'full' : 'compact';
   const fileBusyLabel = fileBusy ? 'Working on file operation...' : '';
+  const stagedAttachmentName = stagedAttachment?.type === 'upload-file'
+    ? stagedAttachment.file?.name
+    : stagedAttachment?.type === 'upload-folder'
+      ? stagedAttachment.files?.[0]?.webkitRelativePath?.split('/')[0] || stagedAttachment.files?.[0]?.name
+      : stagedAttachment?.path?.split(/[\\/]/).filter(Boolean).pop();
 
   useEffect(() => {
     if (!selectedFile) {
@@ -5654,7 +5659,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           )}
           <div className="upload-action-row">
             <div className="upload-buttons">
-              <label className="file-picker compact-picker">
+              <label className={`file-picker compact-picker upload-method ${stagedAttachment?.type === 'upload-file' ? 'selected' : ''}`}>
                 <input
                   type="file"
                   accept={acceptFromExtensions(template.fileTrackers.find((tracker) => tracker.id === fileTrackerId)?.extensions || '')}
@@ -5666,7 +5671,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                 />
                 Upload File
               </label>
-              <label className="file-picker compact-picker">
+              <label className={`file-picker compact-picker upload-method ${stagedAttachment?.type === 'upload-folder' ? 'selected' : ''}`}>
                 <input
                   type="file"
                   multiple
@@ -5680,13 +5685,19 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                 />
                 Upload Folder
               </label>
-              <button onClick={selectLinkedProjectFile} disabled={fileBusy}>Link File</button>
-              <button onClick={selectLinkedProjectFolder} disabled={fileBusy}>Link Folder</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-file' ? 'selected' : ''}`} onClick={selectLinkedProjectFile} disabled={fileBusy}>Link File</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-folder' ? 'selected' : ''}`} onClick={selectLinkedProjectFolder} disabled={fileBusy}>Link Folder</button>
             </div>
             <button className={stagedAttachment ? '' : 'secondary'} onClick={loadStagedAttachment} disabled={fileBusy || !stagedAttachment}>
               {fileBusy ? 'Loading...' : stagedAttachment?.type?.includes('folder') ? 'Load Folder' : 'Load File'}
             </button>
           </div>
+          {stagedAttachment && (
+            <div className="staged-attachment">
+              <span title={stagedAttachmentName}>{stagedAttachmentName || 'Selected file'}</span>
+              <button className="ghost" onClick={() => setStagedAttachment(null)}>Clear</button>
+            </div>
+          )}
           <BusyNotice label={fileBusyLabel} />
           {fileError && <p className="error-text">{fileError}</p>}
         </section>

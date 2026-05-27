@@ -516,6 +516,33 @@ label {
   align-items: center;
 }
 
+.upload-method.selected,
+.upload-method.selected:hover {
+  border-color: var(--accent);
+  background: var(--accent-fill);
+  color: #ffffff;
+}
+
+.staged-attachment {
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--field);
+  padding: 6px 8px;
+}
+
+.staged-attachment span {
+  min-width: 0;
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .upload-card h3 {
   margin: 0 0 4px;
 }
