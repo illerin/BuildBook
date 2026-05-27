@@ -114,6 +114,7 @@ pub fn run() {
             list_folder_files,
             scan_storage,
             cleanup_orphaned_files,
+            delete_managed_files,
             reset_managed_storage,
             shell_thumbnail_bytes,
             start_lan_server,
@@ -214,6 +215,13 @@ struct StorageScan {
 #[serde(rename_all = "camelCase")]
 struct ResetStorageResult {
     retained_files: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteManagedFilesResult {
+    deleted_paths: Vec<String>,
+    failed_paths: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -632,12 +640,36 @@ fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body:
     let _ = stream.write_all(body);
 }
 
+fn find_index_html(root: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
+    let direct = root.join("index.html");
+    if direct.is_file() {
+        return Some(root.to_path_buf());
+    }
+    if depth == 0 {
+        return None;
+    }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(found) = find_index_html(&path, depth - 1) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn dist_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     let resource_root = app.path().resource_dir().ok();
     let resource_dist = resource_root.as_ref().map(|path| path.join("dist"));
     let current_dist = std::env::current_dir().ok().map(|path| path.join("dist"));
     let parent_dist = std::env::current_dir().ok().and_then(|path| path.parent().map(|parent| parent.join("dist")));
-    [resource_root, resource_dist, current_dist, parent_dist]
+    let executable_dir = std::env::current_exe().ok().and_then(|path| path.parent().map(|parent| parent.to_path_buf()));
+    let executable_dist = executable_dir.as_ref().map(|path| path.join("dist"));
+    let recursive_resource = resource_root.as_ref().and_then(|path| find_index_html(path, 4));
+    [resource_root, resource_dist, current_dist, parent_dist, executable_dir, executable_dist, recursive_resource]
         .into_iter()
         .flatten()
         .find(|path| path.join("index.html").is_file())
@@ -1061,6 +1093,16 @@ fn storage_relative_path(roots: &[std::path::PathBuf], path: &std::path::Path) -
         .unwrap_or_else(|| path.file_name().map(|name| name.to_string_lossy().to_string()).unwrap_or_default())
 }
 
+fn canonical_under_roots(path: &str, roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path.trim_matches('"')).ok()?;
+    let lower = canonical.to_string_lossy().to_lowercase();
+    let allowed = roots.iter().filter_map(|root| std::fs::canonicalize(root).ok()).any(|root| {
+        let prefix = root.to_string_lossy().to_lowercase();
+        lower == prefix || lower.starts_with(&(prefix + "\\"))
+    });
+    allowed.then_some(canonical)
+}
+
 fn modified_millis(path: &std::path::Path) -> String {
     path.metadata()
         .and_then(|metadata| metadata.modified())
@@ -1130,6 +1172,30 @@ fn scan_storage(app: tauri::AppHandle, referenced_paths: Vec<String>) -> Result<
 #[tauri::command]
 fn cleanup_orphaned_files(app: tauri::AppHandle, referenced_paths: Vec<String>, delete_paths: Vec<String>) -> Result<StorageScan, String> {
     scan_storage_inner(app, referenced_paths, delete_paths)
+}
+
+#[tauri::command]
+fn delete_managed_files(app: tauri::AppHandle, paths: Vec<String>) -> Result<DeleteManagedFilesResult, String> {
+    let roots = storage_roots(&app)?;
+    let mut deleted_paths = Vec::new();
+    let mut failed_paths = Vec::new();
+    for path in paths {
+        let Some(target) = canonical_under_roots(&path, &roots) else {
+            failed_paths.push(path);
+            continue;
+        };
+        let result = if target.is_dir() {
+            std::fs::remove_dir_all(&target)
+        } else {
+            std::fs::remove_file(&target)
+        };
+        if result.is_ok() {
+            deleted_paths.push(target.to_string_lossy().to_string());
+        } else {
+            failed_paths.push(target.to_string_lossy().to_string());
+        }
+    }
+    Ok(DeleteManagedFilesResult { deleted_paths, failed_paths })
 }
 
 #[tauri::command]

@@ -3084,6 +3084,126 @@ article h3,
   gap: 8px;
 }
 
+.revision-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.revision-sections {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.revision-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 12px;
+}
+
+.revision-card h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.revision-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.revision-field > span {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.revision-delay-field {
+  max-width: 180px;
+}
+
+.revision-toggle-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  cursor: pointer;
+}
+
+.revision-toggle-row input {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+}
+
+.revision-toggle-row div {
+  display: grid;
+  gap: 2px;
+}
+
+.revision-toggle-row strong {
+  font-size: 14px;
+}
+
+.revision-toggle-row span,
+.revision-note {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.revision-note {
+  margin: 0;
+}
+
+.revision-summary {
+  margin-top: 12px;
+}
+
+.revision-storage-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.revision-storage-list h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.revision-storage-row {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 10px;
+}
+
+.revision-storage-row > div,
+.revision-storage-row li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
+
+.revision-storage-row ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .theme-color-row {
   display: grid;
   grid-template-columns: minmax(150px, 1fr) 92px 52px 110px;
@@ -3436,6 +3556,8 @@ article h3,
   .note-image-controls,
   .import-part-row,
   .import-action-grid,
+  .revision-settings-grid,
+  .revision-sections,
   .mini-create-grid,
   .instruction-new-part,
   .instruction-link-part,

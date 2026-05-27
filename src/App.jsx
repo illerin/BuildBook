@@ -4,6 +4,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { check as checkForTauriUpdate } from '@tauri-apps/plugin-updater';
 import {
   APP_VERSION,
+  DEFAULT_REVISION_SETTINGS,
   DEFAULT_STATE,
   DEFAULT_THEME,
   STATUSES,
@@ -16,6 +17,7 @@ import {
   acceptFromExtensions,
   assetUrl,
   cleanupOrphanedFiles,
+  deleteManagedFiles,
   downloadBytes,
   downloadUrlFile,
   extensionAllowed,
@@ -817,12 +819,26 @@ async function buildFullBackupEntries(state) {
       if (file.type === 'folder') {
         const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
           const packagePath = await addFileEntry(entries, child.path, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/${safeName(file.id)}/${safeName(child.relativePath || child.name)}`);
-          return packagePath ? { ...child, path: '', packagePath } : child;
+          const baselinePackagePath = await addFileEntry(entries, child.baselinePath, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/${safeName(file.id)}/baseline/${safeName(child.relativePath || child.name)}`);
+          return {
+            ...child,
+            path: packagePath ? '' : child.path,
+            packagePath,
+            baselinePath: baselinePackagePath ? '' : child.baselinePath,
+            baselinePackagePath,
+          };
         }));
-        return { ...file, folderFiles, path: '', sourcePath: '', storageMode: 'copy' };
+        return { ...file, folderFiles, path: '', storageMode: file.storageMode || 'copy' };
       }
       const packagePath = await addFileEntry(entries, file.path, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/${safeName(file.id)}-${safeName(file.name)}`);
-      return packagePath ? { ...file, path: '', sourcePath: '', storageMode: 'copy', packagePath } : file;
+      const baselinePackagePath = await addFileEntry(entries, file.baselinePath, `projects/${safeName(project.id)}/files/${safeName(file.trackerId)}/baseline/${safeName(file.id)}-${safeName(file.name)}`);
+      return {
+        ...file,
+        path: packagePath ? '' : file.path,
+        packagePath,
+        baselinePath: baselinePackagePath ? '' : file.baselinePath,
+        baselinePackagePath,
+      };
     }));
   }
 
@@ -910,16 +926,27 @@ async function readFullBackupPackage(file) {
     project.files = await Promise.all((project.files || []).map(async (file) => {
       if (file.type === 'folder') {
         const folderFiles = await Promise.all((file.folderFiles || []).map(async (child) => {
-          const path = await saveZipAsset(entries, child.packagePath, child.name, `project-files/${project.id}/${file.trackerId}/${file.name}`);
+          const fallbackPath = file.sourcePath && child.relativePath ? `${file.sourcePath.replace(/[\\/]+$/, '')}/${child.relativePath.replace(/\\/g, '/')}` : '';
+          const path = fallbackPath
+            ? await fileHash(fallbackPath).then(() => fallbackPath).catch(() => saveZipAsset(entries, child.packagePath, child.name, `project-files/${project.id}/${file.trackerId}/${file.name}`))
+            : await saveZipAsset(entries, child.packagePath, child.name, `project-files/${project.id}/${file.trackerId}/${file.name}`);
+          const baselinePath = await saveZipAsset(entries, child.baselinePackagePath, child.name, `project-files/${project.id}/${file.trackerId}/baseline/${file.name}`);
           const restoredChild = path ? { ...child, path } : child;
+          restoredChild.baselinePath = baselinePath || restoredChild.baselinePath || '';
           delete restoredChild.packagePath;
+          delete restoredChild.baselinePackagePath;
           return restoredChild;
         }));
-        return { ...file, folderFiles, path: '', sourcePath: '', storageMode: 'copy' };
+        return { ...file, folderFiles, path: '', storageMode: file.storageMode === 'link' ? 'link' : 'copy' };
       }
-      const path = await saveZipAsset(entries, file.packagePath, file.name, `project-files/${project.id}/${file.trackerId}`);
-      const restored = path ? { ...file, path, sourcePath: '', storageMode: 'copy' } : file;
+      const path = file.storageMode === 'link' && file.sourcePath
+        ? await fileHash(file.sourcePath).then(() => file.sourcePath).catch(() => saveZipAsset(entries, file.packagePath, file.name, `project-files/${project.id}/${file.trackerId}`))
+        : await saveZipAsset(entries, file.packagePath, file.name, `project-files/${project.id}/${file.trackerId}`);
+      const baselinePath = await saveZipAsset(entries, file.baselinePackagePath, file.name, `project-files/${project.id}/${file.trackerId}/baseline`);
+      const restored = path ? { ...file, path, storageMode: file.storageMode === 'link' ? 'link' : 'copy' } : file;
+      restored.baselinePath = baselinePath || restored.baselinePath || '';
       delete restored.packagePath;
+      delete restored.baselinePackagePath;
       return restored;
     }));
   }
@@ -3120,7 +3147,7 @@ function ProjectWorkspace({
           onDeletePart={onDeletePart}
         />
       )}
-      {projectTab === 'files' && <ProjectFilesTab project={project} template={template} onUpdate={onUpdate} />}
+      {projectTab === 'files' && <ProjectFilesTab project={project} template={template} revisionSettings={state.revisionSettings} onUpdate={onUpdate} />}
       {projectTab === 'photos' && <ProjectPhotosTab project={project} onUpdate={onUpdate} />}
       {projectTab === 'instructions' && <ProjectInstructionsTab project={project} parts={parts} categories={categories} onUpdate={onUpdate} onCreatePart={onCreatePart} />}
     </div>
@@ -3295,7 +3322,9 @@ function collectReferencedPaths(state) {
     }));
     (project.files || []).forEach((file) => {
       add(file.path);
+      add(file.baselinePath);
       (file.folderFiles || []).forEach((child) => add(child.path));
+      (file.folderFiles || []).forEach((child) => add(child.baselinePath));
     });
   });
   state.parts.forEach((part) => {
@@ -3628,6 +3657,124 @@ function withLatestVersionNote(notes = '', date = new Date()) {
   const cleaned = String(notes || '').replace(/\n?Saved new version .+$/i, '').trimEnd();
   const marker = `Saved new version ${date.toLocaleString()}`;
   return cleaned ? `${cleaned}\n${marker}` : marker;
+}
+
+function normalizeRevisionSettings(settings) {
+  return {
+    ...DEFAULT_REVISION_SETTINGS,
+    ...(settings && typeof settings === 'object' ? settings : {}),
+    maxRevisions: Math.max(1, Number(settings?.maxRevisions) || DEFAULT_REVISION_SETTINGS.maxRevisions),
+    delayMinutes: Math.max(1, Number(settings?.delayMinutes) || DEFAULT_REVISION_SETTINGS.delayMinutes),
+    saveAllRevisions: Boolean(settings?.saveAllRevisions),
+    delayEnabled: Boolean(settings?.delayEnabled),
+    trackLinkedFiles: Boolean(settings?.trackLinkedFiles),
+    retentionMode: settings?.retentionMode === 'hybrid' ? 'hybrid' : 'last-n',
+  };
+}
+
+function projectRevisionSettings(project, globalSettings) {
+  return normalizeRevisionSettings(project?.revisionSettingsOverride || globalSettings);
+}
+
+function retentionBucketKey(date) {
+  const value = new Date(date || '');
+  return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10);
+}
+
+function monthBucketKey(date) {
+  const value = new Date(date || '');
+  return Number.isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 7);
+}
+
+function fileHistoryPaths(file) {
+  const paths = [file?.path, file?.baselinePath];
+  (file?.folderFiles || []).forEach((child) => {
+    paths.push(child.path, child.baselinePath);
+  });
+  return paths.filter(Boolean);
+}
+
+function pruneTrackedFiles(files, settings) {
+  const normalized = normalizeRevisionSettings(settings);
+  if (normalized.saveAllRevisions) return { files, deletedPaths: [] };
+  const deletedPaths = [];
+  const grouped = new Map();
+  files.forEach((file) => {
+    const key = file.trackedItemId || file.id;
+    const list = grouped.get(key) || [];
+    list.push(file);
+    grouped.set(key, list);
+  });
+
+  const kept = [];
+  for (const group of grouped.values()) {
+    const latest = group.filter((file) => file.latest);
+    const history = group
+      .filter((file) => !file.latest)
+      .sort((a, b) => (Date.parse(b.createdAt || '') || 0) - (Date.parse(a.createdAt || '') || 0));
+    const keepIds = new Set(latest.map((file) => file.id));
+    history.slice(0, normalized.maxRevisions).forEach((file) => keepIds.add(file.id));
+
+    if (normalized.retentionMode === 'hybrid') {
+      const now = Date.now();
+      const dayKeep = new Map();
+      const monthKeep = new Map();
+      for (const file of history) {
+        const stamp = Date.parse(file.createdAt || '');
+        if (!stamp) continue;
+        const ageDays = Math.floor((now - stamp) / 86400000);
+        if (ageDays <= 6) {
+          const dayKey = retentionBucketKey(file.createdAt);
+          if (dayKey && !dayKeep.has(dayKey)) dayKeep.set(dayKey, file.id);
+          continue;
+        }
+        const monthKey = monthBucketKey(file.createdAt);
+        if (monthKey && !monthKeep.has(monthKey)) monthKeep.set(monthKey, file.id);
+      }
+      [...dayKeep.values(), ...monthKeep.values()].forEach((id) => keepIds.add(id));
+    }
+
+    group.forEach((file) => {
+      if (keepIds.has(file.id)) kept.push(file);
+      else deletedPaths.push(...fileHistoryPaths(file));
+    });
+  }
+
+  return { files: kept, deletedPaths: [...new Set(deletedPaths)] };
+}
+
+async function cloneLinkedFolderSnapshot(projectId, trackerId, trackedItemId, folderName, files) {
+  const snapshotFiles = await Promise.all((files || []).map(async (child) => {
+    const relativePath = child.relativePath || child.name || 'file';
+    const library = `project-files/${projectId}/${trackerId}/linked-baseline/${trackedItemId}/${folderName}/${relativePath.split('/').slice(0, -1).join('/')}`;
+    const bytes = await readStoredFile(child.path);
+    const stored = await saveBytesFile(relativePath.split('/').pop() || child.name || 'file', library, bytes);
+    const hash = await fileHash(stored.path).catch(() => '');
+    return {
+      ...child,
+      baselinePath: stored.path,
+      baselineHash: hash,
+      baselineSize: stored.size,
+      contentHash: child.contentHash || hash,
+    };
+  }));
+  return snapshotFiles;
+}
+
+function projectTrackedStorageRows(project) {
+  const groups = new Map();
+  (project.files || []).forEach((file) => {
+    const key = file.trackedItemId || file.id;
+    const row = groups.get(key) || { key, name: file.name, size: 0, trackerId: file.trackerId };
+    fileHistoryPaths(file).forEach((path) => {
+      if (!path || row._seen?.has(path)) return;
+      row._seen = row._seen || new Set();
+      row._seen.add(path);
+    });
+    row.size += (file.size || 0) + (file.baselineSize || 0) + ((file.folderFiles || []).reduce((total, child) => total + (child.size || 0) + (child.baselineSize || 0), 0));
+    groups.set(key, row);
+  });
+  return [...groups.values()].map(({ _seen, ...row }) => row).sort((a, b) => b.size - a.size);
 }
 
 function integrityLabel(status) {
@@ -5062,7 +5209,7 @@ function ProjectPartsTab({
   );
 }
 
-function ProjectFilesTab({ project, template, onUpdate }) {
+function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   const [fileTrackerId, setFileTrackerId] = useState(template.fileTrackers[0]?.id || '');
   const [fileUploadNotes, setFileUploadNotes] = useState('');
   const [stagedAttachment, setStagedAttachment] = useState(null);
@@ -5075,6 +5222,10 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const [replaceTargetFileId, setReplaceTargetFileId] = useState('');
   const autoIntegrityBusyRef = useRef(false);
   const projectFilesRef = useRef(project.files);
+  const effectiveRevisionSettings = useMemo(
+    () => projectRevisionSettings(project, revisionSettings),
+    [project, revisionSettings],
+  );
 
   useEffect(() => {
     projectFilesRef.current = project.files;
@@ -5082,6 +5233,29 @@ function ProjectFilesTab({ project, template, onUpdate }) {
 
   const trackedItemKey = (file) => file.trackedItemId || file.id;
   const replaceTargetFile = project.files.find((file) => file.id === replaceTargetFileId) || null;
+  const applyFileUpdate = async (nextFiles, options = {}) => {
+    const { files, deletedPaths } = pruneTrackedFiles(nextFiles, effectiveRevisionSettings);
+    onUpdate({ files });
+    if (options.selectFileId) setSelectedFileId(options.selectFileId);
+    if (deletedPaths.length) {
+      try {
+        await deleteManagedFiles(deletedPaths);
+      } catch (error) {
+        setFileError(String(error));
+      }
+    }
+    return files;
+  };
+  const clearTrackedItemStorage = async (targetFiles) => {
+    const deletePaths = [...new Set(targetFiles.flatMap((file) => fileHistoryPaths(file)))];
+    if (deletePaths.length) {
+      try {
+        await deleteManagedFiles(deletePaths);
+      } catch (error) {
+        setFileError(String(error));
+      }
+    }
+  };
 
   const attachProjectFile = async (pickedFile = null, linkedPath = '') => {
     const trackerId = replaceTargetFile?.trackerId || fileTrackerId;
@@ -5102,29 +5276,43 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         ? await savePickedFile(pickedFile, `project-files/${project.id}/${tracker.id}`)
         : linkedLocalFile(trimmedPath);
       const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+      let baselinePath = '';
+      let baselineHash = '';
+      let baselineSize = 0;
+      if (!pickedFile && effectiveRevisionSettings.trackLinkedFiles && trimmedPath) {
+        const baseline = await saveBytesFile(
+          stored.name,
+          `project-files/${project.id}/${tracker.id}/linked-baseline`,
+          await readStoredFile(trimmedPath),
+        );
+        baselinePath = baseline.path;
+        baselineHash = await fileHash(baseline.path).catch(() => '');
+        baselineSize = baseline.size || 0;
+      }
       const trackedItemId = replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file');
       const baseFiles = replaceTargetFile
         ? project.files.map((file) => trackedItemKey(file) === trackedItemId ? { ...file, latest: false } : file)
         : project.files;
-      onUpdate({
-        files: [
-          ...baseFiles,
-          {
-            id: makeId('file'),
-            trackedItemId,
-            trackerId: tracker.id,
-            name: stored.name,
-            path: stored.path,
-            sourcePath: pickedFile ? '' : trimmedPath,
-            storageMode: pickedFile ? 'copy' : 'link',
-            size: stored.size,
-            contentHash,
-            latest: true,
-            notes: fileUploadNotes.trim(),
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      });
+      await applyFileUpdate([
+        ...baseFiles,
+        {
+          id: makeId('file'),
+          trackedItemId,
+          trackerId: tracker.id,
+          name: stored.name,
+          path: stored.path,
+          sourcePath: pickedFile ? '' : trimmedPath,
+          storageMode: pickedFile ? 'copy' : 'link',
+          size: stored.size,
+          contentHash,
+          baselinePath,
+          baselineHash,
+          baselineSize,
+          latest: true,
+          notes: fileUploadNotes.trim(),
+          createdAt: new Date().toISOString(),
+        },
+      ]);
       setFileUploadNotes('');
       setStagedAttachment(null);
       setReplaceTargetFileId('');
@@ -5211,14 +5399,12 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         folderFiles: storedFiles,
         createdAt: now,
       };
-      onUpdate({
-        files: [
-          ...(replaceTargetFile
-            ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
-            : project.files),
-          folderRecord,
-        ],
-      });
+      await applyFileUpdate([
+        ...(replaceTargetFile
+          ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
+          : project.files),
+        folderRecord,
+      ]);
       setFileUploadNotes('');
       setStagedAttachment(null);
       setReplaceTargetFileId('');
@@ -5246,7 +5432,8 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       }
       const now = new Date().toISOString();
       const folderName = folderPath.split(/[\\/]/).filter(Boolean).pop() || 'Linked folder';
-      const folderFiles = await Promise.all(files.map(async (file) => ({
+      let trackedItemId = replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file');
+      let folderFiles = await Promise.all(files.map(async (file) => ({
         id: makeId('folder-file'),
         name: file.relativePath || file.name,
         relativePath: file.relativePath || file.name,
@@ -5254,29 +5441,30 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         size: file.size || 0,
         contentHash: file.path ? await fileHash(file.path).catch(() => '') : '',
       })));
-      onUpdate({
-        files: [
-          ...(replaceTargetFile
-            ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
-            : project.files),
-          {
-            id: makeId('file'),
-            trackedItemId: replaceTargetFile ? trackedItemKey(replaceTargetFile) : makeId('tracked-file'),
-            trackerId: tracker.id,
-            type: 'folder',
-            name: folderName,
-            path: '',
-            sourcePath: folderPath,
-            storageMode: 'link',
-            size: folderFiles.reduce((total, file) => total + (file.size || 0), 0),
-            contentHash: '',
-            latest: true,
-            notes: fileUploadNotes.trim(),
-            folderFiles,
-            createdAt: now,
-          },
-        ],
-      });
+      if (effectiveRevisionSettings.trackLinkedFiles) {
+        folderFiles = await cloneLinkedFolderSnapshot(project.id, tracker.id, trackedItemId, folderName, folderFiles);
+      }
+      await applyFileUpdate([
+        ...(replaceTargetFile
+          ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
+          : project.files),
+        {
+          id: makeId('file'),
+          trackedItemId,
+          trackerId: tracker.id,
+          type: 'folder',
+          name: folderName,
+          path: '',
+          sourcePath: folderPath,
+          storageMode: 'link',
+          size: folderFiles.reduce((total, file) => total + (file.size || 0), 0),
+          contentHash: '',
+          latest: true,
+          notes: fileUploadNotes.trim(),
+          folderFiles,
+          createdAt: now,
+        },
+      ]);
       setFileUploadNotes('');
       setStagedAttachment(null);
       setReplaceTargetFileId('');
@@ -5317,11 +5505,23 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     });
   };
 
-  const removeFile = (fileId) => onUpdate({ files: project.files.filter((file) => file.id !== fileId) });
+  const removeFile = async (fileId) => {
+    const target = project.files.find((file) => file.id === fileId);
+    if (!target) return;
+    const itemKey = trackedItemKey(target);
+    const remaining = project.files.filter((file) => file.id !== fileId);
+    if (!remaining.some((file) => trackedItemKey(file) === itemKey)) {
+      await clearTrackedItemStorage(project.files.filter((file) => trackedItemKey(file) === itemKey));
+    } else {
+      await clearTrackedItemStorage([target]);
+    }
+    onUpdate({ files: remaining });
+  };
   const updateFile = (fileId, patch) => onUpdate({ files: project.files.map((file) => file.id === fileId ? { ...file, ...patch } : file) });
   const integrityCheckable = (file) => Boolean(file.path || file.type === 'folder');
   const autoIntegrityCheckable = (file) => file.latest && integrityCheckable(file);
   const visibleIntegrityStatus = (file) => (file.latest && ['changed', 'missing'].includes(file.integrityStatus) ? file.integrityStatus : '');
+  const comparisonHash = (item) => item.baselineHash || item.contentHash || '';
   const checkAttachmentIntegrity = async (file) => {
     if (!integrityCheckable(file)) return;
     try {
@@ -5332,7 +5532,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
             return {
               ...child,
               contentHash: child.contentHash || currentHash,
-              integrityStatus: child.contentHash && currentHash !== child.contentHash ? 'changed' : 'ok',
+              integrityStatus: comparisonHash(child) && currentHash !== comparisonHash(child) ? 'changed' : 'ok',
               integrityCheckedAt: new Date().toISOString(),
             };
           } catch {
@@ -5351,7 +5551,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       const currentHash = await fileHash(file.path);
       updateFile(file.id, {
         contentHash: file.contentHash || currentHash,
-        integrityStatus: file.contentHash && currentHash !== file.contentHash ? 'changed' : 'ok',
+        integrityStatus: comparisonHash(file) && currentHash !== comparisonHash(file) ? 'changed' : 'ok',
         integrityCheckedAt: new Date().toISOString(),
       });
     } catch {
@@ -5368,6 +5568,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
           return {
             ...child,
             contentHash: currentHash,
+            baselineHash: currentHash,
             integrityStatus: 'ok',
             integrityCheckedAt: new Date().toISOString(),
           };
@@ -5382,6 +5583,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       const currentHash = await fileHash(file.path);
       updateFile(file.id, {
         contentHash: currentHash,
+        baselineHash: currentHash,
         integrityStatus: 'ok',
         integrityCheckedAt: new Date().toISOString(),
       });
@@ -5390,13 +5592,94 @@ function ProjectFilesTab({ project, template, onUpdate }) {
     }
   };
 
+  const saveLinkedRevisionSnapshot = async (file, now = new Date()) => {
+    const nextRevisionCheckAt = effectiveRevisionSettings.delayEnabled
+      ? new Date(now.getTime() + effectiveRevisionSettings.delayMinutes * 60000).toISOString()
+      : '';
+    if (file.type === 'folder') {
+      const liveFiles = await listLinkedFolderFiles(file.sourcePath || '');
+      const matchingFiles = await Promise.all(liveFiles.map(async (child) => ({
+        id: makeId('folder-file'),
+        name: child.relativePath || child.name,
+        relativePath: child.relativePath || child.name,
+        path: child.path,
+        size: child.size || 0,
+        contentHash: child.path ? await fileHash(child.path).catch(() => '') : '',
+      })));
+      const snapshotFiles = await cloneLinkedFolderSnapshot(project.id, file.trackerId, trackedItemKey(file), file.name, matchingFiles);
+      return {
+        cleanupPaths: [...new Set((file.folderFiles || []).map((child) => child.baselinePath).filter(Boolean))],
+        latest: {
+          ...file,
+          folderFiles: snapshotFiles,
+          size: matchingFiles.reduce((total, child) => total + (child.size || 0), 0),
+          integrityStatus: 'ok',
+          integrityCheckedAt: now.toISOString(),
+          nextRevisionCheckAt,
+        },
+        revision: {
+          ...file,
+          id: makeId('file'),
+          latest: false,
+          storageMode: 'copy',
+          sourcePath: '',
+          path: '',
+          folderFiles: snapshotFiles.map((child) => ({
+            ...child,
+            path: child.baselinePath,
+            contentHash: child.baselineHash || child.contentHash,
+          })),
+          createdAt: now.toISOString(),
+          notes: withLatestVersionNote(file.notes, now),
+        },
+      };
+    }
+
+    const bytes = await readStoredFile(file.path);
+    const stored = await saveBytesFile(file.name, fileLibrary(file), bytes);
+    const baseline = await saveBytesFile(file.name, `${fileLibrary(file)}/linked-baseline`, bytes);
+    const currentHash = await fileHash(baseline.path).catch(() => file.contentHash || '');
+    return {
+      cleanupPaths: file.baselinePath ? [file.baselinePath] : [],
+      latest: {
+        ...file,
+        contentHash: currentHash,
+        baselinePath: baseline.path,
+        baselineHash: currentHash,
+        baselineSize: baseline.size || 0,
+        integrityStatus: 'ok',
+        integrityCheckedAt: now.toISOString(),
+        nextRevisionCheckAt,
+      },
+      revision: {
+        ...file,
+        id: makeId('file'),
+        latest: false,
+        storageMode: 'copy',
+        sourcePath: '',
+        path: stored.path,
+        size: stored.size,
+        contentHash: currentHash,
+        baselinePath: '',
+        baselineHash: '',
+        baselineSize: 0,
+        createdAt: now.toISOString(),
+        notes: withLatestVersionNote(file.notes, now),
+      },
+    };
+  };
+
   const checkAllAttachmentIntegrity = async () => {
     const currentFiles = projectFilesRef.current;
     if (autoIntegrityBusyRef.current || !currentFiles.some(autoIntegrityCheckable)) return;
     autoIntegrityBusyRef.current = true;
     try {
-      const checkedFiles = await Promise.all(currentFiles.map(async (file) => {
-        if (!autoIntegrityCheckable(file)) return file;
+      let nextFiles = [...currentFiles];
+      const appended = [];
+      const cleanupPaths = [];
+      for (const file of currentFiles) {
+        if (!autoIntegrityCheckable(file)) continue;
+        if (file.nextRevisionCheckAt && Date.parse(file.nextRevisionCheckAt) > Date.now()) continue;
         try {
           if (file.type === 'folder') {
             const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
@@ -5405,7 +5688,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
                 return {
                   ...child,
                   contentHash: child.contentHash || currentHash,
-                  integrityStatus: child.contentHash && currentHash !== child.contentHash ? 'changed' : 'ok',
+                  integrityStatus: comparisonHash(child) && currentHash !== comparisonHash(child) ? 'changed' : 'ok',
                   integrityCheckedAt: new Date().toISOString(),
                 };
               } catch {
@@ -5413,25 +5696,44 @@ function ProjectFilesTab({ project, template, onUpdate }) {
               }
             }));
             const statuses = checkedChildren.map((child) => child.integrityStatus);
-            return {
-              ...file,
-              folderFiles: checkedChildren,
-              integrityStatus: statuses.includes('missing') ? 'missing' : statuses.includes('changed') ? 'changed' : 'ok',
-              integrityCheckedAt: new Date().toISOString(),
-            };
+            const changed = statuses.includes('changed');
+            if (file.storageMode === 'link' && effectiveRevisionSettings.trackLinkedFiles && changed) {
+              const snapshot = await saveLinkedRevisionSnapshot({ ...file, folderFiles: checkedChildren });
+              nextFiles = nextFiles.map((item) => item.id === file.id ? snapshot.latest : item);
+              appended.push(snapshot.revision);
+              cleanupPaths.push(...snapshot.cleanupPaths);
+            } else {
+              nextFiles = nextFiles.map((item) => item.id === file.id ? {
+                ...file,
+                folderFiles: checkedChildren,
+                integrityStatus: statuses.includes('missing') ? 'missing' : changed ? 'changed' : 'ok',
+                integrityCheckedAt: new Date().toISOString(),
+              } : item);
+            }
+            continue;
           }
           const currentHash = await fileHash(file.path);
-          return {
-            ...file,
-            contentHash: file.contentHash || currentHash,
-            integrityStatus: file.contentHash && currentHash !== file.contentHash ? 'changed' : 'ok',
-            integrityCheckedAt: new Date().toISOString(),
-          };
+          const changed = Boolean(comparisonHash(file) && currentHash !== comparisonHash(file));
+          if (file.storageMode === 'link' && effectiveRevisionSettings.trackLinkedFiles && changed) {
+            const snapshot = await saveLinkedRevisionSnapshot({ ...file, contentHash: file.contentHash || currentHash });
+            nextFiles = nextFiles.map((item) => item.id === file.id ? snapshot.latest : item);
+            appended.push(snapshot.revision);
+            cleanupPaths.push(...snapshot.cleanupPaths);
+          } else {
+            nextFiles = nextFiles.map((item) => item.id === file.id ? {
+              ...file,
+              contentHash: file.contentHash || currentHash,
+              integrityStatus: changed ? 'changed' : 'ok',
+              integrityCheckedAt: new Date().toISOString(),
+            } : item);
+          }
         } catch {
-          return { ...file, integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() };
+          nextFiles = nextFiles.map((item) => item.id === file.id ? { ...file, integrityStatus: 'missing', integrityCheckedAt: new Date().toISOString() } : item);
         }
-      }));
-      onUpdate({ files: checkedFiles });
+      }
+      if (appended.length) await applyFileUpdate(nextFiles.concat(appended));
+      else onUpdate({ files: nextFiles });
+      if (cleanupPaths.length) await deleteManagedFiles([...new Set(cleanupPaths)]);
     } finally {
       autoIntegrityBusyRef.current = false;
     }
@@ -5486,6 +5788,7 @@ function ProjectFilesTab({ project, template, onUpdate }) {
   const checkFileChanges = async (file, providedSession = editSessions[file.id], options = {}) => {
     if (!providedSession?.path) return false;
     try {
+      if (file.nextRevisionCheckAt && Date.parse(file.nextRevisionCheckAt) > Date.now()) return false;
       const currentHash = await fileHash(providedSession.path);
       if (currentHash === providedSession.baseHash) {
         if (!options.quiet) setFileError(`No saved changes found for ${file.name}.`);
@@ -5493,14 +5796,34 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       }
 
       if (file.storageMode === 'link') {
-        onUpdate({
-          files: project.files.map((item) => item.id === file.id ? {
-            ...item,
-            contentHash: currentHash,
-            integrityStatus: 'ok',
-            integrityCheckedAt: new Date().toISOString(),
-          } : item),
-        });
+        const now = new Date();
+        const nextRevisionCheckAt = effectiveRevisionSettings.delayEnabled
+          ? new Date(now.getTime() + effectiveRevisionSettings.delayMinutes * 60000).toISOString()
+          : '';
+        if (!effectiveRevisionSettings.trackLinkedFiles) {
+          onUpdate({
+            files: project.files.map((item) => item.id === file.id ? {
+              ...item,
+              contentHash: currentHash,
+              baselineHash: currentHash,
+              integrityStatus: 'ok',
+              integrityCheckedAt: now.toISOString(),
+              nextRevisionCheckAt,
+            } : item),
+          });
+          setEditSessions((current) => ({
+            ...current,
+            [file.id]: {
+              ...providedSession,
+              baseHash: currentHash,
+            },
+          }));
+          if (!options.quiet) setFileError(`Updated linked file status for ${file.name}.`);
+          return true;
+        }
+        const snapshot = await saveLinkedRevisionSnapshot(file, now);
+        await applyFileUpdate(project.files.map((item) => item.id === file.id ? snapshot.latest : item).concat(snapshot.revision));
+        if (snapshot.cleanupPaths.length) await deleteManagedFiles(snapshot.cleanupPaths);
         setEditSessions((current) => ({
           ...current,
           [file.id]: {
@@ -5563,12 +5886,10 @@ function ProjectFilesTab({ project, template, onUpdate }) {
       };
       const itemKey = trackedItemKey(file);
       const resetFiles = project.files.map((item) => trackedItemKey(item) === itemKey ? { ...item, latest: false } : item);
-      onUpdate({
-        files: [
-          ...resetFiles,
-          newFile,
-        ],
-      });
+      await applyFileUpdate([
+        ...resetFiles,
+        newFile,
+      ], { selectFileId: newFileId });
       setEditSessions((current) => {
         const next = { ...current };
         delete next[file.id];
@@ -5583,7 +5904,6 @@ function ProjectFilesTab({ project, template, onUpdate }) {
         };
         return next;
       });
-      setSelectedFileId(newFileId);
       if (!options.quiet) setFileError(`Saved ${file.name} as a new latest version.`);
       return true;
     } catch (error) {
@@ -7055,6 +7375,7 @@ function Imports({ state, updateState }) {
 function Settings({ state, updateState }) {
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
+  const [showRevisionSettings, setShowRevisionSettings] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [backupNotice, setBackupNotice] = useState('');
   const [backupExportBusy, setBackupExportBusy] = useState(false);
@@ -7089,6 +7410,10 @@ function Settings({ state, updateState }) {
 
   const updateTheme = (theme) => {
     updateState((current) => ({ ...current, theme: normalizeTheme(theme) }));
+  };
+
+  const updateRevisionSettings = (revisionSettings) => {
+    updateState((current) => ({ ...current, revisionSettings: normalizeRevisionSettings(revisionSettings) }));
   };
 
   const exportTheme = () => {
@@ -7354,6 +7679,17 @@ function Settings({ state, updateState }) {
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
+            <h2>File Revision Settings</h2>
+            <p>Control tracked file retention, linked-file revision snapshots, and revision delay timing.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={() => setShowRevisionSettings(true)}>Open Editor</button>
+          </div>
+        </div>
+      </section>
+      <section className="panel settings-section">
+        <div className="settings-section-row">
+          <div className="settings-copy">
             <h2>Color Theme</h2>
             <p>Adjust colors, preview theme tokens, or export a portable theme file.</p>
           </div>
@@ -7561,6 +7897,15 @@ function Settings({ state, updateState }) {
           onSave={updateTheme}
         />
       )}
+      {showRevisionSettings && (
+        <RevisionSettingsModal
+          revisionSettings={state.revisionSettings}
+          projects={state.projects}
+          template={state.template}
+          onClose={() => setShowRevisionSettings(false)}
+          onSave={updateRevisionSettings}
+        />
+      )}
       {showFullReset && (
         <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && !resetBusy && setShowFullReset(false)}>
           <div className="modal compact-modal reset-modal">
@@ -7580,6 +7925,122 @@ function Settings({ state, updateState }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function RevisionSettingsModal({ revisionSettings, projects, template, onClose, onSave }) {
+  const [draft, setDraft] = useState(() => normalizeRevisionSettings(revisionSettings));
+  const overridingProjects = projects.filter((project) => project.revisionSettingsOverride);
+  const projectStorage = useMemo(() => (
+    projects
+      .map((project) => ({
+        id: project.id,
+        name: project.name,
+        rows: projectTrackedStorageRows(project).slice(0, 3),
+        totalBytes: projectTrackedStorageRows(project).reduce((total, row) => total + row.size, 0),
+      }))
+      .filter((project) => project.totalBytes > 0)
+      .sort((a, b) => b.totalBytes - a.totalBytes || a.name.localeCompare(b.name))
+  ), [projects]);
+
+  return (
+    <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal theme-modal revision-modal">
+        <div className="section-title">
+          <h2>File Revision Settings</h2>
+          <button className="ghost" onClick={onClose}>Close</button>
+        </div>
+        <div className="revision-sections">
+          <section className="revision-card">
+            <h3>Retention</h3>
+            <div className="revision-settings-grid">
+              <label className="revision-field">
+                <span>Stored revisions</span>
+                <input
+                  type="number"
+                  min="1"
+                  value={draft.maxRevisions}
+                  onChange={(event) => setDraft((current) => ({ ...current, maxRevisions: Math.max(1, Number(event.target.value) || 1) }))}
+                />
+              </label>
+              <label className="revision-field">
+                <span>Retention mode</span>
+                <select value={draft.retentionMode} onChange={(event) => setDraft((current) => ({ ...current, retentionMode: event.target.value === 'hybrid' ? 'hybrid' : 'last-n' }))}>
+                  <option value="last-n">Last N revisions</option>
+                  <option value="hybrid">Hybrid trim</option>
+                </select>
+              </label>
+            </div>
+            <label className="revision-toggle-row">
+              <input type="checkbox" checked={draft.saveAllRevisions} onChange={(event) => setDraft((current) => ({ ...current, saveAllRevisions: event.target.checked }))} />
+              <div>
+                <strong>Save all revisions</strong>
+                <span>Ignore trimming and keep every stored revision.</span>
+              </div>
+            </label>
+            <p className="revision-note">
+              {draft.retentionMode === 'hybrid'
+                ? `Hybrid mode keeps the last saved revision for each of the last 7 days, one per older month, and the newest ${draft.maxRevisions} revisions overall.`
+                : `Standard mode keeps the newest ${draft.maxRevisions} revisions for each tracked item.`}
+            </p>
+          </section>
+          <section className="revision-card">
+            <h3>Capture</h3>
+            <label className="revision-toggle-row">
+              <input type="checkbox" checked={draft.trackLinkedFiles} onChange={(event) => setDraft((current) => ({ ...current, trackLinkedFiles: event.target.checked }))} />
+              <div>
+                <strong>Track linked files and folders</strong>
+                <span>Keep live links for open actions, but store BuildBook snapshots for revision history.</span>
+              </div>
+            </label>
+            <label className="revision-toggle-row">
+              <input type="checkbox" checked={draft.delayEnabled} onChange={(event) => setDraft((current) => ({ ...current, delayEnabled: event.target.checked }))} />
+              <div>
+                <strong>Delay repeat revision checks</strong>
+                <span>Wait after a saved revision before checking the same tracked item again.</span>
+              </div>
+            </label>
+            <label className="revision-field revision-delay-field">
+              <span>Delay minutes</span>
+              <input
+                type="number"
+                min="1"
+                value={draft.delayMinutes}
+                disabled={!draft.delayEnabled}
+                onChange={(event) => setDraft((current) => ({ ...current, delayMinutes: Math.max(1, Number(event.target.value) || 1) }))}
+              />
+            </label>
+          </section>
+        </div>
+        <div className="settings-list revision-summary">
+          <span>Tracked file types: {template.fileTrackers.length}</span>
+          <span>Projects overriding these settings: {overridingProjects.length ? overridingProjects.map((project) => project.name).join(', ') : 'None'}</span>
+        </div>
+        <div className="revision-storage-list">
+          <h3>Tracked File Storage by Project</h3>
+          {projectStorage.length ? projectStorage.map((project) => (
+            <div key={project.id} className="revision-storage-row">
+              <div>
+                <strong>{project.name}</strong>
+                <span>{Math.max(1, Math.round(project.totalBytes / 1024))} KB</span>
+              </div>
+              <ul>
+                {project.rows.map((row) => (
+                  <li key={row.key}>
+                    <span>{row.name}</span>
+                    <small>{Math.max(1, Math.round(row.size / 1024))} KB</small>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )) : <p>No tracked project files yet.</p>}
+        </div>
+        <div className="modal-footer">
+          <button className="secondary" onClick={onClose}>Cancel</button>
+          <button onClick={() => { onSave(draft); onClose(); }}>Save</button>
+        </div>
+      </div>
     </div>
   );
 }

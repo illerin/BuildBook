@@ -138,6 +138,11 @@ export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
   return invoke('cleanup_orphaned_files', { referencedPaths, deletePaths });
 }
 
+export async function deleteManagedFiles(paths) {
+  if (!isTauri() || !Array.isArray(paths) || !paths.length) return { deletedPaths: [], failedPaths: [] };
+  return invoke('delete_managed_files', { paths });
+}
+
 export async function resetManagedStorage() {
   if (isLanWebClient()) {
     const response = await fetch('/api/reset-storage', { method: 'POST', headers: { 'X-BuildBook-Token': lanToken() } });

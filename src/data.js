@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.157';
+export const APP_VERSION = '0.3.158';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -95,6 +95,15 @@ export const DEFAULT_THEME = {
   statusArchivedText: '#d2a8ff',
 };
 
+export const DEFAULT_REVISION_SETTINGS = {
+  maxRevisions: 12,
+  saveAllRevisions: false,
+  retentionMode: 'last-n',
+  delayEnabled: false,
+  delayMinutes: 5,
+  trackLinkedFiles: false,
+};
+
 const now = () => new Date().toISOString();
 
 export const DEFAULT_STATE = {
@@ -113,6 +122,7 @@ export const DEFAULT_STATE = {
     checklist: ['Add project notes', 'Link parts', 'Attach latest schematic', 'Export build package'],
     fileTrackers: DEFAULT_FILE_TRACKERS,
   },
+  revisionSettings: DEFAULT_REVISION_SETTINGS,
   projects: [],
   parts: [],
   importBatches: [],
@@ -147,6 +157,16 @@ export function normalizeState(raw, options = {}) {
       ...DEFAULT_THEME,
       ...(state.theme && typeof state.theme === 'object' ? state.theme : {}),
     },
+    revisionSettings: {
+      ...DEFAULT_REVISION_SETTINGS,
+      ...(state.revisionSettings && typeof state.revisionSettings === 'object' ? state.revisionSettings : {}),
+      maxRevisions: Math.max(1, Number(state.revisionSettings?.maxRevisions) || DEFAULT_REVISION_SETTINGS.maxRevisions),
+      delayMinutes: Math.max(1, Number(state.revisionSettings?.delayMinutes) || DEFAULT_REVISION_SETTINGS.delayMinutes),
+      saveAllRevisions: Boolean(state.revisionSettings?.saveAllRevisions),
+      delayEnabled: Boolean(state.revisionSettings?.delayEnabled),
+      trackLinkedFiles: Boolean(state.revisionSettings?.trackLinkedFiles),
+      retentionMode: state.revisionSettings?.retentionMode === 'hybrid' ? 'hybrid' : 'last-n',
+    },
     template: {
       ...DEFAULT_STATE.template,
       ...template,
@@ -159,10 +179,26 @@ export function normalizeState(raw, options = {}) {
     },
     projects: (Array.isArray(state.projects) ? state.projects : DEFAULT_STATE.projects).map((project) => ({
       ...project,
+      revisionSettingsOverride: project.revisionSettingsOverride && typeof project.revisionSettingsOverride === 'object'
+        ? {
+            ...DEFAULT_REVISION_SETTINGS,
+            ...project.revisionSettingsOverride,
+          }
+        : null,
       noteImages: Array.isArray(project.noteImages) ? project.noteImages : [],
       files: Array.isArray(project.files) ? project.files.map((file) => ({
         ...file,
         trackedItemId: file.trackedItemId || file.id,
+        baselinePath: file.baselinePath || '',
+        baselineHash: file.baselineHash || '',
+        baselineSize: Number(file.baselineSize) || 0,
+        nextRevisionCheckAt: file.nextRevisionCheckAt || '',
+        folderFiles: Array.isArray(file.folderFiles) ? file.folderFiles.map((child) => ({
+          ...child,
+          baselinePath: child.baselinePath || '',
+          baselineHash: child.baselineHash || '',
+          baselineSize: Number(child.baselineSize) || 0,
+        })) : [],
       })) : [],
       partIds: Array.isArray(project.partIds) ? project.partIds : [],
       partQuantities: project.partQuantities && typeof project.partQuantities === 'object' ? project.partQuantities : {},
