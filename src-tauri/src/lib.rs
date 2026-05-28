@@ -620,6 +620,37 @@ fn request_is_authorized(path: &str, headers: &str) -> bool {
     query_value(path, "access") == expected || header_value(headers, "X-BuildBook-Token") == expected
 }
 
+fn validate_public_web_url(url: &str) -> Result<String, String> {
+    let trimmed = url.trim().to_string();
+    let lower = trimmed.to_lowercase();
+    let remainder = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .ok_or_else(|| "Paste a public http or https product link.".to_string())?;
+    let host_port = remainder.split('/').next().unwrap_or("").rsplit('@').next().unwrap_or("");
+    let host = host_port.split(':').next().unwrap_or("");
+    let blocked = host.is_empty()
+        || host == "localhost"
+        || host.starts_with("127.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || host == "0.0.0.0"
+        || host.starts_with('[')
+        || host
+            .split('.')
+            .take(2)
+            .collect::<Vec<&str>>()
+            .as_slice()
+            .get(0)
+            .and_then(|value| value.parse::<u8>().ok())
+            .filter(|first| *first == 172)
+            .is_some_and(|_| host.split('.').nth(1).and_then(|value| value.parse::<u8>().ok()).is_some_and(|second| (16..=31).contains(&second)));
+    if blocked {
+        return Err("Only public product web links can be read.".to_string());
+    }
+    Ok(trimmed)
+}
+
 fn content_type(path: &str) -> &'static str {
     if path.ends_with(".js") { "text/javascript; charset=utf-8" }
     else if path.ends_with(".css") { "text/css; charset=utf-8" }
@@ -770,6 +801,20 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
     }
 
+    if path.starts_with("/api/download-url") {
+        if !request_is_authorized(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+            return;
+        }
+        if method == "POST" {
+            match download_url_to_file(app, query_value(path, "url"), query_value(path, "library"), query_value(path, "name")) {
+                Ok(stored) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", serde_json::to_string(&stored).unwrap_or_default().as_bytes()),
+                Err(error) => send_response(&mut stream, "502 Bad Gateway", "text/plain; charset=utf-8", error.as_bytes()),
+            }
+            return;
+        }
+    }
+
     if path.starts_with("/api/reset-storage") {
         if !request_is_authorized(path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
@@ -898,6 +943,7 @@ fn download_url_to_file(
     library: String,
     name: String,
 ) -> Result<StoredFile, String> {
+    let url = validate_public_web_url(&url)?;
     let app_dir = app
         .path()
         .app_data_dir()

@@ -101,6 +101,15 @@ export async function listLinkedFolderFiles(path) {
 }
 
 export async function downloadUrlFile(url, library, name) {
+  if (isLanWebClient()) {
+    const response = await fetch(`/api/download-url?url=${encodeURIComponent(url)}&library=${encodeURIComponent(library)}&name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'X-BuildBook-Token': lanToken() },
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  }
+
   if (!isTauri()) {
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Could not fetch image: ${response.status}`);

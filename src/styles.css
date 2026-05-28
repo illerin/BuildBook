@@ -149,6 +149,29 @@ label {
   color: var(--text-muted);
 }
 
+.access-gate {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 20px;
+}
+
+.access-gate-panel {
+  display: grid;
+  width: min(400px, 100%);
+  gap: 12px;
+  padding: 20px;
+}
+
+.access-gate-panel h1,
+.access-gate-panel p {
+  margin: 0;
+}
+
+.access-gate-panel button {
+  justify-self: start;
+}
+
 .busy-notice {
   display: inline-flex;
   width: fit-content;
@@ -468,6 +491,23 @@ label {
   color: var(--text-soft);
   padding: 8px;
   text-align: left;
+}
+
+.import-row-wrap {
+  position: relative;
+}
+
+.import-row-wrap .import-row {
+  padding-right: 34px;
+}
+
+.import-delete-button {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-height: 26px;
+  min-width: 26px;
+  padding: 2px 7px;
 }
 
 .import-row:hover,
@@ -2046,6 +2086,37 @@ article h3,
   color: var(--text);
 }
 
+.new-part-drop-field {
+  display: grid;
+  gap: 8px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--field);
+  padding: 8px;
+}
+
+.new-part-drop-field.drop-active {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+}
+
+.new-part-file-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.new-part-file-actions span,
+.new-part-drop-field > span {
+  min-width: 0;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .modal.pdf-reader-modal,
 .modal.expanded-preview-modal {
   width: min(1600px, 98vw);
@@ -2095,6 +2166,11 @@ article h3,
   overflow-wrap: anywhere;
 }
 
+.document-name-input {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
 .part-documents-panel .row-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -2102,27 +2178,47 @@ article h3,
 
 .part-project-usage {
   display: grid;
-  gap: 8px;
+  gap: 5px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--field);
-  padding: 10px;
+  padding: 8px 10px;
+}
+
+.part-project-usage .section-title {
+  margin: 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.part-project-usage .section-title h3 {
+  font-size: 14px;
+}
+
+.part-project-usage p {
+  margin: 0 0 4px;
+  color: var(--text-muted);
 }
 
 .usage-row,
 .usage-link-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 88px auto;
-  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 104px 52px;
+  gap: 6px;
   align-items: center;
 }
 
 .usage-row label {
   display: grid;
-  gap: 3px;
+  gap: 5px;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 700;
+}
+
+.usage-qty-label {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
 }
 
 .usage-row input {
@@ -2132,6 +2228,11 @@ article h3,
 
 .usage-link-row select {
   grid-column: span 2;
+  min-height: 30px;
+}
+
+.usage-link-row button {
+  min-height: 30px;
 }
 
 .file-preview-image {
@@ -2334,6 +2435,7 @@ article h3,
   display: grid;
   grid-template-columns: repeat(3, minmax(88px, 1fr));
   gap: 6px;
+  align-self: center;
   align-items: stretch;
 }
 
@@ -2363,6 +2465,15 @@ article h3,
   color: var(--text-muted);
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.project-part-panel .section-title {
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.project-part-panel .section-title h3 {
+  margin: 0;
 }
 
 .project-part-panel p {
@@ -2597,6 +2708,10 @@ article h3,
 
 .modal.import-review-modal {
   width: min(1040px, 94vw);
+}
+
+.modal.import-delete-modal {
+  width: min(560px, 94vw);
 }
 
 .import-batch-actions {
@@ -3110,6 +3225,15 @@ article h3,
   color: var(--text-muted);
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.tracked-files-editor {
+  margin-bottom: 12px;
+}
+
+.tracked-files-list {
+  display: grid;
+  gap: 8px;
 }
 
 .revision-field {

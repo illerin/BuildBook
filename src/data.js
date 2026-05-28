@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.158';
+export const APP_VERSION = '0.3.173';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 
@@ -123,10 +123,79 @@ export const DEFAULT_STATE = {
     fileTrackers: DEFAULT_FILE_TRACKERS,
   },
   revisionSettings: DEFAULT_REVISION_SETTINGS,
+  storageLocations: [],
   projects: [],
   parts: [],
   importBatches: [],
 };
+
+function storageId(prefix, name) {
+  return `${prefix}-${String(name || 'location').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 48) || 'location'}`;
+}
+
+function storageLabel(containerName, slotName = '') {
+  return [containerName, slotName].map((value) => String(value || '').trim()).filter(Boolean).join(' / ');
+}
+
+function parseStorageLabel(value = '') {
+  const parts = String(value || '').split('/').map((part) => part.trim()).filter(Boolean);
+  return { containerName: parts[0] || '', slotName: parts.slice(1).join(' / ') };
+}
+
+function normalizeStorageLocations(rawLocations, parts = []) {
+  const containers = new Map();
+  const addContainer = (name, id = '') => {
+    const cleanName = String(name || '').trim();
+    if (!cleanName) return null;
+    const key = cleanName.toLowerCase();
+    const existing = containers.get(key);
+    if (existing) return existing;
+    const container = { id: id || storageId('storage', cleanName), name: cleanName, slots: [] };
+    containers.set(key, container);
+    return container;
+  };
+  const addSlot = (container, name, id = '') => {
+    const cleanName = String(name || '').trim();
+    if (!container || !cleanName) return;
+    if (container.slots.some((slot) => slot.name.toLowerCase() === cleanName.toLowerCase())) return;
+    container.slots.push({ id: id || storageId(`${container.id}-slot`, cleanName), name: cleanName });
+  };
+
+  (Array.isArray(rawLocations) ? rawLocations : []).forEach((location) => {
+    const container = addContainer(location.name, location.id);
+    (Array.isArray(location.slots) ? location.slots : []).forEach((slot) => addSlot(container, slot.name, slot.id));
+  });
+
+  (Array.isArray(parts) ? parts : []).forEach((part) => {
+    const { containerName, slotName } = parseStorageLabel(part.storageLocation);
+    const container = addContainer(containerName);
+    addSlot(container, slotName);
+  });
+
+  return [...containers.values()].map((container) => ({
+    ...container,
+    slots: [...container.slots].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+  })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
+function normalizePartStorage(part, storageLocations) {
+  const storageLocation = String(part.storageLocation || '').trim();
+  let storageContainerId = part.storageContainerId || '';
+  let storageSlotId = part.storageSlotId || '';
+  if (!storageContainerId && storageLocation) {
+    const { containerName, slotName } = parseStorageLabel(storageLocation);
+    const container = storageLocations.find((location) => location.name.toLowerCase() === containerName.toLowerCase());
+    storageContainerId = container?.id || '';
+    storageSlotId = container?.slots?.find((slot) => slot.name.toLowerCase() === slotName.toLowerCase())?.id || '';
+  }
+  const container = storageLocations.find((location) => location.id === storageContainerId);
+  const slot = container?.slots?.find((item) => item.id === storageSlotId);
+  return {
+    storageContainerId,
+    storageSlotId,
+    storageLocation: storageLabel(container?.name, slot?.name) || storageLocation,
+  };
+}
 
 export function makeId(prefix) {
   if (crypto?.randomUUID) return `${prefix}-${crypto.randomUUID()}`;
@@ -146,6 +215,7 @@ export function normalizeState(raw, options = {}) {
     .map((category, index) => ({ sortOrder: index, ...category }));
   const validCategoryIds = new Set(categories.map((category) => category.id));
   const rawSteps = Array.isArray(template.steps) ? template.steps : [];
+  const storageLocations = normalizeStorageLocations(state.storageLocations, state.parts);
 
   return {
     ...DEFAULT_STATE,
@@ -167,6 +237,7 @@ export function normalizeState(raw, options = {}) {
       trackLinkedFiles: Boolean(state.revisionSettings?.trackLinkedFiles),
       retentionMode: state.revisionSettings?.retentionMode === 'hybrid' ? 'hybrid' : 'last-n',
     },
+    storageLocations,
     template: {
       ...DEFAULT_STATE.template,
       ...template,
@@ -213,6 +284,7 @@ export function normalizeState(raw, options = {}) {
     })),
     parts: (Array.isArray(state.parts) ? state.parts : DEFAULT_STATE.parts).map((part) => ({
       ...part,
+      ...normalizePartStorage(part, storageLocations),
       imageThumbnail: part.imageThumbnail || '',
       categoryId: validCategoryIds.has(part.categoryId) ? part.categoryId : 'cat-unassigned',
       documents: Array.isArray(part.documents) ? part.documents : [],

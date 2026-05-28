@@ -13,7 +13,7 @@ function isLanWebClient() {
   return !isTauri() && window.location.protocol.startsWith('http') && !isViteDev;
 }
 
-function lanToken() {
+export function lanToken() {
   const access = new URLSearchParams(window.location.search).get('access');
   if (access) {
     localStorage.setItem(LAN_TOKEN_KEY, access);
@@ -25,18 +25,24 @@ function lanToken() {
 }
 
 export async function loadAppState() {
-  try {
-    if (isTauri()) {
+  if (isTauri()) {
+    try {
       const contents = await invoke('read_app_state');
       return normalizeState(contents ? JSON.parse(contents) : DEFAULT_STATE);
+    } catch (error) {
+      console.error('Failed to load BuildBook state', error);
+      return normalizeState(DEFAULT_STATE);
     }
+  }
 
-    if (isLanWebClient()) {
-      const response = await fetch('/api/state', { headers: { 'X-BuildBook-Token': lanToken() } });
-      if (response.ok) return normalizeState(await response.json());
-      throw new Error(await response.text());
-    }
+  if (isLanWebClient()) {
+    const response = await fetch('/api/state', { headers: { 'X-BuildBook-Token': lanToken() } });
+    if (response.ok) return normalizeState(await response.json());
+    if (response.status === 401) throw new Error('BuildBook access code is required.');
+    throw new Error(await response.text() || 'Could not load BuildBook from this computer.');
+  }
 
+  try {
     const contents = localStorage.getItem(STORAGE_KEY);
     return normalizeState(contents ? JSON.parse(contents) : DEFAULT_STATE);
   } catch (error) {

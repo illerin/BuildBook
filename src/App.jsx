@@ -171,6 +171,67 @@ function safeName(value) {
     .slice(0, 90) || 'item';
 }
 
+function storageLabel(containerName, slotName = '') {
+  return [containerName, slotName].map((value) => String(value || '').trim()).filter(Boolean).join(' / ');
+}
+
+function storageSelectionFromPart(part, storageLocations) {
+  const container = storageLocations.find((location) => location.id === part.storageContainerId)
+    || storageLocations.find((location) => location.name.toLowerCase() === String(part.storageLocation || '').split('/')[0]?.trim().toLowerCase());
+  const slot = container?.slots?.find((item) => item.id === part.storageSlotId);
+  return {
+    containerId: container?.id || '',
+    slotId: slot?.id || '',
+  };
+}
+
+function applyStorageSelection(storageLocations, selection) {
+  let locations = (storageLocations || []).map((location) => ({
+    ...location,
+    slots: Array.isArray(location.slots) ? [...location.slots] : [],
+  }));
+  let containerId = selection.containerId || '';
+  let slotId = selection.slotId || '';
+
+  if (selection.newContainerName?.trim()) {
+    const name = selection.newContainerName.trim();
+    const existing = locations.find((location) => location.name.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      containerId = existing.id;
+    } else {
+      const container = { id: makeId('storage'), name, slots: [] };
+      locations = [...locations, container];
+      containerId = container.id;
+    }
+  }
+
+  if (selection.newSlotName?.trim() && containerId) {
+    const name = selection.newSlotName.trim();
+    locations = locations.map((location) => {
+      if (location.id !== containerId) return location;
+      const existing = location.slots.find((slot) => slot.name.toLowerCase() === name.toLowerCase());
+      if (existing) {
+        slotId = existing.id;
+        return location;
+      }
+      const slot = { id: makeId('slot'), name };
+      slotId = slot.id;
+      return { ...location, slots: [...location.slots, slot].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })) };
+    });
+  }
+
+  const container = locations.find((location) => location.id === containerId);
+  const slot = container?.slots?.find((item) => item.id === slotId);
+  return {
+    storageLocations: locations.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })),
+    partPatch: {
+      storageContainerId: container?.id || '',
+      storageSlotId: slot?.id || '',
+      storageLocation: storageLabel(container?.name, slot?.name),
+    },
+  };
+}
+
 function categoryPath(categories, categoryId) {
   return categoryLabel(categories, categoryId).split('/').map((part) => part.trim()).filter(Boolean);
 }
@@ -2078,13 +2139,29 @@ function findMatchingPart(parts, importedPart) {
 export default function App() {
   const [tab, setTab] = useState('projects');
   const [state, setState] = useState(null);
+  const [loadError, setLoadError] = useState('');
+  const [accessCode, setAccessCode] = useState('');
+  const [loadBusy, setLoadBusy] = useState(true);
   const [saveState, setSaveState] = useState('saved');
   const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
   const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
 
+  const reloadState = async () => {
+    setLoadBusy(true);
+    setLoadError('');
+    try {
+      setState(await loadAppState());
+    } catch (error) {
+      setState(null);
+      setLoadError(String(error?.message || error));
+    } finally {
+      setLoadBusy(false);
+    }
+  };
+
   useEffect(() => {
-    loadAppState().then(setState);
+    reloadState();
   }, []);
 
   useEffect(() => {
@@ -2140,7 +2217,35 @@ export default function App() {
     setCloseToTray(state.closeToTray).catch((error) => console.error(error));
   }, [state?.closeToTray]);
 
-  if (!state) return <div className="loading">Loading BuildBook...</div>;
+  if (!state) {
+    if (!loadError || loadBusy) return <div className="loading">Loading BuildBook...</div>;
+    return (
+      <div className="access-gate">
+        <section className="panel access-gate-panel">
+          <h1>BuildBook Access</h1>
+          <p>{loadError}</p>
+          {loadError.includes('access code') && (
+            <>
+              <label>
+                Access code
+                <input value={accessCode} onChange={(event) => setAccessCode(event.target.value)} placeholder="Enter access code" />
+              </label>
+              <button
+                onClick={() => {
+                  localStorage.setItem('buildbook-lan-token', accessCode.trim());
+                  reloadState();
+                }}
+                disabled={!accessCode.trim()}
+              >
+                Connect
+              </button>
+            </>
+          )}
+          {!loadError.includes('access code') && <button onClick={reloadState}>Retry</button>}
+        </section>
+      </div>
+    );
+  }
 
   const handlePointerDownCapture = (event) => {
     const source = textSelectionTarget(event.target);
@@ -2281,6 +2386,19 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
         part.id === partId ? { ...part, ...patch, updatedAt: new Date().toISOString() } : part,
       ),
     }));
+  };
+
+  const updatePartStorage = (partId, selection) => {
+    updateState((current) => {
+      const result = applyStorageSelection(current.storageLocations || [], selection);
+      return {
+        ...current,
+        storageLocations: result.storageLocations,
+        parts: current.parts.map((part) =>
+          part.id === partId ? { ...part, ...result.partPatch, updatedAt: new Date().toISOString() } : part,
+        ),
+      };
+    });
   };
 
   const createPartForProject = (projectId, draft) => {
@@ -2453,6 +2571,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
         onBack={() => setSelectedId('')}
         onUpdate={(patch) => updateProject(selected.id, patch)}
         onUpdatePart={updatePart}
+        onUpdatePartStorage={updatePartStorage}
         onCreatePart={createPartForProject}
         onCreateCategory={(name, parentId) => createCategory(name, parentId)}
         onLinkProject={linkPartToProject}
@@ -3010,6 +3129,7 @@ function ProjectWorkspace({
   onBack,
   onUpdate,
   onUpdatePart,
+  onUpdatePartStorage,
   onCreatePart,
   onCreateCategory,
   onLinkProject,
@@ -3137,8 +3257,10 @@ function ProjectWorkspace({
           parts={parts}
           categories={categories}
           projects={state.projects}
+          storageLocations={state.storageLocations || []}
           onUpdate={onUpdate}
           onUpdatePart={onUpdatePart}
+          onUpdatePartStorage={onUpdatePartStorage}
           onCreateCategory={onCreateCategory}
           onLinkProject={onLinkProject}
           onUnlinkProject={onUnlinkProject}
@@ -5061,8 +5183,10 @@ function ProjectPartsTab({
   parts,
   categories,
   projects,
+  storageLocations = [],
   onUpdate,
   onUpdatePart,
+  onUpdatePartStorage,
   onCreateCategory,
   onLinkProject,
   onUnlinkProject,
@@ -5178,8 +5302,10 @@ function ProjectPartsTab({
               part={parts.find((part) => part.id === editingPartId)}
               categories={categories}
               projects={projects}
+              storageLocations={storageLocations}
               onClose={() => setEditingPartId('')}
               onUpdate={(patch) => onUpdatePart(editingPartId, patch)}
+              onStorageChange={(selection) => onUpdatePartStorage(editingPartId, selection)}
               onLinkProject={onLinkProject}
               onUnlinkProject={onUnlinkProject}
               onProjectQuantityChange={onProjectQuantityChange}
@@ -5191,7 +5317,6 @@ function ProjectPartsTab({
                 onDeletePart(editingPartId);
                 setEditingPartId('');
               }}
-              onCreateCategory={onCreateCategory}
             />
           </div>
         </div>
@@ -6439,23 +6564,29 @@ function Parts({ state, updateState }) {
 
   const categoryOptions = useMemo(() => flattenCategoryOptions(state.categories), [state.categories]);
   const categoryTree = useMemo(() => buildCategoryTree(state.categories.filter((category) => category.id !== 'cat-unassigned')), [state.categories]);
+  const storageLocations = state.storageLocations || [];
   const unassignedCount = state.parts.filter((part) => part.categoryId === 'cat-unassigned').length;
 
   const createPart = async (draft) => {
     if (!draft.name.trim()) return;
     const now = new Date().toISOString();
     const partId = makeId('part');
+    const createdCategory = draft.newCategoryName?.trim()
+      ? { id: makeId('cat'), name: draft.newCategoryName.trim(), parentId: draft.newCategoryParentId || null, sortOrder: state.categories.length }
+      : null;
+    const categoryId = createdCategory?.id || draft.categoryId || 'cat-unassigned';
+    const storageResult = applyStorageSelection(state.storageLocations || [], draft);
     const image = draft.imageFile ? await savePartImageWithThumbnail(draft.imageFile, partId) : null;
     const document = draft.documentFile ? await savePickedFile(draft.documentFile, `part-documents/${partId}`) : null;
     const documentHash = document?.path ? await fileHash(document.path).catch(() => '') : '';
     const part = {
       id: partId,
       name: draft.name.trim(),
-      categoryId: draft.categoryId || 'cat-unassigned',
+      categoryId,
       image: image?.image || '',
       imageThumbnail: image?.imageThumbnail || '',
       productUrl: draft.productUrl.trim(),
-      storageLocation: draft.storageLocation.trim(),
+      ...storageResult.partPatch,
       specSummary: draft.specSummary.trim(),
       notes: draft.notes.trim(),
       documents: document ? [{
@@ -6474,6 +6605,8 @@ function Parts({ state, updateState }) {
     };
     updateState((current) => ({
       ...current,
+      categories: createdCategory ? [...current.categories, createdCategory] : current.categories,
+      storageLocations: storageResult.storageLocations,
       parts: [part, ...current.parts],
       projects: current.projects.map((project) => (
         project.id === draft.projectId && !project.partIds.includes(partId)
@@ -6492,6 +6625,19 @@ function Parts({ state, updateState }) {
         part.id === partId ? { ...part, ...patch, updatedAt: new Date().toISOString() } : part,
       ),
     }));
+  };
+
+  const updatePartStorage = (partId, selection) => {
+    updateState((current) => {
+      const result = applyStorageSelection(current.storageLocations || [], selection);
+      return {
+        ...current,
+        storageLocations: result.storageLocations,
+        parts: current.parts.map((part) =>
+          part.id === partId ? { ...part, ...result.partPatch, updatedAt: new Date().toISOString() } : part,
+        ),
+      };
+    });
   };
 
   useEffect(() => {
@@ -6740,8 +6886,10 @@ function Parts({ state, updateState }) {
               part={selected}
               categories={state.categories}
               projects={state.projects}
+              storageLocations={storageLocations}
               onClose={() => setSelectedId('')}
               onUpdate={(patch) => updatePart(selected.id, patch)}
+              onStorageChange={(selection) => updatePartStorage(selected.id, selection)}
               onLinkProject={linkPartToProject}
               onUnlinkProject={unlinkPartFromProject}
               onProjectQuantityChange={updateProjectPartQuantity}
@@ -6773,6 +6921,7 @@ function Parts({ state, updateState }) {
         <NewPartDialog
           categories={state.categories}
           projects={state.projects.filter((project) => project.status === 'active')}
+          storageLocations={storageLocations}
           onCreate={createPart}
           onClose={() => setCreatingPart(false)}
         />
@@ -6795,19 +6944,29 @@ function Parts({ state, updateState }) {
   );
 }
 
-function NewPartDialog({ categories, projects, onCreate, onClose }) {
+function NewPartDialog({ categories, projects, storageLocations = [], onCreate, onClose }) {
   const [draft, setDraft] = useState({
     name: '',
     categoryId: 'cat-unassigned',
     productUrl: '',
-    storageLocation: '',
+    storageContainerId: '',
+    storageSlotId: '',
+    newContainerName: '',
+    newSlotName: '',
     imageFile: null,
     documentFile: null,
     projectId: '',
     specSummary: '',
     notes: '',
+    newCategoryName: '',
+    newCategoryParentId: '',
   });
   const [categoryTouched, setCategoryTouched] = useState(false);
+  const [creatingCategory, setCreatingCategory] = useState(false);
+  const [creatingContainer, setCreatingContainer] = useState(false);
+  const [creatingSlot, setCreatingSlot] = useState(false);
+  const [imageDropActive, setImageDropActive] = useState(false);
+  const [documentDropActive, setDocumentDropActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const categoryOptions = useMemo(() => flattenCategoryOptions(categories), [categories]);
@@ -6832,6 +6991,16 @@ function NewPartDialog({ categories, projects, onCreate, onClose }) {
     }
   };
 
+  const setImageFile = (file) => {
+    if (!file) return;
+    setDraft((current) => ({ ...current, imageFile: file }));
+  };
+
+  const setDocumentFile = (file) => {
+    if (!file) return;
+    setDraft((current) => ({ ...current, documentFile: file }));
+  };
+
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal new-part-modal">
@@ -6839,20 +7008,115 @@ function NewPartDialog({ categories, projects, onCreate, onClose }) {
         <div className="new-part-grid">
           <label>Name<input autoFocus value={draft.name} onChange={(event) => updateName(event.target.value)} /></label>
           <label>Category
-            <select value={draft.categoryId} onChange={(event) => {
+            <select value={creatingCategory ? '__new__' : draft.categoryId} onChange={(event) => {
               setCategoryTouched(true);
-              setDraft((current) => ({ ...current, categoryId: event.target.value }));
+              if (event.target.value === '__new__') {
+                setCreatingCategory(true);
+                setDraft((current) => ({ ...current, categoryId: 'cat-unassigned' }));
+              } else {
+                setCreatingCategory(false);
+                setDraft((current) => ({ ...current, categoryId: event.target.value, newCategoryName: '', newCategoryParentId: '' }));
+              }
             }}>
+              <option value="__new__">Create new category...</option>
               <option value="cat-unassigned">Uncategorized</option>
               {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
                 <option key={category.id} value={category.id}>{category.fullLabel}</option>
               ))}
             </select>
           </label>
+          {creatingCategory && (
+            <div className="mini-create-grid wide">
+              <input value={draft.newCategoryName} onChange={(event) => setDraft((current) => ({ ...current, newCategoryName: event.target.value }))} placeholder="New category name" />
+              <select value={draft.newCategoryParentId} onChange={(event) => setDraft((current) => ({ ...current, newCategoryParentId: event.target.value }))}>
+                <option value="">Root category</option>
+                {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
+                  <option key={category.id} value={category.id}>{category.fullLabel}</option>
+                ))}
+              </select>
+            </div>
+          )}
           <label>Product URL<input value={draft.productUrl} onChange={(event) => setDraft((current) => ({ ...current, productUrl: event.target.value }))} placeholder="https://..." /></label>
-          <label>Storage location<input value={draft.storageLocation} onChange={(event) => setDraft((current) => ({ ...current, storageLocation: event.target.value }))} placeholder="Bin, drawer, shelf..." /></label>
-          <label className="wide">Image<input type="file" accept="image/*" onChange={(event) => setDraft((current) => ({ ...current, imageFile: event.target.files?.[0] || null }))} /></label>
-          <label>Document<input type="file" onChange={(event) => setDraft((current) => ({ ...current, documentFile: event.target.files?.[0] || null }))} /></label>
+          <label>Storage container
+            <select value={creatingContainer ? '__new__' : draft.storageContainerId} onChange={(event) => {
+              if (event.target.value === '__new__') {
+                setCreatingContainer(true);
+                setCreatingSlot(true);
+                setDraft((current) => ({ ...current, storageContainerId: '', storageSlotId: '' }));
+              } else {
+                setCreatingContainer(false);
+                setDraft((current) => ({ ...current, storageContainerId: event.target.value, storageSlotId: '', newContainerName: '', newSlotName: '' }));
+              }
+            }}>
+              <option value="__new__">Create new container...</option>
+              <option value="">No container</option>
+              {storageLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
+            </select>
+          </label>
+          {creatingContainer && (
+            <label>New container<input value={draft.newContainerName} onChange={(event) => setDraft((current) => ({ ...current, newContainerName: event.target.value }))} placeholder="Organizer A, Drawer Cabinet..." /></label>
+          )}
+          <label>Slot / bin / drawer
+            <select
+              disabled={!draft.storageContainerId && !creatingContainer}
+              value={creatingSlot ? '__new__' : draft.storageSlotId}
+              onChange={(event) => {
+                if (event.target.value === '__new__') {
+                  setCreatingSlot(true);
+                  setDraft((current) => ({ ...current, storageSlotId: '' }));
+                } else {
+                  setCreatingSlot(false);
+                  setDraft((current) => ({ ...current, storageSlotId: event.target.value, newSlotName: '' }));
+                }
+              }}
+            >
+              <option value="__new__">Create new slot...</option>
+              <option value="">No slot</option>
+              {(storageLocations.find((location) => location.id === draft.storageContainerId)?.slots || []).map((slot) => <option key={slot.id} value={slot.id}>{slot.name}</option>)}
+            </select>
+          </label>
+          {creatingSlot && (
+            <label>New slot<input value={draft.newSlotName} onChange={(event) => setDraft((current) => ({ ...current, newSlotName: event.target.value }))} placeholder="Bin 1, Drawer 3, Loose..." /></label>
+          )}
+          <div
+            className={`new-part-drop-field wide ${imageDropActive ? 'drop-active' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setImageDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setImageDropActive(false);
+              setImageFile(event.dataTransfer.files?.[0]);
+            }}
+          >
+            <label>Image<input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} /></label>
+            <div className="new-part-file-actions">
+              <span>{draft.imageFile?.name || 'Drag image here'}</span>
+              <button className="ghost" type="button" disabled={!draft.name.trim()} onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(draft.name)}`)}>Search web for Image</button>
+            </div>
+          </div>
+          <div
+            className={`new-part-drop-field ${documentDropActive ? 'drop-active' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setDocumentDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDocumentDropActive(false);
+              setDocumentFile(event.dataTransfer.files?.[0]);
+            }}
+          >
+            <label>Document<input type="file" onChange={(event) => setDocumentFile(event.target.files?.[0])} /></label>
+            <span>{draft.documentFile?.name || 'Drag document here'}</span>
+          </div>
           <label>Add to project
             <select value={draft.projectId} onChange={(event) => setDraft((current) => ({ ...current, projectId: event.target.value }))}>
               <option value="">Do not link yet</option>
@@ -6872,20 +7136,36 @@ function NewPartDialog({ categories, projects, onCreate, onClose }) {
   );
 }
 
-function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnlinkProject, onProjectQuantityChange, onCreateCategory, onDuplicate, onDelete, onClose }) {
+function PartEditor({ part, categories, projects, storageLocations = [], onUpdate, onStorageChange, onLinkProject, onUnlinkProject, onProjectQuantityChange, onDuplicate, onDelete, onClose }) {
   const [documentError, setDocumentError] = useState('');
   const [documentBusy, setDocumentBusy] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [imageError, setImageError] = useState('');
   const [imageDropActive, setImageDropActive] = useState(false);
   const [documentDropActive, setDocumentDropActive] = useState(false);
-  const [newCategory, setNewCategory] = useState({ name: '', parentId: '' });
+  const [creatingContainer, setCreatingContainer] = useState(false);
+  const [creatingSlot, setCreatingSlot] = useState(false);
+  const [newContainerName, setNewContainerName] = useState('');
+  const [newSlotName, setNewSlotName] = useState('');
   const [projectToLink, setProjectToLink] = useState('');
   const [expandedPreview, setExpandedPreview] = useState(null);
+  const [renamingDoc, setRenamingDoc] = useState({ id: '', name: '' });
   const previewDocument = part.documents.find((doc) => doc.isPrimary && isPreviewableFile(doc))
     || part.documents.find(isPreviewableFile);
   const linkedProjects = (projects || []).filter((project) => project.partIds.includes(part.id));
   const linkableProjects = (projects || []).filter((project) => !project.partIds.includes(part.id));
+  const storageSelection = storageSelectionFromPart(part, storageLocations);
+  const selectedContainer = storageLocations.find((location) => location.id === storageSelection.containerId);
+
+  const commitStorage = (patch = {}) => {
+    onStorageChange({
+      containerId: storageSelection.containerId,
+      slotId: storageSelection.slotId,
+      newContainerName,
+      newSlotName,
+      ...patch,
+    });
+  };
 
   const attachDocument = async (pickedFile = null) => {
     if (!pickedFile) return;
@@ -6920,6 +7200,13 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
 
   const setPrimaryDocument = (docId) => {
     onUpdate({ documents: part.documents.map((doc) => ({ ...doc, isPrimary: doc.id === docId })) });
+  };
+
+  const renameDocument = () => {
+    const name = renamingDoc.name.trim();
+    if (!renamingDoc.id || !name) return;
+    onUpdate({ documents: part.documents.map((doc) => doc.id === renamingDoc.id ? { ...doc, name } : doc) });
+    setRenamingDoc({ id: '', name: '' });
   };
 
   const updateImage = async (file) => {
@@ -7004,24 +7291,67 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
               {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
             </select>
           </label>
-          <div className="mini-create-grid">
-            <input value={newCategory.name} onChange={(event) => setNewCategory((current) => ({ ...current, name: event.target.value }))} placeholder="New category" />
-            <select value={newCategory.parentId} onChange={(event) => setNewCategory((current) => ({ ...current, parentId: event.target.value }))}>
-              <option value="">Root</option>
-              {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
+          <label>Storage Container
+            <select value={creatingContainer ? '__new__' : storageSelection.containerId} onChange={(event) => {
+              if (event.target.value === '__new__') {
+                setCreatingContainer(true);
+                setCreatingSlot(true);
+                setNewContainerName('');
+                setNewSlotName('');
+              } else {
+                setCreatingContainer(false);
+                setCreatingSlot(false);
+                setNewContainerName('');
+                setNewSlotName('');
+                commitStorage({ containerId: event.target.value, slotId: '', newContainerName: '', newSlotName: '' });
+              }
+            }}>
+              <option value="__new__">Create new container...</option>
+              <option value="">No container</option>
+              {storageLocations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}
             </select>
-            <button
-              className="ghost"
-              onClick={() => {
-                if (!newCategory.name.trim()) return;
-                onCreateCategory(newCategory.name.trim(), newCategory.parentId);
-                setNewCategory({ name: '', parentId: '' });
+          </label>
+          {creatingContainer && (
+            <label>New Container<input value={newContainerName} onChange={(event) => setNewContainerName(event.target.value)} placeholder="Organizer A, Drawer Cabinet..." /></label>
+          )}
+          <label>Slot / Bin / Drawer
+            <select
+              disabled={!storageSelection.containerId && !creatingContainer}
+              value={creatingSlot ? '__new__' : storageSelection.slotId}
+              onChange={(event) => {
+                if (event.target.value === '__new__') {
+                  setCreatingSlot(true);
+                  setNewSlotName('');
+                } else {
+                  setCreatingSlot(false);
+                  setNewSlotName('');
+                  commitStorage({ slotId: event.target.value, newSlotName: '' });
+                }
               }}
             >
-              Add
-            </button>
-          </div>
-          <label>Storage Location<input value={part.storageLocation} onChange={(event) => onUpdate({ storageLocation: event.target.value })} /></label>
+              <option value="__new__">Create new slot...</option>
+              <option value="">No slot</option>
+              {(selectedContainer?.slots || []).map((slot) => <option key={slot.id} value={slot.id}>{slot.name}</option>)}
+            </select>
+          </label>
+          {creatingSlot && (
+            <div className="input-action-row">
+              <input value={newSlotName} onChange={(event) => setNewSlotName(event.target.value)} placeholder="Bin 1, Drawer 3, Loose..." />
+              <button
+                className="ghost"
+                disabled={!storageSelection.containerId && !newContainerName.trim()}
+                onClick={() => {
+                  commitStorage({ newContainerName, newSlotName });
+                  setCreatingContainer(false);
+                  setCreatingSlot(false);
+                  setNewContainerName('');
+                  setNewSlotName('');
+                }}
+              >
+                Save Location
+              </button>
+            </div>
+          )}
           <label>
             Product URL
             <div className="input-action-row">
@@ -7038,8 +7368,8 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
             {linkedProjects.length ? linkedProjects.map((project) => (
               <div key={project.id} className="usage-row">
                 <span>{project.name}</span>
-                <label>
-                  Qty
+                <label className="usage-qty-label">
+                  <span>Qty</span>
                   <input
                     type="number"
                     min="0"
@@ -7120,14 +7450,35 @@ function PartEditor({ part, categories, projects, onUpdate, onLinkProject, onUnl
             {documentError && <p className="error-text">{documentError}</p>}
             {part.documents.map((doc) => (
               <div key={doc.id} className="list-line">
-                <span>{doc.name}</span>
+                {renamingDoc.id === doc.id ? (
+                  <input
+                    className="document-name-input"
+                    value={renamingDoc.name}
+                    onChange={(event) => setRenamingDoc((current) => ({ ...current, name: event.target.value }))}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') renameDocument();
+                      if (event.key === 'Escape') setRenamingDoc({ id: '', name: '' });
+                    }}
+                    autoFocus
+                  />
+                ) : <span>{doc.name}</span>}
                 <div className="row-actions">
-                  <button className={doc.isPrimary ? 'latest-pill' : 'ghost'} onClick={() => setPrimaryDocument(doc.id)}>{doc.isPrimary ? 'Default' : 'Set Default'}</button>
-                  {isPreviewableFile(doc) && (
-                    <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
+                  {renamingDoc.id === doc.id ? (
+                    <>
+                      <button className="ghost" onClick={renameDocument} disabled={!renamingDoc.name.trim()}>Save</button>
+                      <button className="ghost" onClick={() => setRenamingDoc({ id: '', name: '' })}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="ghost" onClick={() => setRenamingDoc({ id: doc.id, name: doc.name })}>Rename</button>
+                      <button className={doc.isPrimary ? 'latest-pill' : 'ghost'} onClick={() => setPrimaryDocument(doc.id)}>{doc.isPrimary ? 'Default' : 'Set Default'}</button>
+                      {isPreviewableFile(doc) && (
+                        <button className="ghost" onClick={() => setExpandedPreview(doc)}>Preview</button>
+                      )}
+                      {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
+                      <button className="ghost" onClick={() => onUpdate({ documents: part.documents.filter((item) => item.id !== doc.id) })}>Delete</button>
+                    </>
                   )}
-                  {doc.path && <button className="ghost" onClick={() => openStoredFile(doc.path)}>Open</button>}
-                  <button className="ghost" onClick={() => onUpdate({ documents: part.documents.filter((item) => item.id !== doc.id) })}>Delete</button>
                 </div>
               </div>
             ))}
@@ -7145,7 +7496,10 @@ function Imports({ state, updateState }) {
   const [imageBusy, setImageBusy] = useState('');
   const [importBusy, setImportBusy] = useState('');
   const [selectedBatchId, setSelectedBatchId] = useState('');
+  const [deleteBatchId, setDeleteBatchId] = useState('');
   const selectedBatch = state.importBatches.find((batch) => batch.id === selectedBatchId) || null;
+  const deleteBatch = state.importBatches.find((batch) => batch.id === deleteBatchId) || null;
+  const createdPartIdsForDelete = [...new Set((deleteBatch?.items || []).map((item) => item.createdPartId).filter((partId) => state.parts.some((part) => part.id === partId)))];
 
   const createBatch = async (file) => {
     if (!file) return;
@@ -7203,6 +7557,7 @@ function Imports({ state, updateState }) {
   const completeItem = async (batchId, item, forcedAction = item.action) => {
       const action = forcedAction === 'merge' && !item.matchId ? 'create' : forcedAction;
       const imagePath = action === 'skip' ? '' : item.imagePath || await fetchItemImage(batchId, item);
+      const createdPartId = action === 'create' ? makeId('part') : '';
 
       updateState((current) => {
         const partPatch = {
@@ -7219,7 +7574,7 @@ function Imports({ state, updateState }) {
 
         if (action === 'create') {
           parts = [{
-            id: makeId('part'),
+            id: createdPartId,
             image: '',
             storageLocation: '',
             specSummary: '',
@@ -7236,10 +7591,36 @@ function Imports({ state, updateState }) {
           parts,
           importBatches: current.importBatches.map((batch) => batch.id === batchId ? {
             ...batch,
-            items: batch.items.map((draft) => draft.id === item.id ? { ...draft, imagePath, status: action === 'skip' ? 'skipped' : 'imported', action } : draft),
+            items: batch.items.map((draft) => draft.id === item.id ? {
+              ...draft,
+              imagePath,
+              status: action === 'skip' ? 'skipped' : 'imported',
+              action,
+              createdPartId: action === 'create' ? createdPartId : '',
+            } : draft),
           } : batch),
         };
       });
+  };
+
+  const removeImportBatch = (removeCreatedParts) => {
+    if (!deleteBatch) return;
+    const removedPartIds = removeCreatedParts ? new Set(createdPartIdsForDelete) : new Set();
+    updateState((current) => ({
+      ...current,
+      importBatches: current.importBatches.filter((batch) => batch.id !== deleteBatch.id),
+      parts: removedPartIds.size ? current.parts.filter((part) => !removedPartIds.has(part.id)) : current.parts,
+      projects: removedPartIds.size ? current.projects.map((project) => ({
+        ...project,
+        partIds: project.partIds.filter((partId) => !removedPartIds.has(partId)),
+        partQuantities: Object.fromEntries(Object.entries(project.partQuantities || {}).filter(([partId]) => !removedPartIds.has(partId))),
+      })) : current.projects,
+    }));
+    if (selectedBatchId === deleteBatch.id) setSelectedBatchId('');
+    setDeleteBatchId('');
+    setImportNotice(removeCreatedParts && removedPartIds.size
+      ? `Deleted import record and ${removedPartIds.size} imported part${removedPartIds.size === 1 ? '' : 's'}.`
+      : 'Deleted import record.');
   };
 
   const categoryOptions = flattenCategoryOptions(state.categories);
@@ -7298,15 +7679,17 @@ function Imports({ state, updateState }) {
         <aside className="library-sidebar">
           <h3>Batches</h3>
           {state.importBatches.length === 0 ? <p>No imports yet.</p> : state.importBatches.map((batch) => (
-            <button
-              key={batch.id}
-              className={`import-row ${selectedBatch?.id === batch.id ? 'active' : ''}`}
-              onClick={() => setSelectedBatchId((current) => current === batch.id ? '' : batch.id)}
-            >
-              <strong>{batch.name}</strong>
-              <span>{new Date(batch.createdAt).toLocaleDateString()}</span>
-              <small>{batch.items.filter((item) => item.status === 'draft').length} draft / {batch.items.length} total</small>
-            </button>
+            <div key={batch.id} className="import-row-wrap">
+              <button
+                className={`import-row ${selectedBatch?.id === batch.id ? 'active' : ''}`}
+                onClick={() => setSelectedBatchId((current) => current === batch.id ? '' : batch.id)}
+              >
+                <strong>{batch.name}</strong>
+                <span>{new Date(batch.createdAt).toLocaleDateString()}</span>
+                <small>{batch.items.filter((item) => item.status === 'draft').length} draft / {batch.items.length} total</small>
+              </button>
+              <button className="ghost import-delete-button" aria-label={`Delete ${batch.name} import record`} onClick={() => setDeleteBatchId(batch.id)}>x</button>
+            </div>
           ))}
         </aside>
         <section className="panel empty-panel">Select an import batch to review or apply it.</section>
@@ -7364,6 +7747,24 @@ function Imports({ state, updateState }) {
             <div className="modal-actions import-batch-actions">
               <button className="secondary" disabled={!!importBusy} onClick={() => setSelectedBatchId('')}>Close</button>
               <button disabled={!draftCount || !!importBusy} onClick={applyBatch}>{importBusy ? 'Applying...' : `Apply Batch (${draftCount})`}</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {deleteBatch && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && setDeleteBatchId('')}>
+          <section className="modal compact-modal import-delete-modal">
+            <h2>Delete Import Record</h2>
+            <p>Delete <strong>{deleteBatch.name}</strong> from import history?</p>
+            {createdPartIdsForDelete.length
+              ? <p>{createdPartIdsForDelete.length} part{createdPartIdsForDelete.length === 1 ? ' was' : 's were'} created by this import and can also be deleted.</p>
+              : <p>No parts can be safely identified as created by this record. Older records may not contain that link.</p>}
+            <div className="modal-footer">
+              <button className="secondary" onClick={() => setDeleteBatchId('')}>Cancel</button>
+              <button className="danger-fill" onClick={() => removeImportBatch(false)}>Delete Record</button>
+              {createdPartIdsForDelete.length > 0 && (
+                <button className="danger-fill" onClick={() => removeImportBatch(true)}>Delete Record and Parts</button>
+              )}
             </div>
           </section>
         </div>
@@ -7669,7 +8070,7 @@ function Settings({ state, updateState }) {
         <div className="settings-section-row">
           <div className="settings-copy">
             <h2>Project Template</h2>
-            <p>Configure default step tags, checklist starters, and file tracking for new projects.</p>
+            <p>Configure default step tags and checklist starters for new projects.</p>
           </div>
           <div className="settings-actions">
             <button className="secondary" onClick={() => setShowTemplatePreview(true)}>Edit Template</button>
@@ -7679,8 +8080,8 @@ function Settings({ state, updateState }) {
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
-            <h2>File Revision Settings</h2>
-            <p>Control tracked file retention, linked-file revision snapshots, and revision delay timing.</p>
+            <h2>Tracked Files Settings</h2>
+            <p>Configure tracked file types, revision retention, linked-file snapshots, and timing.</p>
           </div>
           <div className="settings-actions">
             <button className="secondary" onClick={() => setShowRevisionSettings(true)}>Open Editor</button>
@@ -7902,6 +8303,7 @@ function Settings({ state, updateState }) {
           revisionSettings={state.revisionSettings}
           projects={state.projects}
           template={state.template}
+          onUpdateTemplate={updateTemplate}
           onClose={() => setShowRevisionSettings(false)}
           onSave={updateRevisionSettings}
         />
@@ -7929,8 +8331,13 @@ function Settings({ state, updateState }) {
   );
 }
 
-function RevisionSettingsModal({ revisionSettings, projects, template, onClose, onSave }) {
+function RevisionSettingsModal({ revisionSettings, projects, template, onUpdateTemplate, onClose, onSave }) {
   const [draft, setDraft] = useState(() => normalizeRevisionSettings(revisionSettings));
+  const [newTracker, setNewTracker] = useState({ name: '', extensions: '', color: '#58a6ff' });
+  const [dragTrackerId, setDragTrackerId] = useState('');
+  const [dragTrackerOverId, setDragTrackerOverId] = useState('');
+  const [dragTrackerPosition, setDragTrackerPosition] = useState('before');
+  const trackerDragRef = useRef(null);
   const overridingProjects = projects.filter((project) => project.revisionSettingsOverride);
   const projectStorage = useMemo(() => (
     projects
@@ -7943,14 +8350,105 @@ function RevisionSettingsModal({ revisionSettings, projects, template, onClose, 
       .filter((project) => project.totalBytes > 0)
       .sort((a, b) => b.totalBytes - a.totalBytes || a.name.localeCompare(b.name))
   ), [projects]);
+  const addTracker = () => {
+    if (!newTracker.name.trim()) return;
+    onUpdateTemplate({
+      fileTrackers: [
+        ...template.fileTrackers,
+        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), color: newTracker.color || '#58a6ff', programPath: '' },
+      ],
+    });
+    setNewTracker({ name: '', extensions: '', color: '#58a6ff' });
+  };
+  const updateTracker = (trackerId, patch) => {
+    onUpdateTemplate({
+      fileTrackers: template.fileTrackers.map((tracker) => tracker.id === trackerId ? { ...tracker, ...patch } : tracker),
+    });
+  };
+  const reorderTracker = (sourceId, targetId, position = 'before') => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const current = [...template.fileTrackers];
+    const sourceIndex = current.findIndex((tracker) => tracker.id === sourceId);
+    let targetIndex = current.findIndex((tracker) => tracker.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const [moved] = current.splice(sourceIndex, 1);
+    targetIndex = current.findIndex((tracker) => tracker.id === targetId);
+    current.splice(targetIndex + (position === 'after' ? 1 : 0), 0, moved);
+    onUpdateTemplate({ fileTrackers: current });
+  };
+  const trackerDropAtPoint = (x, y) => {
+    const row = document.elementFromPoint(x, y)?.closest?.('[data-template-tracker-id]');
+    if (!row) return { id: '', position: 'before' };
+    const rect = row.getBoundingClientRect();
+    return { id: row.dataset.templateTrackerId || '', position: y > rect.top + rect.height / 2 ? 'after' : 'before' };
+  };
+  const startTrackerDrag = (event, trackerId) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    trackerDragRef.current = { trackerId };
+    setDragTrackerId(trackerId);
+    setDragTrackerOverId('');
+    setDragTrackerPosition('before');
+  };
+  const moveTrackerDrag = (event) => {
+    const drag = trackerDragRef.current;
+    if (!drag) return;
+    const target = trackerDropAtPoint(event.clientX, event.clientY);
+    setDragTrackerOverId(target.id && target.id !== drag.trackerId ? target.id : '');
+    setDragTrackerPosition(target.position);
+  };
+  const endTrackerDrag = (event) => {
+    const drag = trackerDragRef.current;
+    if (!drag) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    const target = trackerDropAtPoint(event.clientX, event.clientY);
+    reorderTracker(drag.trackerId, dragTrackerOverId || target.id, dragTrackerPosition || target.position);
+    trackerDragRef.current = null;
+    setDragTrackerId('');
+    setDragTrackerOverId('');
+    setDragTrackerPosition('before');
+  };
 
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal theme-modal revision-modal">
         <div className="section-title">
-          <h2>File Revision Settings</h2>
+          <h2>Tracked Files Settings</h2>
           <button className="ghost" onClick={onClose}>Close</button>
         </div>
+        <section className="revision-card tracked-files-editor">
+          <h3>Tracked File Types</h3>
+          <div className="tracker-row">
+            <input value={newTracker.name} onChange={(event) => setNewTracker((current) => ({ ...current, name: event.target.value }))} placeholder="Tracker name" />
+            <input value={newTracker.extensions} onChange={(event) => setNewTracker((current) => ({ ...current, extensions: event.target.value }))} placeholder=".pdf,.dxf" />
+            <input aria-label="Tracker color" type="color" value={validHexColor(newTracker.color) ? newTracker.color : '#58a6ff'} onChange={(event) => setNewTracker((current) => ({ ...current, color: event.target.value }))} />
+            <button onClick={addTracker}>Add</button>
+          </div>
+          <div className="tracked-files-list">
+            {template.fileTrackers.map((tracker) => (
+              <div
+                key={tracker.id}
+                data-template-tracker-id={tracker.id}
+                className={`tracker-edit-row ${dragTrackerId === tracker.id ? 'dragging' : ''} ${dragTrackerOverId === tracker.id ? `drop-${dragTrackerPosition}` : ''}`}
+              >
+                <span
+                  className="drag-handle"
+                  title="Drag to reorder"
+                  onPointerDown={(event) => startTrackerDrag(event, tracker.id)}
+                  onPointerMove={moveTrackerDrag}
+                  onPointerUp={endTrackerDrag}
+                  onPointerCancel={endTrackerDrag}
+                >
+                  ::
+                </span>
+                <input value={tracker.name} onChange={(event) => updateTracker(tracker.id, { name: event.target.value })} placeholder="Tracker name" />
+                <input value={tracker.extensions || ''} onChange={(event) => updateTracker(tracker.id, { extensions: event.target.value })} placeholder=".pdf,.dxf" />
+                <input aria-label={`${tracker.name} color`} type="color" value={validHexColor(tracker.color) ? tracker.color : '#58a6ff'} onChange={(event) => updateTracker(tracker.id, { color: event.target.value })} />
+                <button className="ghost danger-button" onClick={() => onUpdateTemplate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
+              </div>
+            ))}
+          </div>
+        </section>
         <div className="revision-sections">
           <section className="revision-card">
             <h3>Retention</h3>
@@ -8014,7 +8512,6 @@ function RevisionSettingsModal({ revisionSettings, projects, template, onClose, 
           </section>
         </div>
         <div className="settings-list revision-summary">
-          <span>Tracked file types: {template.fileTrackers.length}</span>
           <span>Projects overriding these settings: {overridingProjects.length ? overridingProjects.map((project) => project.name).join(', ') : 'None'}</span>
         </div>
         <div className="revision-storage-list">
@@ -8160,12 +8657,7 @@ function ThemeEditorModal({ theme, onClose, onSave }) {
 function TemplatePreviewModal({ template, onClose, onUpdate }) {
   const [newStep, setNewStep] = useState('');
   const [newChecklist, setNewChecklist] = useState('');
-  const [newTracker, setNewTracker] = useState({ name: '', extensions: '', color: '#58a6ff' });
   const [selectedSteps, setSelectedSteps] = useState([]);
-  const [dragTrackerId, setDragTrackerId] = useState('');
-  const [dragTrackerOverId, setDragTrackerOverId] = useState('');
-  const [dragTrackerPosition, setDragTrackerPosition] = useState('before');
-  const trackerDragRef = useRef(null);
 
   const addStep = () => {
     if (!newStep.trim()) return;
@@ -8191,73 +8683,6 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
     setNewChecklist('');
   };
 
-  const addTracker = () => {
-    if (!newTracker.name.trim()) return;
-    onUpdate({
-      fileTrackers: [
-        ...template.fileTrackers,
-        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), color: newTracker.color || '#58a6ff', programPath: '' },
-      ],
-    });
-    setNewTracker({ name: '', extensions: '', color: '#58a6ff' });
-  };
-
-  const updateTracker = (trackerId, patch) => {
-    onUpdate({
-      fileTrackers: template.fileTrackers.map((tracker) => (
-        tracker.id === trackerId ? { ...tracker, ...patch } : tracker
-      )),
-    });
-  };
-
-  const reorderTracker = (sourceId, targetId, position = 'before') => {
-    if (!sourceId || !targetId || sourceId === targetId) return;
-    const current = [...template.fileTrackers];
-    const sourceIndex = current.findIndex((tracker) => tracker.id === sourceId);
-    let targetIndex = current.findIndex((tracker) => tracker.id === targetId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    const [moved] = current.splice(sourceIndex, 1);
-    targetIndex = current.findIndex((tracker) => tracker.id === targetId);
-    current.splice(targetIndex + (position === 'after' ? 1 : 0), 0, moved);
-    onUpdate({ fileTrackers: current });
-  };
-
-  const trackerDropAtPoint = (x, y) => {
-    const row = document.elementFromPoint(x, y)?.closest?.('[data-template-tracker-id]');
-    if (!row) return { id: '', position: 'before' };
-    const rect = row.getBoundingClientRect();
-    return { id: row.dataset.templateTrackerId || '', position: y > rect.top + rect.height / 2 ? 'after' : 'before' };
-  };
-
-  const startTrackerDrag = (event, trackerId) => {
-    event.preventDefault();
-    event.currentTarget.setPointerCapture?.(event.pointerId);
-    trackerDragRef.current = { trackerId };
-    setDragTrackerId(trackerId);
-    setDragTrackerOverId('');
-    setDragTrackerPosition('before');
-  };
-
-  const moveTrackerDrag = (event) => {
-    const drag = trackerDragRef.current;
-    if (!drag) return;
-    const target = trackerDropAtPoint(event.clientX, event.clientY);
-    setDragTrackerOverId(target.id && target.id !== drag.trackerId ? target.id : '');
-    setDragTrackerPosition(target.position);
-  };
-
-  const endTrackerDrag = (event) => {
-    const drag = trackerDragRef.current;
-    if (!drag) return;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    const target = trackerDropAtPoint(event.clientX, event.clientY);
-    reorderTracker(drag.trackerId, dragTrackerOverId || target.id, dragTrackerPosition || target.position);
-    trackerDragRef.current = null;
-    setDragTrackerId('');
-    setDragTrackerOverId('');
-    setDragTrackerPosition('before');
-  };
-
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal template-modal">
@@ -8278,7 +8703,6 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
               </div>
               <div className="mini-meta">
                 <span>{template.checklist.length} default tasks</span>
-                <span>{template.fileTrackers.length} file trackers</span>
               </div>
             </div>
           </div>
@@ -8314,37 +8738,6 @@ function TemplatePreviewModal({ template, onClose, onUpdate }) {
                 <div key={item} className="list-line">
                   <span>{item}</span>
                   <button className="ghost" onClick={() => onUpdate({ checklist: template.checklist.filter((text) => text !== item) })}>Delete</button>
-                </div>
-              ))}
-            </article>
-            <article className="wide">
-              <h3>Tracked File Types</h3>
-              <div className="tracker-row">
-                <input value={newTracker.name} onChange={(event) => setNewTracker((current) => ({ ...current, name: event.target.value }))} placeholder="Tracker name" />
-                <input value={newTracker.extensions} onChange={(event) => setNewTracker((current) => ({ ...current, extensions: event.target.value }))} placeholder=".pdf,.dxf" />
-                <input aria-label="Tracker color" type="color" value={validHexColor(newTracker.color) ? newTracker.color : '#58a6ff'} onChange={(event) => setNewTracker((current) => ({ ...current, color: event.target.value }))} />
-                <button onClick={addTracker}>Add</button>
-              </div>
-              {template.fileTrackers.map((tracker) => (
-                <div
-                  key={tracker.id}
-                  data-template-tracker-id={tracker.id}
-                  className={`tracker-edit-row ${dragTrackerId === tracker.id ? 'dragging' : ''} ${dragTrackerOverId === tracker.id ? `drop-${dragTrackerPosition}` : ''}`}
-                >
-                  <span
-                    className="drag-handle"
-                    title="Drag to reorder"
-                    onPointerDown={(event) => startTrackerDrag(event, tracker.id)}
-                    onPointerMove={moveTrackerDrag}
-                    onPointerUp={endTrackerDrag}
-                    onPointerCancel={endTrackerDrag}
-                  >
-                    ::
-                  </span>
-                  <input value={tracker.name} onChange={(event) => updateTracker(tracker.id, { name: event.target.value })} placeholder="Tracker name" />
-                  <input value={tracker.extensions || ''} onChange={(event) => updateTracker(tracker.id, { extensions: event.target.value })} placeholder=".pdf,.dxf" />
-                  <input aria-label={`${tracker.name} color`} type="color" value={validHexColor(tracker.color) ? tracker.color : '#58a6ff'} onChange={(event) => updateTracker(tracker.id, { color: event.target.value })} />
-                  <button className="ghost danger-button" onClick={() => onUpdate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
                 </div>
               ))}
             </article>
