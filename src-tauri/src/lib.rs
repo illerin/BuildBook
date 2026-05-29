@@ -154,6 +154,39 @@ fn state_file_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String>
     Ok(dir.join("buildbook-state.json"))
 }
 
+fn backup_existing_state(path: &std::path::Path) {
+    if !path.is_file() {
+        return;
+    }
+    let Some(dir) = path.parent() else { return };
+    let backup_dir = dir.join("state-backups");
+    if std::fs::create_dir_all(&backup_dir).is_err() {
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    let backup_path = backup_dir.join(format!("buildbook-state-{stamp}.json"));
+    let _ = std::fs::copy(path, backup_path);
+
+    let mut backups = std::fs::read_dir(&backup_dir)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let modified = entry.metadata().and_then(|metadata| metadata.modified()).ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by_key(|(modified, _)| *modified);
+    let excess = backups.len().saturating_sub(30);
+    for (_, old_path) in backups.into_iter().take(excess) {
+        let _ = std::fs::remove_file(old_path);
+    }
+}
+
 #[tauri::command]
 fn read_app_state(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let path = state_file_path(&app)?;
@@ -170,6 +203,7 @@ fn read_app_state(app: tauri::AppHandle) -> Result<Option<String>, String> {
 #[tauri::command]
 fn write_app_state(app: tauri::AppHandle, contents: String) -> Result<(), String> {
     let path = state_file_path(&app)?;
+    backup_existing_state(&path);
     std::fs::write(path, contents).map_err(|error| format!("Could not save app state: {error}"))
 }
 

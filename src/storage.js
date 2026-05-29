@@ -26,13 +26,9 @@ export function lanToken() {
 
 export async function loadAppState() {
   if (isTauri()) {
-    try {
-      const contents = await invoke('read_app_state');
-      return normalizeState(contents ? JSON.parse(contents) : DEFAULT_STATE);
-    } catch (error) {
-      console.error('Failed to load BuildBook state', error);
-      return normalizeState(DEFAULT_STATE);
-    }
+    const contents = await invoke('read_app_state');
+    if (!contents) return normalizeState(DEFAULT_STATE);
+    return normalizeState(JSON.parse(contents));
   }
 
   if (isLanWebClient()) {
@@ -46,8 +42,7 @@ export async function loadAppState() {
     const contents = localStorage.getItem(STORAGE_KEY);
     return normalizeState(contents ? JSON.parse(contents) : DEFAULT_STATE);
   } catch (error) {
-    console.error('Failed to load BuildBook state', error);
-    return normalizeState(DEFAULT_STATE);
+    throw new Error(`Could not load BuildBook browser state: ${error}`);
   }
 }
 
