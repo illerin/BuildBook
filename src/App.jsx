@@ -895,6 +895,7 @@ async function rewriteNotesForWeb(entries, html, projectId, tableRows = []) {
     nextTag = /data-portable-image-id=/.test(nextTag)
       ? nextTag.replace(/data-portable-image-id="[^"]*"/, `data-portable-image-id="${portableId}"`)
       : nextTag.replace(/<img\b/, `<img data-portable-image-id="${portableId}"`);
+    nextTag = nextTag.replace(/\sdata-project-image-path=["'][^"']*["']/g, '');
     nextHtml = nextHtml.replace(tag, nextTag);
     if (!exportPath) tableRows[tableRows.length - 1].archive_path = '';
   }
