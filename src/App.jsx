@@ -75,11 +75,65 @@ const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBoo
 function droppedFileList(event, accept = () => true) {
   event.preventDefault();
   event.stopPropagation();
-  return [...(event.dataTransfer?.files || [])].filter(accept);
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  const fromFiles = [...(event.dataTransfer?.files || [])];
+  const fromItems = [...(event.dataTransfer?.items || [])]
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter(Boolean);
+  const files = fromFiles.length ? fromFiles : fromItems;
+  return files.filter(accept);
 }
 
 function firstDroppedFile(event, accept = () => true) {
   return droppedFileList(event, accept)[0] || null;
+}
+
+function fileLooksImage(file) {
+  return Boolean(file?.type?.startsWith('image/') || /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file?.name || ''));
+}
+
+function safeDecodeUrl(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function normalizeDroppedImageUrl(value) {
+  let text = String(value || '').trim().replace(/^["']|["']$/g, '').replace(/&amp;/g, '&');
+  if (/^data:image\//i.test(text)) return text;
+  const directUrl = text.match(/https?:\/\/[^\s"'<>]+/i)?.[0] || '';
+  text = directUrl || text;
+  if (!/^https?:\/\//i.test(text)) return '';
+  try {
+    const parsed = new URL(text);
+    return safeDecodeUrl(parsed.searchParams.get('imgurl') || parsed.searchParams.get('mediaurl') || parsed.searchParams.get('url') || text);
+  } catch {
+    return text;
+  }
+}
+
+function imageUrlFromDrop(event) {
+  const transfer = event.dataTransfer;
+  if (!transfer) return '';
+  const chunks = [];
+  for (const type of transfer.types || []) {
+    try {
+      const value = transfer.getData(type);
+      if (value) chunks.push(value);
+    } catch {
+      // Some browsers block reading specific drag types.
+    }
+  }
+  const html = transfer.getData('text/html');
+  chunks.unshift(...[...html.matchAll(/(?:src|href|data-src|data-iurl)=["']([^"']+)["']/gi)].map((match) => match[1]));
+  for (const chunk of chunks) {
+    const normalized = normalizeDroppedImageUrl(chunk);
+    if (normalized) return normalized;
+  }
+  return '';
 }
 
 function versionNumbers(version = '') {
@@ -438,6 +492,10 @@ function fileNameFromUrl(url, fallback = 'part-image') {
 }
 
 async function saveImageFromUrl(url, library) {
+  if (/^data:image\//i.test(url)) {
+    const bytes = dataUrlToBytes(url);
+    return saveBytesFile(`${safeName(library.split('/').pop() || 'image')}.png`, library, bytes);
+  }
   const originalName = fileNameFromUrl(url);
   const hasExtension = /\.[a-z0-9]{2,5}$/i.test(originalName);
   return downloadUrlFile(url, library, hasExtension ? originalName : `${originalName}.jpg`);
@@ -3021,7 +3079,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         onInput={emitChange}
         onDragOver={(event) => event.preventDefault()}
         onDrop={async (event) => {
-          const file = firstDroppedFile(event, (item) => item.type.startsWith('image/'));
+          const file = firstDroppedFile(event, fileLooksImage);
           if (file) await insertImage(file);
         }}
         onClick={(event) => {
@@ -3156,6 +3214,7 @@ function ProjectWorkspace({
   onDelete,
 }) {
   const [projectTab, setProjectTab] = useState('overview');
+  const [tabsCollapsed, setTabsCollapsed] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [imagePreview, setImagePreview] = useState('');
   const [exportNotice, setExportNotice] = useState('');
@@ -3224,8 +3283,11 @@ function ProjectWorkspace({
       <section className="project-hero">
         <div
           className={`project-image drop-target ${imageBusy ? 'drop-active' : ''}`}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => updateImage(firstDroppedFile(event, (file) => file.type.startsWith('image/')))}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'copy';
+          }}
+          onDrop={(event) => updateImage(firstDroppedFile(event, fileLooksImage))}
         >
           {imagePreview ? <img src={imagePreview} alt="" /> : project.image ? <StoredImage path={project.image} alt="" /> : <div>Project</div>}
           <label className="file-picker image-picker">
@@ -3262,7 +3324,10 @@ function ProjectWorkspace({
       {showExportModal && <ProjectExportModal project={project} onCancel={() => setShowExportModal(false)} onExport={exportProject} />}
       {exportNotice && <p className="export-notice">{exportNotice}</p>}
       <ProjectTagControls project={project} steps={template.steps} onToggle={toggleStep} className="project-header-tags" />
-      <div className="tabs">
+      <button className="tabs-collapse-button secondary" onClick={() => setTabsCollapsed((value) => !value)}>
+        {tabsCollapsed ? 'Show Tabs' : 'Hide Tabs'}
+      </button>
+      <div className={`tabs ${tabsCollapsed ? 'collapsed' : ''}`}>
         <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Overview</button>
         <button className={`tab ${projectTab === 'instructions' ? 'active' : ''}`} onClick={() => setProjectTab('instructions')}>Instructions</button>
         <button className={`tab ${projectTab === 'photos' ? 'active' : ''}`} onClick={() => setProjectTab('photos')}>Photos ({(project.photoFolders || []).reduce((total, folder) => total + (folder.photos?.length || 0), 0)})</button>
@@ -3435,6 +3500,18 @@ async function savePartImageWithThumbnail(file, partId) {
   let imageThumbnail = '';
   try {
     const thumbnail = await savePhotoThumbnail(file, stored.name, `part-images/${partId}/thumbs`);
+    imageThumbnail = thumbnail.path;
+  } catch (error) {
+    console.warn('Could not create part thumbnail', error);
+  }
+  return { image: stored.path, imageThumbnail };
+}
+
+async function savePartImageUrlWithThumbnail(url, partId) {
+  const stored = await saveImageFromUrl(url, `part-images/${partId}`);
+  let imageThumbnail = '';
+  try {
+    const thumbnail = await savePhotoThumbnailFromPath(stored.path, stored.name, `part-images/${partId}/thumbs`);
     imageThumbnail = thumbnail.path;
   } catch (error) {
     console.warn('Could not create part thumbnail', error);
@@ -3648,7 +3725,7 @@ function ProjectPhotosTab({ project, onUpdate }) {
         onDragOver={(event) => {
           if (selectedFolder) event.preventDefault();
         }}
-        onDrop={(event) => uploadPhotos(droppedFileList(event, (file) => file.type.startsWith('image/')))}
+        onDrop={(event) => uploadPhotos(droppedFileList(event, fileLooksImage))}
       >
         <div className="section-title">
           <h3>{selectedFolder?.name || 'Photos'}</h3>
@@ -5015,8 +5092,12 @@ function ExpandablePdfPreview({ pdf, onExpand, className = 'pdf-preview compact'
 
 function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePart }) {
   const [expandedPreview, setExpandedPreview] = useState(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [imageError, setImageError] = useState('');
+  const [imageDropActive, setImageDropActive] = useState(false);
   const [documentBusy, setDocumentBusy] = useState(false);
   const [documentError, setDocumentError] = useState('');
+  const [documentDropActive, setDocumentDropActive] = useState(false);
   const previewDocument = part.documents.find((doc) => doc.isPrimary && isPreviewableFile(doc))
     || part.documents.find(isPreviewableFile);
 
@@ -5051,11 +5132,85 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
     }
   };
 
+  const attachDocumentUrl = async (url) => {
+    if (!url) return;
+    setDocumentBusy(true);
+    setDocumentError('');
+    try {
+      const stored = await saveImageFromUrl(url, `part-documents/${part.id}`);
+      const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+      onUpdatePart(part.id, {
+        documents: [
+          ...part.documents,
+          {
+            id: makeId('doc'),
+            name: stored.name,
+            path: stored.path,
+            sourcePath: '',
+            storageMode: 'copy',
+            size: stored.size,
+            contentHash,
+            type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+            isPrimary: !part.documents.length,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      });
+    } catch (error) {
+      setDocumentError(String(error));
+    } finally {
+      setDocumentBusy(false);
+    }
+  };
+
+  const updateImage = async (file) => {
+    if (!file) return;
+    setImageBusy(true);
+    setImageError('');
+    try {
+      onUpdatePart(part.id, await savePartImageWithThumbnail(file, part.id));
+    } catch (error) {
+      setImageError(String(error));
+    } finally {
+      setImageBusy(false);
+    }
+  };
+
+  const updateImageUrl = async (url) => {
+    if (!url) return;
+    setImageBusy(true);
+    setImageError('');
+    try {
+      onUpdatePart(part.id, await savePartImageUrlWithThumbnail(url, part.id));
+    } catch (error) {
+      setImageError(String(error));
+    } finally {
+      setImageBusy(false);
+    }
+  };
+
   return (
     <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal detail-modal project-part-detail-modal">
         <div className="project-part-header">
-          <div className="project-part-summary">
+          <div
+            className={`project-part-summary drop-target ${imageDropActive ? 'drop-active' : ''}`}
+            onDragOverCapture={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+              setImageDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
+            }}
+            onDropCapture={(event) => {
+              const url = imageUrlFromDrop(event);
+              setImageDropActive(false);
+              const file = firstDroppedFile(event, fileLooksImage);
+              if (file) updateImage(file);
+              else updateImageUrl(url);
+            }}
+          >
             <button
               className="image-expand-button"
               disabled={!part.image}
@@ -5067,6 +5222,8 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
               <span>{categoryLabel(categories, part.categoryId)}</span>
               <h2>{part.name}</h2>
               <p>{part.storageLocation || 'No location set'}</p>
+              {imageBusy && <p>Saving image...</p>}
+              {imageError && <p className="error-text">{imageError}</p>}
             </div>
           </div>
           <div className="row-actions project-part-header-actions">
@@ -5087,7 +5244,24 @@ function PartInfoModal({ part, categories, onClose, onUnlink, onEdit, onUpdatePa
               </p>
             ) : <p>No product URL set.</p>}
           </section>
-          <section className="project-part-panel docs-panel">
+          <section
+            className={`project-part-panel docs-panel drop-target ${documentDropActive ? 'drop-active' : ''}`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
+              setDocumentDropActive(true);
+            }}
+            onDragLeave={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
+            }}
+            onDrop={(event) => {
+              const url = imageUrlFromDrop(event);
+              setDocumentDropActive(false);
+              const file = firstDroppedFile(event);
+              if (file) attachDocument(file);
+              else attachDocumentUrl(url);
+            }}
+          >
             <div className="section-title">
               <h3>Part Documents</h3>
               <label className="file-picker inline-doc-picker">
@@ -6601,8 +6775,16 @@ function Parts({ state, updateState }) {
       : null;
     const categoryId = createdCategory?.id || draft.categoryId || 'cat-unassigned';
     const storageResult = applyStorageSelection(state.storageLocations || [], draft);
-    const image = draft.imageFile ? await savePartImageWithThumbnail(draft.imageFile, partId) : null;
-    const document = draft.documentFile ? await savePickedFile(draft.documentFile, `part-documents/${partId}`) : null;
+    const image = draft.imageFile
+      ? await savePartImageWithThumbnail(draft.imageFile, partId)
+      : draft.imageUrl
+        ? await savePartImageUrlWithThumbnail(draft.imageUrl, partId)
+        : null;
+    const document = draft.documentFile
+      ? await savePickedFile(draft.documentFile, `part-documents/${partId}`)
+      : draft.documentUrl
+        ? await saveImageFromUrl(draft.documentUrl, `part-documents/${partId}`)
+        : null;
     const documentHash = document?.path ? await fileHash(document.path).catch(() => '') : '';
     const part = {
       id: partId,
@@ -6979,7 +7161,9 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
     newContainerName: '',
     newSlotName: '',
     imageFile: null,
+    imageUrl: '',
     documentFile: null,
+    documentUrl: '',
     projectId: '',
     specSummary: '',
     notes: '',
@@ -7018,12 +7202,22 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
 
   const setImageFile = (file) => {
     if (!file) return;
-    setDraft((current) => ({ ...current, imageFile: file }));
+    setDraft((current) => ({ ...current, imageFile: file, imageUrl: '' }));
+  };
+
+  const setImageUrl = (url) => {
+    if (!url) return;
+    setDraft((current) => ({ ...current, imageFile: null, imageUrl: url }));
   };
 
   const setDocumentFile = (file) => {
     if (!file) return;
-    setDraft((current) => ({ ...current, documentFile: file }));
+    setDraft((current) => ({ ...current, documentFile: file, documentUrl: '' }));
+  };
+
+  const setDocumentUrl = (url) => {
+    if (!url) return;
+    setDraft((current) => ({ ...current, documentFile: null, documentUrl: url }));
   };
 
   return (
@@ -7113,13 +7307,16 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
             }}
             onDrop={(event) => {
+              const url = imageUrlFromDrop(event);
               setImageDropActive(false);
-              setImageFile(firstDroppedFile(event, (file) => file.type.startsWith('image/')));
+              const file = firstDroppedFile(event, fileLooksImage);
+              if (file) setImageFile(file);
+              else setImageUrl(url);
             }}
           >
             <label>Image<input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} /></label>
             <div className="new-part-file-actions">
-              <span>{draft.imageFile?.name || 'Drag image here'}</span>
+              <span>{draft.imageFile?.name || (draft.imageUrl ? fileNameFromUrl(draft.imageUrl) : 'Drag image here')}</span>
               <button className="ghost" type="button" disabled={!draft.name.trim()} onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(draft.name)}`)}>Search web for Image</button>
             </div>
           </div>
@@ -7133,12 +7330,15 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
             }}
             onDrop={(event) => {
+              const url = imageUrlFromDrop(event);
               setDocumentDropActive(false);
-              setDocumentFile(firstDroppedFile(event));
+              const file = firstDroppedFile(event);
+              if (file) setDocumentFile(file);
+              else setDocumentUrl(url);
             }}
           >
             <label>Document<input type="file" onChange={(event) => setDocumentFile(event.target.files?.[0])} /></label>
-            <span>{draft.documentFile?.name || 'Drag document here'}</span>
+            <span>{draft.documentFile?.name || (draft.documentUrl ? fileNameFromUrl(draft.documentUrl) : 'Drag document here')}</span>
           </div>
           <label>Add to project
             <select value={draft.projectId} onChange={(event) => setDraft((current) => ({ ...current, projectId: event.target.value }))}>
@@ -7250,6 +7450,50 @@ function PartEditor({ part, categories, projects, storageLocations = [], onUpdat
     }
   };
 
+  const updateImageUrl = async (url) => {
+    if (!url) return;
+    setImageError('');
+    setImageBusy(true);
+    try {
+      onUpdate(await savePartImageUrlWithThumbnail(url, part.id));
+    } catch (error) {
+      setImageError(String(error));
+    } finally {
+      setImageBusy(false);
+    }
+  };
+
+  const attachDocumentUrl = async (url) => {
+    if (!url) return;
+    setDocumentBusy(true);
+    setDocumentError('');
+    try {
+      const stored = await saveImageFromUrl(url, `part-documents/${part.id}`);
+      const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+      onUpdate({
+        documents: [
+          ...part.documents,
+          {
+            id: makeId('doc'),
+            name: stored.name,
+            path: stored.path,
+            sourcePath: '',
+            storageMode: 'copy',
+            size: stored.size,
+            contentHash,
+            type: stored.name.toLowerCase().endsWith('.pdf') ? 'datasheet' : 'document',
+            isPrimary: !part.documents.length,
+            createdAt: new Date().toISOString(),
+          },
+        ],
+      });
+    } catch (error) {
+      setDocumentError(String(error));
+    } finally {
+      setDocumentBusy(false);
+    }
+  };
+
   return (
     <section className="panel detail-panel">
       <div className="section-title">
@@ -7263,16 +7507,20 @@ function PartEditor({ part, categories, projects, storageLocations = [], onUpdat
         <div className="part-editor-main">
           <div
             className={`part-editor-image drop-target ${imageDropActive ? 'drop-active' : ''}`}
-            onDragOver={(event) => {
+            onDragOverCapture={(event) => {
               event.preventDefault();
+              event.dataTransfer.dropEffect = 'copy';
               setImageDropActive(true);
             }}
             onDragLeave={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
             }}
-            onDrop={(event) => {
+            onDropCapture={(event) => {
+              const url = imageUrlFromDrop(event);
               setImageDropActive(false);
-              updateImage(firstDroppedFile(event, (file) => file.type.startsWith('image/') || /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name)));
+              const file = firstDroppedFile(event, fileLooksImage);
+              if (file) updateImage(file);
+              else updateImageUrl(url);
             }}
           >
             <button
@@ -7448,8 +7696,11 @@ function PartEditor({ part, categories, projects, storageLocations = [], onUpdat
               if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
             }}
             onDrop={(event) => {
+              const url = imageUrlFromDrop(event);
               setDocumentDropActive(false);
-              attachDocument(firstDroppedFile(event));
+              const file = firstDroppedFile(event);
+              if (file) attachDocument(file);
+              else attachDocumentUrl(url);
             }}
           >
             <h3>Documents</h3>

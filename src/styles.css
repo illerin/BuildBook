@@ -1070,6 +1070,10 @@ label {
   border-bottom-color: var(--accent);
 }
 
+.tabs-collapse-button {
+  display: none;
+}
+
 .project-title > div:first-child {
   display: grid;
   gap: 8px;
@@ -3893,6 +3897,17 @@ article h3,
     margin-left: -10px;
     margin-right: -10px;
     padding: 0 10px;
+  }
+
+  .tabs-collapse-button {
+    display: inline-flex;
+    width: 100%;
+    justify-content: center;
+    margin: 0 0 8px;
+  }
+
+  .tabs.collapsed {
+    display: none;
   }
 
   .tab {

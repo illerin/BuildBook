@@ -138,11 +138,29 @@ export async function readStoredFile(path) {
 }
 
 export async function scanStorage(referencedPaths) {
+  if (isLanWebClient()) {
+    const response = await fetch('/api/storage-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-BuildBook-Token': lanToken() },
+      body: JSON.stringify({ referencedPaths, deletePaths: [] }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  }
   if (!isTauri()) return { fileCount: 0, totalBytes: 0, orphanCount: 0, orphanBytes: 0 };
   return invoke('scan_storage', { referencedPaths });
 }
 
 export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
+  if (isLanWebClient()) {
+    const response = await fetch('/api/storage-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-BuildBook-Token': lanToken() },
+      body: JSON.stringify({ referencedPaths, deletePaths }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  }
   if (!isTauri()) return { fileCount: 0, totalBytes: 0, orphanCount: 0, orphanBytes: 0, deletedCount: 0, deletedBytes: 0 };
   return invoke('cleanup_orphaned_files', { referencedPaths, deletePaths });
 }
@@ -232,7 +250,15 @@ export async function openExternalUrl(url) {
   }
 
   const opened = window.open(url, '_blank', 'noopener,noreferrer');
-  if (!opened) window.location.href = url;
+  if (!opened) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
 }
 
 export function assetUrl(path) {

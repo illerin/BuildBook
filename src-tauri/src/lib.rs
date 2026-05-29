@@ -211,6 +211,13 @@ struct StorageScan {
     orphans: Vec<OrphanFile>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageScanRequest {
+    referenced_paths: Vec<String>,
+    delete_paths: Option<Vec<String>>,
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ResetStorageResult {
@@ -815,6 +822,24 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
     }
 
+    if path.starts_with("/api/storage-scan") {
+        if !request_is_authorized(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+            return;
+        }
+        if method == "POST" {
+            let body = body_from_request(&mut stream, &buffer, headers);
+            match serde_json::from_slice::<StorageScanRequest>(&body)
+                .map_err(|error| format!("Invalid storage scan request: {error}"))
+                .and_then(|request| scan_storage_inner(app, request.referenced_paths, request.delete_paths.unwrap_or_default()))
+            {
+                Ok(scan) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", serde_json::to_string(&scan).unwrap_or_default().as_bytes()),
+                Err(error) => send_response(&mut stream, "500 Internal Server Error", "text/plain; charset=utf-8", error.as_bytes()),
+            }
+            return;
+        }
+    }
+
     if path.starts_with("/api/reset-storage") {
         if !request_is_authorized(path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
@@ -1193,6 +1218,11 @@ fn scan_storage_inner(app: tauri::AppHandle, referenced_paths: Vec<String>, dele
         if referenced.contains(&canonical) {
             continue;
         }
+        if delete_set.contains(&canonical) && std::fs::remove_file(&file).is_ok() {
+            result.deleted_count += 1;
+            result.deleted_bytes += size;
+            continue;
+        }
         result.orphan_count += 1;
         result.orphan_bytes += size;
         result.orphans.push(OrphanFile {
@@ -1202,10 +1232,6 @@ fn scan_storage_inner(app: tauri::AppHandle, referenced_paths: Vec<String>, dele
             size,
             modified_at: modified_millis(&file),
         });
-        if delete_set.contains(&canonical) && std::fs::remove_file(&file).is_ok() {
-            result.deleted_count += 1;
-            result.deleted_bytes += size;
-        }
     }
     Ok(result)
 }
