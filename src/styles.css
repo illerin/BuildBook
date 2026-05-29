@@ -158,7 +158,7 @@ label {
 
 .access-gate-panel {
   display: grid;
-  width: min(400px, 100%);
+  width: min(620px, 100%);
   gap: 12px;
   padding: 20px;
 }
@@ -170,6 +170,36 @@ label {
 
 .access-gate-panel button {
   justify-self: start;
+}
+
+.startup-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.startup-backups {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.startup-backups h2 {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.startup-backup-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-top: 1px solid var(--border-soft);
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .busy-notice {

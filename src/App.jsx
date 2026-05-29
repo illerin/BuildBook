@@ -23,6 +23,7 @@ import {
   extensionAllowed,
   linkedLocalFile,
   lanServerStatus,
+  listStateBackups,
   listLinkedFolderFiles,
   openExternalUrl,
   openStoredFile,
@@ -34,6 +35,7 @@ import {
   readShellThumbnail,
   readStoredFile,
   resetManagedStorage,
+  restoreStateBackup,
   scanStorage,
   saveBytesFile,
   savePickedFile,
@@ -501,6 +503,64 @@ async function saveImageFromUrl(url, library) {
   return downloadUrlFile(url, library, hasExtension ? originalName : `${originalName}.jpg`);
 }
 
+async function saveRichTextImageSource(source, library) {
+  if (!source) return null;
+  if (typeof source === 'string') return saveImageFromUrl(source, library);
+  return savePickedFile(source, library);
+}
+
+async function externalizeInlineDataImages(html, library) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*src=["'](data:image\/[^"']+)["'][^>]*>/gi)];
+  for (const match of matches) {
+    const tag = match[0];
+    const dataUrl = match[1];
+    const stored = await saveImageFromUrl(dataUrl, library);
+    if (!stored?.path) continue;
+    let nextTag = tag.replace(/src=["'][^"']+["']/, `src="${escapeHtml(assetUrl(stored.path))}"`);
+    nextTag = /data-project-image-path=/.test(nextTag)
+      ? nextTag.replace(/data-project-image-path=["'][^"']*["']/, `data-project-image-path="${escapeHtml(stored.path)}"`)
+      : nextTag.replace(/<img\b/, `<img data-project-image-path="${escapeHtml(stored.path)}"`);
+    nextHtml = nextHtml.replace(tag, nextTag);
+  }
+  return nextHtml;
+}
+
+async function externalizeStateInlineDataImages(state) {
+  let changed = false;
+  const projects = await Promise.all((state.projects || []).map(async (project) => {
+    let nextProject = project;
+    const notes = await externalizeInlineDataImages(project.notes, `project-note-images/${project.id}`);
+    if (notes !== project.notes) {
+      changed = true;
+      nextProject = { ...nextProject, notes };
+    }
+    if (project.instructions) {
+      const intro = await externalizeInlineDataImages(project.instructions.intro, `project-instructions/${project.id}/intro`);
+      const currentSteps = project.instructions.steps || [];
+      const steps = await Promise.all(currentSteps.map(async (step) => {
+        const body = await externalizeInlineDataImages(step.body, `project-instructions/${project.id}/steps`);
+        if (body !== step.body) changed = true;
+        return body !== step.body ? { ...step, body } : step;
+      }));
+      if (intro !== project.instructions.intro || steps.some((step, index) => step !== currentSteps[index])) {
+        changed = true;
+        nextProject = { ...nextProject, instructions: { ...project.instructions, intro, steps } };
+      }
+    }
+    return nextProject;
+  }));
+  return changed ? { ...state, projects } : state;
+}
+
+function stateHasInlineDataImages(state) {
+  return (state.projects || []).some((project) => (
+    /<img\b[^>]*src=["']data:image\//i.test(String(project.notes || ''))
+    || /<img\b[^>]*src=["']data:image\//i.test(String(project.instructions?.intro || ''))
+    || (project.instructions?.steps || []).some((step) => /<img\b[^>]*src=["']data:image\//i.test(String(step.body || '')))
+  ));
+}
+
 function partInfoText(part, categories) {
   return [
     `Name: ${part.name}`,
@@ -827,10 +887,15 @@ async function rewriteNotesForWeb(entries, html, projectId, tableRows = []) {
     const fileName = webUploadName('note', `${projectId}-${index + 1}`, path, await imagePackageExtension(path));
     const added = await addWebUploadEntry(entries, path, 'images', fileName);
     if (!added) continue;
-    tableRows.push({ image_path: fileName, archive_path: `note-images/${fileName}` });
+    const portableId = `note-${index + 1}`;
+    tableRows.push({ id: portableId, image_path: fileName, archive_path: `note-images/${fileName}` });
     const exportPath = await addFileEntry(entries, path, `note-images/${fileName}`);
     const src = `/files/images/${fileName}`;
-    nextHtml = nextHtml.replace(tag, tag.replace(/src="[^"]*"/, `src="${escapeHtml(src)}"`));
+    let nextTag = tag.replace(/src="[^"]*"/, `src="${escapeHtml(src)}"`);
+    nextTag = /data-portable-image-id=/.test(nextTag)
+      ? nextTag.replace(/data-portable-image-id="[^"]*"/, `data-portable-image-id="${portableId}"`)
+      : nextTag.replace(/<img\b/, `<img data-portable-image-id="${portableId}"`);
+    nextHtml = nextHtml.replace(tag, nextTag);
     if (!exportPath) tableRows[tableRows.length - 1].archive_path = '';
   }
   return nextHtml;
@@ -1565,7 +1630,7 @@ async function buildWebProjectPackage(state, project, exportOptions = {}) {
       image_path: projectImageName,
       image_archive_path: projectImageArchive,
     },
-    note_images: noteImages.map((image) => ({ image_path: image.image_path, archive_path: image.archive_path })),
+    note_images: noteImages.map((image, index) => ({ id: image.id || `note-${index + 1}`, image_path: image.image_path, archive_path: image.archive_path })),
     steps: (project.activeSteps || []).map((name, index) => ({ name, order_index: (index + 1) * 10 })),
     checklist: options.overviewChecklist ? (project.checklist || []).map((item, index) => ({
       text: item.text,
@@ -2210,9 +2275,13 @@ export default function App() {
   const [loadError, setLoadError] = useState('');
   const [accessCode, setAccessCode] = useState('');
   const [loadBusy, setLoadBusy] = useState(true);
+  const [stateBackups, setStateBackups] = useState([]);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreError, setRestoreError] = useState('');
   const [saveState, setSaveState] = useState('saved');
   const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
+  const saveChainRef = useRef(Promise.resolve());
   const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
 
   const reloadState = async () => {
@@ -2220,11 +2289,43 @@ export default function App() {
     setLoadError('');
     try {
       setState(await loadAppState());
+      setStateBackups([]);
+      setRestoreError('');
     } catch (error) {
       setState(null);
       setLoadError(String(error?.message || error));
+      listStateBackups().then(setStateBackups).catch(() => setStateBackups([]));
     } finally {
       setLoadBusy(false);
+    }
+  };
+
+  const restoreFromStateBackup = async (fileName) => {
+    setRestoreBusy(true);
+    setRestoreError('');
+    try {
+      await restoreStateBackup(fileName);
+      await reloadState();
+    } catch (error) {
+      setRestoreError(String(error?.message || error));
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
+  const restoreFromFullBackupFile = async (file) => {
+    if (!file) return;
+    setRestoreBusy(true);
+    setRestoreError('');
+    try {
+      const restored = await readFullBackupPackage(file);
+      await saveAppState(restored);
+      setState(restored);
+      setLoadError('');
+    } catch (error) {
+      setRestoreError(String(error?.message || error));
+    } finally {
+      setRestoreBusy(false);
     }
   };
 
@@ -2252,7 +2353,9 @@ export default function App() {
       setSaveState('saving');
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = window.setTimeout(() => {
-        saveAppState(next)
+        saveChainRef.current = saveChainRef.current
+          .catch(() => {})
+          .then(() => saveAppState(next))
           .then(() => {
             if (saveSequenceRef.current === saveSequence) setSaveState('saved');
           })
@@ -2285,6 +2388,15 @@ export default function App() {
     setCloseToTray(state.closeToTray).catch((error) => console.error(error));
   }, [state?.closeToTray]);
 
+  useEffect(() => {
+    if (!state || !stateHasInlineDataImages(state)) return;
+    externalizeStateInlineDataImages(state)
+      .then((nextState) => {
+        if (nextState !== state) updateState(nextState);
+      })
+      .catch((error) => console.error(error));
+  }, [state]);
+
   if (!state) {
     if (!loadError || loadBusy) return <div className="loading">Loading BuildBook...</div>;
     return (
@@ -2309,7 +2421,35 @@ export default function App() {
               </button>
             </>
           )}
-          {!loadError.includes('access code') && <button onClick={reloadState}>Retry</button>}
+          {!loadError.includes('access code') && (
+            <>
+              <div className="startup-recovery-actions">
+                <button onClick={reloadState} disabled={restoreBusy}>Retry</button>
+                <label className={`file-picker header-picker ${restoreBusy ? 'disabled-picker' : ''}`}>
+                  Restore full backup
+                  <input
+                    type="file"
+                    accept=".zip"
+                    disabled={restoreBusy}
+                    onChange={(event) => restoreFromFullBackupFile(event.target.files?.[0])}
+                  />
+                </label>
+              </div>
+              {stateBackups.length > 0 && (
+                <div className="startup-backups">
+                  <h2>Automatic JSON backups</h2>
+                  {stateBackups.slice(0, 8).map((backup) => (
+                    <div className="startup-backup-row" key={backup.fileName}>
+                      <span>{backup.kind} - {new Date(Number(backup.modifiedMs)).toLocaleString()}</span>
+                      <button className="secondary" onClick={() => restoreFromStateBackup(backup.fileName)} disabled={restoreBusy}>Restore</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {restoreBusy && <BusyNotice label="Restoring..." />}
+              {restoreError && <p className="error-text">{restoreError}</p>}
+            </>
+          )}
         </section>
       </div>
     );
@@ -3029,11 +3169,11 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     emitChange();
   };
 
-  const insertImage = async (file) => {
-    if (!file) return;
-    const stored = await onUploadImage(file);
+  const insertImage = async (source) => {
+    if (!source) return;
+    const stored = await onUploadImage(source);
     if (!stored?.path) return;
-    const previewUrl = URL.createObjectURL(file);
+    const previewUrl = typeof source === 'string' ? assetUrl(stored.path) : URL.createObjectURL(source);
     editorRef.current?.focus();
     restoreSelection();
     const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
@@ -3082,6 +3222,14 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
           const file = firstDroppedFile(event, fileLooksImage);
           if (file) await insertImage(file);
         }}
+        onPaste={async (event) => {
+          const files = [...(event.clipboardData?.files || [])];
+          const file = files.find(fileLooksImage);
+          const htmlImage = event.clipboardData?.getData('text/html')?.match(/src=["'](data:image\/[^"']+)["']/i)?.[1];
+          if (!file && !htmlImage) return;
+          event.preventDefault();
+          await insertImage(file || htmlImage);
+        }}
         onClick={(event) => {
           if (event.target?.tagName === 'IMG') selectImage(event.target);
         }}
@@ -3096,10 +3244,13 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         <NoteImageMarkupModal
           source={markupSource}
           onCancel={() => setMarkupSource('')}
-          onSave={(dataUrl) => {
+          onSave={async (dataUrl) => {
             if (selectedImage) {
-              selectedImage.src = dataUrl;
-              selectedImage.removeAttribute('data-project-image-path');
+              const stored = await onUploadImage(dataUrl);
+              if (stored?.path) {
+                selectedImage.src = assetUrl(stored.path);
+                selectedImage.setAttribute('data-project-image-path', stored.path);
+              }
               emitChange();
             }
             setMarkupSource('');
@@ -3405,7 +3556,7 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
 
   const addNoteImage = async (file) => {
     if (!file) return;
-    return savePickedFile(file, `project-note-images/${project.id}`);
+    return saveRichTextImageSource(file, `project-note-images/${project.id}`);
   };
 
   return (
@@ -3804,7 +3955,7 @@ function ProjectInstructionsTab({ project, parts, categories, onUpdate, onCreate
     <div className="instructions-layout">
       <section className="panel instruction-intro-panel">
         <h3>Intro</h3>
-        <RichTextEditor value={instructions.intro || ''} onChange={(intro) => updateInstructions({ intro })} onUploadImage={(file) => savePickedFile(file, `project-instructions/${project.id}/intro`)} placeholder="Introduce the build, tools, safety notes, and final result..." />
+        <RichTextEditor value={instructions.intro || ''} onChange={(intro) => updateInstructions({ intro })} onUploadImage={(file) => saveRichTextImageSource(file, `project-instructions/${project.id}/intro`)} placeholder="Introduce the build, tools, safety notes, and final result..." />
       </section>
       <section className="panel instruction-parts-panel">
         <h3>Parts List</h3>
@@ -3850,7 +4001,7 @@ function ProjectInstructionsTab({ project, parts, categories, onUpdate, onCreate
                   {photos.map((item) => <option key={item.id} value={item.id}>{item.folderName} / {item.name}</option>)}
                 </select>
                 {photo && <div className="instruction-step-photo"><StoredImage path={photo.markupPath || photo.path} alt={photo.name} /></div>}
-                <RichTextEditor value={step.body || ''} onChange={(body) => updateStep(step.id, { body })} onUploadImage={(file) => savePickedFile(file, `project-instructions/${project.id}/steps`)} placeholder="Write this step like an Instructables build step..." />
+                <RichTextEditor value={step.body || ''} onChange={(body) => updateStep(step.id, { body })} onUploadImage={(file) => saveRichTextImageSource(file, `project-instructions/${project.id}/steps`)} placeholder="Write this step like an Instructables build step..." />
               </article>
             );
           })}

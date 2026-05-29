@@ -1,6 +1,6 @@
 {
   "name": "buildbook",
-  "version": "0.3.182",
+  "version": "0.3.186",
   "private": true,
   "type": "module",
   "scripts": {

@@ -287,6 +287,16 @@ export async function setCloseToTray(enabled) {
   await invoke('set_close_to_tray', { enabled: Boolean(enabled) });
 }
 
+export async function listStateBackups() {
+  if (!isTauri()) return [];
+  return invoke('list_state_backups');
+}
+
+export async function restoreStateBackup(fileName) {
+  if (!isTauri()) throw new Error('State restore is only available in the desktop app.');
+  return invoke('restore_state_backup', { fileName });
+}
+
 export function extensionAllowed(fileName, extensions) {
   const rules = extensions
     .split(',')
