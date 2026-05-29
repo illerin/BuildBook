@@ -72,6 +72,16 @@ const FULL_PROJECT_EXPORT_OPTIONS = {
 const GITHUB_REPOSITORY_URL = 'https://github.com/illerin/BuildBook';
 const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBook/releases/latest';
 
+function droppedFileList(event, accept = () => true) {
+  event.preventDefault();
+  event.stopPropagation();
+  return [...(event.dataTransfer?.files || [])].filter(accept);
+}
+
+function firstDroppedFile(event, accept = () => true) {
+  return droppedFileList(event, accept)[0] || null;
+}
+
 function versionNumbers(version = '') {
   return String(version).replace(/^v/i, '').split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
 }
@@ -3009,6 +3019,11 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         suppressContentEditableWarning
         data-placeholder={placeholder}
         onInput={emitChange}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={async (event) => {
+          const file = firstDroppedFile(event, (item) => item.type.startsWith('image/'));
+          if (file) await insertImage(file);
+        }}
         onClick={(event) => {
           if (event.target?.tagName === 'IMG') selectImage(event.target);
         }}
@@ -3207,7 +3222,11 @@ function ProjectWorkspace({
     <div>
       <button className="back-link" onClick={onBack}>Back to projects</button>
       <section className="project-hero">
-        <div className="project-image">
+        <div
+          className={`project-image drop-target ${imageBusy ? 'drop-active' : ''}`}
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => updateImage(firstDroppedFile(event, (file) => file.type.startsWith('image/')))}
+        >
           {imagePreview ? <img src={imagePreview} alt="" /> : project.image ? <StoredImage path={project.image} alt="" /> : <div>Project</div>}
           <label className="file-picker image-picker">
             <input
@@ -3624,7 +3643,13 @@ function ProjectPhotosTab({ project, onUpdate }) {
           </button>
         ))}
       </section>
-      <section className="panel">
+      <section
+        className={`panel photo-upload-panel ${photoBusy ? 'drop-active' : ''}`}
+        onDragOver={(event) => {
+          if (selectedFolder) event.preventDefault();
+        }}
+        onDrop={(event) => uploadPhotos(droppedFileList(event, (file) => file.type.startsWith('image/')))}
+      >
         <div className="section-title">
           <h3>{selectedFolder?.name || 'Photos'}</h3>
           {selectedFolder && (
@@ -7088,9 +7113,8 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
             }}
             onDrop={(event) => {
-              event.preventDefault();
               setImageDropActive(false);
-              setImageFile(event.dataTransfer.files?.[0]);
+              setImageFile(firstDroppedFile(event, (file) => file.type.startsWith('image/')));
             }}
           >
             <label>Image<input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} /></label>
@@ -7109,9 +7133,8 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
             }}
             onDrop={(event) => {
-              event.preventDefault();
               setDocumentDropActive(false);
-              setDocumentFile(event.dataTransfer.files?.[0]);
+              setDocumentFile(firstDroppedFile(event));
             }}
           >
             <label>Document<input type="file" onChange={(event) => setDocumentFile(event.target.files?.[0])} /></label>
@@ -7248,10 +7271,8 @@ function PartEditor({ part, categories, projects, storageLocations = [], onUpdat
               if (!event.currentTarget.contains(event.relatedTarget)) setImageDropActive(false);
             }}
             onDrop={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
               setImageDropActive(false);
-              updateImage(event.dataTransfer.files?.[0]);
+              updateImage(firstDroppedFile(event, (file) => file.type.startsWith('image/') || /\.(avif|bmp|gif|jpe?g|png|svg|webp)$/i.test(file.name)));
             }}
           >
             <button
@@ -7427,10 +7448,8 @@ function PartEditor({ part, categories, projects, storageLocations = [], onUpdat
               if (!event.currentTarget.contains(event.relatedTarget)) setDocumentDropActive(false);
             }}
             onDrop={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
               setDocumentDropActive(false);
-              attachDocument(event.dataTransfer.files?.[0]);
+              attachDocument(firstDroppedFile(event));
             }}
           >
             <h3>Documents</h3>

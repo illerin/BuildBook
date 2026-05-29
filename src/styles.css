@@ -2105,16 +2105,31 @@ article h3,
   gap: 8px;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   min-width: 0;
+}
+
+.new-part-file-actions button {
+  flex: 0 0 auto;
 }
 
 .new-part-file-actions span,
 .new-part-drop-field > span {
-  min-width: 0;
+  min-width: 140px;
+  flex: 1 1 180px;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.photo-upload-panel {
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.photo-upload-panel.drop-active {
+  border-color: var(--accent);
+  background: var(--field);
 }
 
 .modal.pdf-reader-modal,
