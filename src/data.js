@@ -1,4 +1,4 @@
-export const APP_VERSION = '0.3.192';
+export const APP_VERSION = '0.3.193';
 
 export const STATUSES = ['active', 'paused', 'waiting', 'completed', 'archived'];
 

@@ -875,7 +875,10 @@ fn body_from_request(stream: &mut TcpStream, initial: &[u8], headers: &str) -> R
         let mut buffer = vec![0; (length - body.len()).min(64 * 1024)];
         match stream.read(&mut buffer) {
             Ok(0) => return Err(format!("Request body ended early: received {} of {length} bytes.", body.len())),
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            },
             Err(error) => return Err(format!("Could not read request body: {error}")),
             Ok(count) => body.extend_from_slice(&buffer[..count]),
         }
@@ -924,6 +927,10 @@ fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result
             match stream.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    continue;
+                },
                 Err(error) => return Err(format!("Could not read request body: {error}")),
             }
         }
@@ -1127,7 +1134,11 @@ fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_tok
     let thread = std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((stream, _)) => serve_lan_request(app_thread.clone(), stream),
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
+                    serve_lan_request(app_thread.clone(), stream);
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(std::time::Duration::from_millis(80)),
                 Err(_) => break,
             }
