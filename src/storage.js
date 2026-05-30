@@ -52,7 +52,8 @@ export async function loadAppState() {
 
 export async function saveAppState(state) {
   const normalized = normalizeState(state);
-  const contents = JSON.stringify(normalized, null, 2);
+  const pretty = isTauri() || !isLanWebClient();
+  const contents = JSON.stringify(normalized, null, pretty ? 2 : 0);
 
   if (isTauri()) {
     await invoke('write_app_state', { contents });

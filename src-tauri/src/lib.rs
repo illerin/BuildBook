@@ -861,23 +861,27 @@ fn dist_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
         .find(|path| path.join("index.html").is_file())
 }
 
-fn body_from_request(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Vec<u8> {
-    let length = headers
-        .lines()
-        .find_map(|line| line.strip_prefix("Content-Length:").or_else(|| line.strip_prefix("content-length:")))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+fn body_from_request(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result<Vec<u8>, String> {
+    let length_header = header_value(headers, "content-length");
+    let length = length_header
+        .is_empty()
+        .then(|| Err("Request is missing Content-Length.".to_string()))
+        .unwrap_or_else(|| Ok(length_header))?
+        .parse::<usize>()
+        .map_err(|_| "Request has an invalid Content-Length.".to_string())?;
     let header_end = initial.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4).unwrap_or(initial.len());
     let mut body = initial.get(header_end..).unwrap_or(&[]).to_vec();
     while body.len() < length {
-        let mut buffer = vec![0; length - body.len()];
+        let mut buffer = vec![0; (length - body.len()).min(64 * 1024)];
         match stream.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => return Err(format!("Request body ended early: received {} of {length} bytes.", body.len())),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("Could not read request body: {error}")),
             Ok(count) => body.extend_from_slice(&buffer[..count]),
         }
     }
     body.truncate(length);
-    body
+    Ok(body)
 }
 
 fn parse_chunked_body(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -908,8 +912,7 @@ fn parse_chunked_body(bytes: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result<Vec<u8>, String> {
-    if headers.lines().any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:")
-        && line.to_ascii_lowercase().contains("chunked"))
+    if header_value(headers, "transfer-encoding").to_ascii_lowercase().contains("chunked")
     {
         let header_end = initial.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4).unwrap_or(initial.len());
         let mut bytes = initial.get(header_end..).unwrap_or(&[]).to_vec();
@@ -926,7 +929,7 @@ fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result
         }
         return parse_chunked_body(&bytes);
     }
-    Ok(body_from_request(stream, initial, headers))
+    body_from_request(stream, initial, headers)
 }
 
 fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
