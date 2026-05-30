@@ -73,6 +73,7 @@ const FULL_PROJECT_EXPORT_OPTIONS = {
 
 const GITHUB_REPOSITORY_URL = 'https://github.com/illerin/BuildBook';
 const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBook/releases/latest';
+const GITHUB_RELEASES_API = 'https://api.github.com/repos/illerin/BuildBook/releases?per_page=30';
 
 function droppedFileList(event, accept = () => true) {
   event.preventDefault();
@@ -138,8 +139,24 @@ function imageUrlFromDrop(event) {
   return '';
 }
 
+function releaseVersion(version = '') {
+  return String(version).replace(/^test-v/i, '').replace(/^v/i, '');
+}
+
+function appReleaseChannel(version = APP_VERSION) {
+  return /-test(?:\.|$)/i.test(version) ? 'test' : 'live';
+}
+
 function versionNumbers(version = '') {
-  return String(version).replace(/^v/i, '').split(/[.-]/).slice(0, 3).map((part) => Number(part) || 0);
+  const cleaned = releaseVersion(version);
+  const match = cleaned.match(/^(\d+)\.(\d+)\.(\d+)(?:-test\.(\d+))?/i);
+  if (!match) return [0, 0, 0, -1];
+  return [
+    Number(match[1]) || 0,
+    Number(match[2]) || 0,
+    Number(match[3]) || 0,
+    match[4] === undefined ? 9999 : Number(match[4]) || 0,
+  ];
 }
 
 function isNewerVersion(candidate, current) {
@@ -147,6 +164,19 @@ function isNewerVersion(candidate, current) {
   const installed = versionNumbers(current);
   return next.some((number, index) => number > (installed[index] || 0)
     && next.slice(0, index).every((previous, previousIndex) => previous === (installed[previousIndex] || 0)));
+}
+
+async function fetchReleaseSummary() {
+  const response = await fetch(GITHUB_RELEASES_API, {
+    headers: { Accept: 'application/vnd.github+json' },
+  });
+  if (response.status === 404) return { live: null, test: null };
+  if (!response.ok) throw new Error(`Could not check releases. GitHub returned ${response.status}.`);
+  const releases = await response.json();
+  return {
+    live: releases.find((release) => /^v\d+\.\d+\.\d+$/.test(release.tag_name || '') && !release.prerelease) || null,
+    test: releases.find((release) => /^test-v\d+\.\d+\.\d+-test\.\d+$/.test(release.tag_name || '') && release.prerelease) || null,
+  };
 }
 
 const THEME_FIELDS = [
@@ -8526,32 +8556,46 @@ function Settings({ state, updateState }) {
     setAvailableUpdate(null);
     setUpdateProgress('');
     try {
+      const channel = appReleaseChannel();
+      let releaseSummary = null;
+      try {
+        releaseSummary = await fetchReleaseSummary();
+      } catch {
+        releaseSummary = null;
+      }
+      const latestLive = releaseSummary?.live?.tag_name || '';
+      const liveReference = latestLive ? ` Latest live: ${latestLive}.` : '';
       if (window.__TAURI_INTERNALS__) {
         const update = await checkForTauriUpdate();
         if (update) {
           setAvailableUpdate(update);
           setAvailableReleaseUrl(GITHUB_REPOSITORY_URL);
-          setUpdateNotice(`Update available: v${update.version}. Installed: v${APP_VERSION}.`);
+          setUpdateNotice(`${channel === 'test' ? 'Test update' : 'Update'} available: v${update.version}. Installed: v${APP_VERSION}.${liveReference}`);
         } else {
-          setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
+          setUpdateNotice(`BuildBook ${channel} channel is up to date. Installed: v${APP_VERSION}.${liveReference}`);
         }
         return;
       }
-      const response = await fetch(GITHUB_LATEST_RELEASE_API, {
-        headers: { Accept: 'application/vnd.github+json' },
-      });
-      if (response.status === 404) {
+      let release = channel === 'test' ? releaseSummary?.test : releaseSummary?.live;
+      if (!release && channel === 'live') {
+        const response = await fetch(GITHUB_LATEST_RELEASE_API, {
+          headers: { Accept: 'application/vnd.github+json' },
+        });
+        if (response.status !== 404) {
+          if (!response.ok) throw new Error(`Could not check updates. GitHub returned ${response.status}.`);
+          release = await response.json();
+        }
+      }
+      if (!release) {
         setUpdateNotice('No published BuildBook releases found yet.');
         return;
       }
-      if (!response.ok) throw new Error(`Could not check updates. GitHub returned ${response.status}.`);
-      const release = await response.json();
       const latestVersion = release.tag_name || release.name || '';
       if (isNewerVersion(latestVersion, APP_VERSION)) {
-        setUpdateNotice(`Update available: ${latestVersion}. Installed: v${APP_VERSION}.`);
+        setUpdateNotice(`${channel === 'test' ? 'Test update' : 'Update'} available: ${latestVersion}. Installed: v${APP_VERSION}.${liveReference}`);
         setAvailableReleaseUrl(GITHUB_REPOSITORY_URL);
       } else {
-        setUpdateNotice(`BuildBook is up to date. Installed: v${APP_VERSION}.`);
+        setUpdateNotice(`BuildBook ${channel} channel is up to date. Installed: v${APP_VERSION}.${liveReference}`);
       }
     } catch (error) {
       setUpdateError(String(error));

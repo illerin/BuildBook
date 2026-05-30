@@ -36,8 +36,8 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json | ConvertFrom-Json).version
-          if ($version -notmatch '^\d+\.\d+\.\d+\.\d{2}$') {
-            throw "Test release version must use 4 parts. Found $version."
+          if ($version -notmatch '^\d+\.\d+\.\d+-test\.\d{2}$') {
+            throw "Test release version must use SemVer prerelease format. Found $version."
           }
           if ("${{ github.ref_name }}" -ne "test-v$version") {
             throw "Release tag ${{ github.ref_name }} does not match app version test-v$version."
@@ -55,3 +55,17 @@ jobs:
           releaseDraft: false
           prerelease: true
           args: --bundles nsis
+
+      - name: Update TEST updater metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $stableTag = 'test-latest'
+          gh release view $stableTag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $stableTag --target "${{ github.sha }}" --title 'BuildBook test updater metadata' --notes 'Stable metadata endpoint for the latest BuildBook test prerelease.' --prerelease
+          }
+          New-Item -ItemType Directory -Force -Path updater-metadata | Out-Null
+          gh release download "${{ github.ref_name }}" --pattern latest.json --dir updater-metadata --clobber
+          gh release upload $stableTag updater-metadata/latest.json --clobber

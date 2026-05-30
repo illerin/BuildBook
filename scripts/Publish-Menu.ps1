@@ -3,6 +3,8 @@ Set-StrictMode -Version Latest
 
 $MainBranch = 'main'
 $TestBranch = 'test'
+$LiveUpdaterEndpoint = 'https://github.com/illerin/BuildBook/releases/latest/download/latest.json'
+$TestUpdaterEndpoint = 'https://github.com/illerin/BuildBook/releases/download/test-latest/latest.json'
 
 $VersionFiles = @(
     'package.json',
@@ -80,8 +82,20 @@ function Get-AppVersion {
     return (Read-JsonFile 'package.json').version
 }
 
+function Get-VersionChannel {
+    param([string]$Version)
+
+    if ($Version -match '-test(?:\.|$)') {
+        return 'test'
+    }
+    return 'live'
+}
+
 function Set-AppVersion {
     param([string]$Version)
+
+    $channel = Get-VersionChannel $Version
+    $updaterEndpoint = if ($channel -eq 'test') { $TestUpdaterEndpoint } else { $LiveUpdaterEndpoint }
 
     if (Test-Path -LiteralPath 'package.json') {
         $json = Read-JsonFile 'package.json'
@@ -102,6 +116,9 @@ function Set-AppVersion {
         if (Test-Path -LiteralPath $path) {
             $json = Read-JsonFile $path
             $json.version = $Version
+            if ($json.plugins -and $json.plugins.updater) {
+                $json.plugins.updater.endpoints = @($updaterEndpoint)
+            }
             Write-JsonFile $path $json
         }
     }
@@ -131,13 +148,14 @@ function Set-AppVersion {
 function Increment-TestVersion {
     param([string]$Version)
 
-    if ($Version -match '^(\d+)\.(\d+)\.(\d+)\.(\d+)$') {
+    if ($Version -match '^(\d+)\.(\d+)\.(\d+)-test\.(\d+)$') {
         $test = [int]$matches[4] + 1
-        return "$($matches[1]).$($matches[2]).$($matches[3]).$($test.ToString('00'))"
+        return "$($matches[1]).$($matches[2]).$($matches[3])-test.$($test.ToString('00'))"
     }
 
     if ($Version -match '^(\d+)\.(\d+)\.(\d+)$') {
-        return "$Version.00"
+        $build = [int]$matches[3] + 1
+        return "$($matches[1]).$($matches[2]).$build-test.00"
     }
 
     throw "Invalid test version format: $Version"
@@ -146,7 +164,7 @@ function Increment-TestVersion {
 function Increment-LiveVersion {
     param([string]$Version)
 
-    if ($Version -match '^(\d+)\.(\d+)\.(\d+)(?:\.\d+)?$') {
+    if ($Version -match '^(\d+)\.(\d+)\.(\d+)(?:-test\.\d+)?$') {
         $build = [int]$matches[3] + 1
         return "$($matches[1]).$($matches[2]).$build"
     }
@@ -218,7 +236,8 @@ function Publish-Live {
     Invoke-Git checkout $TestBranch
     Invoke-Git merge $MainBranch
 
-    $newTestVersion = "$newLiveVersion.00"
+    $nextTestBuild = Increment-LiveVersion $newLiveVersion
+    $newTestVersion = "$nextTestBuild-test.00"
     Set-AppVersion $newTestVersion
     Invoke-Git add -- @VersionFiles
 
