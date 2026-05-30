@@ -2163,6 +2163,11 @@ article h3,
   white-space: nowrap;
 }
 
+.new-part-drop-field .inline-error {
+  margin: 0;
+  font-size: 12px;
+}
+
 .photo-upload-panel {
   transition: border-color 120ms ease, background 120ms ease;
 }

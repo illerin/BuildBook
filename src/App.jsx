@@ -526,20 +526,40 @@ async function externalizeInlineDataImages(html, library) {
   return nextHtml;
 }
 
+function repairStoredImageSources(html) {
+  let nextHtml = String(html || '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-path=["']([^"']+)["'][^>]*>/gi)];
+  for (const match of matches) {
+    const tag = match[0];
+    const path = match[1];
+    const src = tag.match(/\ssrc=["']([^"']*)["']/i)?.[1] || '';
+    if (src && !src.startsWith('blob:')) continue;
+    const nextTag = /\ssrc=["'][^"']*["']/i.test(tag)
+      ? tag.replace(/\ssrc=["'][^"']*["']/i, ` src="${escapeHtml(assetUrl(path))}"`)
+      : tag.replace(/<img\b/, `<img src="${escapeHtml(assetUrl(path))}"`);
+    nextHtml = nextHtml.replace(tag, nextTag);
+  }
+  return nextHtml;
+}
+
+async function normalizeRichTextImages(html, library) {
+  return repairStoredImageSources(await externalizeInlineDataImages(html, library));
+}
+
 async function externalizeStateInlineDataImages(state) {
   let changed = false;
   const projects = await Promise.all((state.projects || []).map(async (project) => {
     let nextProject = project;
-    const notes = await externalizeInlineDataImages(project.notes, `project-note-images/${project.id}`);
+    const notes = await normalizeRichTextImages(project.notes, `project-note-images/${project.id}`);
     if (notes !== project.notes) {
       changed = true;
       nextProject = { ...nextProject, notes };
     }
     if (project.instructions) {
-      const intro = await externalizeInlineDataImages(project.instructions.intro, `project-instructions/${project.id}/intro`);
+      const intro = await normalizeRichTextImages(project.instructions.intro, `project-instructions/${project.id}/intro`);
       const currentSteps = project.instructions.steps || [];
       const steps = await Promise.all(currentSteps.map(async (step) => {
-        const body = await externalizeInlineDataImages(step.body, `project-instructions/${project.id}/steps`);
+        const body = await normalizeRichTextImages(step.body, `project-instructions/${project.id}/steps`);
         if (body !== step.body) changed = true;
         return body !== step.body ? { ...step, body } : step;
       }));
@@ -554,10 +574,15 @@ async function externalizeStateInlineDataImages(state) {
 }
 
 function stateHasInlineDataImages(state) {
+  const needsRepair = (html) => {
+    const text = String(html || '');
+    return /<img\b[^>]*src=["']data:image\//i.test(text)
+      || (/<img\b[^>]*src=["']blob:/i.test(text) && /data-project-image-path=/i.test(text));
+  };
   return (state.projects || []).some((project) => (
-    /<img\b[^>]*src=["']data:image\//i.test(String(project.notes || ''))
-    || /<img\b[^>]*src=["']data:image\//i.test(String(project.instructions?.intro || ''))
-    || (project.instructions?.steps || []).some((step) => /<img\b[^>]*src=["']data:image\//i.test(String(step.body || '')))
+    needsRepair(project.notes)
+    || needsRepair(project.instructions?.intro)
+    || (project.instructions?.steps || []).some((step) => needsRepair(step.body))
   ));
 }
 
@@ -3231,7 +3256,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     if (!source) return;
     const stored = await onUploadImage(source);
     if (!stored?.path) return;
-    const previewUrl = typeof source === 'string' ? assetUrl(stored.path) : URL.createObjectURL(source);
+    const previewUrl = assetUrl(stored.path);
     editorRef.current?.focus();
     restoreSelection();
     const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
@@ -7388,6 +7413,8 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
   const [documentDropActive, setDocumentDropActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [imageError, setImageError] = useState('');
+  const [documentError, setDocumentError] = useState('');
   const categoryOptions = useMemo(() => flattenCategoryOptions(categories), [categories]);
 
   const updateName = (name) => {
@@ -7401,10 +7428,19 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
   const save = async () => {
     setBusy(true);
     setError('');
+    setImageError('');
+    setDocumentError('');
     try {
       await onCreate(draft);
     } catch (err) {
-      setError(String(err));
+      const message = String(err?.message || err);
+      if (draft.imageUrl && /image|download|remote|fetch|curl|url/i.test(message)) {
+        setImageError(message);
+      } else if (draft.documentUrl && /document|download|remote|fetch|curl|url/i.test(message)) {
+        setDocumentError(message);
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(false);
     }
@@ -7412,22 +7448,36 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
 
   const setImageFile = (file) => {
     if (!file) return;
+    setImageError('');
     setDraft((current) => ({ ...current, imageFile: file, imageUrl: '' }));
   };
 
   const setImageUrl = (url) => {
     if (!url) return;
+    setImageError('');
     setDraft((current) => ({ ...current, imageFile: null, imageUrl: url }));
+  };
+
+  const clearImageSource = () => {
+    setImageError('');
+    setDraft((current) => ({ ...current, imageFile: null, imageUrl: '' }));
   };
 
   const setDocumentFile = (file) => {
     if (!file) return;
+    setDocumentError('');
     setDraft((current) => ({ ...current, documentFile: file, documentUrl: '' }));
   };
 
   const setDocumentUrl = (url) => {
     if (!url) return;
+    setDocumentError('');
     setDraft((current) => ({ ...current, documentFile: null, documentUrl: url }));
+  };
+
+  const clearDocumentSource = () => {
+    setDocumentError('');
+    setDraft((current) => ({ ...current, documentFile: null, documentUrl: '' }));
   };
 
   return (
@@ -7527,8 +7577,10 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
             <label>Image<input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} /></label>
             <div className="new-part-file-actions">
               <span>{draft.imageFile?.name || (draft.imageUrl ? fileNameFromUrl(draft.imageUrl) : 'Drag image here')}</span>
+              {(draft.imageFile || draft.imageUrl) && <button className="ghost" type="button" onClick={clearImageSource}>Remove</button>}
               <button className="ghost" type="button" disabled={!draft.name.trim()} onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(draft.name)}`)}>Search web for Image</button>
             </div>
+            {imageError && <p className="error-text inline-error">{imageError}</p>}
           </div>
           <div
             className={`new-part-drop-field ${documentDropActive ? 'drop-active' : ''}`}
@@ -7548,7 +7600,11 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
             }}
           >
             <label>Document<input type="file" onChange={(event) => setDocumentFile(event.target.files?.[0])} /></label>
-            <span>{draft.documentFile?.name || (draft.documentUrl ? fileNameFromUrl(draft.documentUrl) : 'Drag document here')}</span>
+            <div className="new-part-file-actions">
+              <span>{draft.documentFile?.name || (draft.documentUrl ? fileNameFromUrl(draft.documentUrl) : 'Drag document here')}</span>
+              {(draft.documentFile || draft.documentUrl) && <button className="ghost" type="button" onClick={clearDocumentSource}>Remove</button>}
+            </div>
+            {documentError && <p className="error-text inline-error">{documentError}</p>}
           </div>
           <label>Add to project
             <select value={draft.projectId} onChange={(event) => setDraft((current) => ({ ...current, projectId: event.target.value }))}>

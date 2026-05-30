@@ -1231,7 +1231,20 @@ fn download_url_to_file(
     let mut command = {
         use std::os::windows::process::CommandExt;
         let mut cmd = std::process::Command::new("curl.exe");
-        cmd.args(["-L", "--fail", "--silent", "--show-error"])
+        cmd.args([
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "60",
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+            "--referer",
+            "https://www.google.com/",
+        ])
             .arg(&url)
             .args(["--output"])
             .arg(&target);
@@ -1242,20 +1255,38 @@ fn download_url_to_file(
     #[cfg(not(target_os = "windows"))]
     let mut command = {
         let mut cmd = std::process::Command::new("curl");
-        cmd.args(["-L", "--fail", "--silent", "--show-error"])
+        cmd.args([
+            "-L",
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "60",
+            "--user-agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
+            "--referer",
+            "https://www.google.com/",
+        ])
             .arg(&url)
             .args(["--output"])
             .arg(&target);
         cmd
     };
 
-    let status = command
-        .status()
+    let output = command
+        .output()
         .map_err(|error| format!("Could not download file: {error}"))?;
 
-    if !status.success() {
+    if !output.status.success() {
         let _ = std::fs::remove_file(&target);
-        return Err("Could not download remote file.".to_string());
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if details.is_empty() {
+            "Could not download remote file.".to_string()
+        } else {
+            format!("Could not download remote file: {details}")
+        });
     }
 
     let size = target

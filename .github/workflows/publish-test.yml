@@ -1,15 +1,15 @@
-name: Publish Windows Release
+name: Publish Windows Test Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'test-v*'
 
 permissions:
   contents: write
 
 jobs:
-  publish-windows:
+  publish-windows-test:
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -36,19 +36,22 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json | ConvertFrom-Json).version
-          if ("${{ github.ref_name }}" -ne "v$version") {
-            throw "Release tag ${{ github.ref_name }} does not match app version v$version."
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d{2}$') {
+            throw "Test release version must use 4 parts. Found $version."
+          }
+          if ("${{ github.ref_name }}" -ne "test-v$version") {
+            throw "Release tag ${{ github.ref_name }} does not match app version test-v$version."
           }
 
-      - name: Build and publish Windows installer
+      - name: Build and publish Windows TEST installer
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
-          tagName: v__VERSION__
-          releaseName: 'BuildBook v__VERSION__'
-          releaseBody: 'Download the Windows setup executable below to install BuildBook.'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'BuildBook ${{ github.ref_name }}'
+          releaseBody: 'Test Windows installer for BuildBook.'
           releaseDraft: false
-          prerelease: false
+          prerelease: true
           args: --bundles nsis
