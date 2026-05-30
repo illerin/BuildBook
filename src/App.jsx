@@ -43,7 +43,7 @@ import {
   startLanServer,
   stopLanServer,
 } from './desktop';
-import { loadAppState, saveAppState } from './storage';
+import { isRemoteBuildBookClient, loadAppState, saveAppState } from './storage';
 import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
@@ -2283,13 +2283,20 @@ export default function App() {
   const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
   const saveChainRef = useRef(Promise.resolve());
+  const stateRef = useRef(null);
+  const saveStateRef = useRef('saved');
+  const lastPersistedStateRef = useRef('');
   const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
+
+  const persistedStateText = (value) => JSON.stringify(normalizeState(value), null, 2);
 
   const reloadState = async () => {
     setLoadBusy(true);
     setLoadError('');
     try {
-      setState(await loadAppState());
+      const loaded = await loadAppState();
+      lastPersistedStateRef.current = persistedStateText(loaded);
+      setState(loaded);
       setStateBackups([]);
       setRestoreError('');
     } catch (error) {
@@ -2321,6 +2328,7 @@ export default function App() {
     try {
       const restored = await readFullBackupPackage(file);
       await saveAppState(restored);
+      lastPersistedStateRef.current = persistedStateText(restored);
       setState(restored);
       setLoadError('');
     } catch (error) {
@@ -2333,6 +2341,14 @@ export default function App() {
   useEffect(() => {
     reloadState();
   }, []);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
+  useEffect(() => {
+    saveStateRef.current = saveState;
+  }, [saveState]);
 
   useEffect(() => {
     if (!state) return;
@@ -2351,6 +2367,7 @@ export default function App() {
       const next = normalizeState(typeof recipe === 'function' ? recipe(current) : recipe);
       const saveSequence = saveSequenceRef.current + 1;
       saveSequenceRef.current = saveSequence;
+      saveStateRef.current = 'saving';
       setSaveState('saving');
       if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
       saveTimerRef.current = window.setTimeout(() => {
@@ -2358,11 +2375,19 @@ export default function App() {
           .catch(() => {})
           .then(() => saveAppState(next))
           .then(() => {
-            if (saveSequenceRef.current === saveSequence) setSaveState('saved');
+            if (saveSequenceRef.current === saveSequence) {
+              lastPersistedStateRef.current = persistedStateText(next);
+              saveStateRef.current = 'saved';
+              setSaveState('saved');
+            }
           })
           .catch((error) => {
             console.error(error);
-            if (saveSequenceRef.current === saveSequence) setSaveState('error');
+            if (saveSequenceRef.current === saveSequence) {
+              const message = `error: ${String(error?.message || error).slice(0, 160)}`;
+              saveStateRef.current = message;
+              setSaveState(message);
+            }
           });
       }, 450);
       return next;
@@ -2388,6 +2413,24 @@ export default function App() {
     if (!state) return;
     setCloseToTray(state.closeToTray).catch((error) => console.error(error));
   }, [state?.closeToTray]);
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__ && !isRemoteBuildBookClient()) return undefined;
+    const timer = window.setInterval(async () => {
+      if (!stateRef.current || saveStateRef.current === 'saving') return;
+      try {
+        const loaded = await loadAppState();
+        const loadedText = persistedStateText(loaded);
+        if (loadedText === lastPersistedStateRef.current) return;
+        lastPersistedStateRef.current = loadedText;
+        setState(loaded);
+        setSaveState('saved');
+      } catch (error) {
+        console.error(error);
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!state || !stateHasInlineDataImages(state)) return;
@@ -2501,7 +2544,7 @@ export default function App() {
             {label}
           </button>
         ))}
-        <div className={`save-state ${saveState}`}>{saveState}</div>
+        <div className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>{saveState}</div>
       </aside>
       <main className="workspace">
         {tab === 'projects' && <Projects state={state} updateState={updateState} />}
@@ -3146,6 +3189,20 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     onChange(editorRef.current?.innerHTML || '');
   };
 
+  const focusEmptyEditor = () => {
+    const editor = editorRef.current;
+    if (!editor || editor.textContent.trim() || editor.querySelector('img')) return;
+    editor.innerHTML = '<p><br></p>';
+    const paragraph = editor.querySelector('p') || editor;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(paragraph, 0);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    rememberSelection();
+  };
+
   const selectImage = (image) => {
     editorRef.current?.querySelectorAll('img.rich-image-selected').forEach((item) => item.classList.remove('rich-image-selected'));
     image.classList.add('rich-image-selected');
@@ -3217,6 +3274,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         contentEditable
         suppressContentEditableWarning
         data-placeholder={placeholder}
+        onFocus={focusEmptyEditor}
         onInput={emitChange}
         onDragOver={(event) => event.preventDefault()}
         onDrop={async (event) => {

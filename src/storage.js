@@ -13,6 +13,10 @@ function isLanWebClient() {
   return !isTauri() && window.location.protocol.startsWith('http') && !isViteDev;
 }
 
+export function isRemoteBuildBookClient() {
+  return isLanWebClient();
+}
+
 export function lanToken() {
   const access = new URLSearchParams(window.location.search).get('access');
   if (access) {

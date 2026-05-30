@@ -1214,7 +1214,13 @@ article h3,
 
 .rich-area:empty::before {
   content: attr(data-placeholder);
+  display: block;
   color: var(--text-muted);
+  pointer-events: none;
+}
+
+.rich-area:empty:focus::before {
+  content: '';
 }
 
 .rich-area img {

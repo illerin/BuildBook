@@ -880,6 +880,55 @@ fn body_from_request(stream: &mut TcpStream, initial: &[u8], headers: &str) -> V
     body
 }
 
+fn parse_chunked_body(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut body = Vec::new();
+    let mut index = 0;
+    loop {
+        let Some(line_end) = bytes[index..].windows(2).position(|window| window == b"\r\n").map(|offset| index + offset) else {
+            return Err("Chunked request body is incomplete.".to_string());
+        };
+        let size_text = String::from_utf8_lossy(&bytes[index..line_end]);
+        let size_hex = size_text.split(';').next().unwrap_or("").trim();
+        let size = usize::from_str_radix(size_hex, 16)
+            .map_err(|_| "Chunked request body has an invalid chunk size.".to_string())?;
+        index = line_end + 2;
+        if size == 0 {
+            return Ok(body);
+        }
+        if index + size + 2 > bytes.len() {
+            return Err("Chunked request body is truncated.".to_string());
+        }
+        body.extend_from_slice(&bytes[index..index + size]);
+        index += size;
+        if bytes.get(index..index + 2) != Some(b"\r\n") {
+            return Err("Chunked request body has an invalid separator.".to_string());
+        }
+        index += 2;
+    }
+}
+
+fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result<Vec<u8>, String> {
+    if headers.lines().any(|line| line.to_ascii_lowercase().starts_with("transfer-encoding:")
+        && line.to_ascii_lowercase().contains("chunked"))
+    {
+        let header_end = initial.windows(4).position(|window| window == b"\r\n\r\n").map(|index| index + 4).unwrap_or(initial.len());
+        let mut bytes = initial.get(header_end..).unwrap_or(&[]).to_vec();
+        let mut buffer = vec![0; 16 * 1024];
+        loop {
+            if parse_chunked_body(&bytes).is_ok() {
+                break;
+            }
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(error) => return Err(format!("Could not read request body: {error}")),
+            }
+        }
+        return parse_chunked_body(&bytes);
+    }
+    Ok(body_from_request(stream, initial, headers))
+}
+
 fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     let mut buffer = vec![0; 64 * 1024];
     let count = match stream.read(&mut buffer) {
@@ -913,8 +962,22 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
             return;
         }
         if method == "POST" {
-            let body = body_from_request(&mut stream, &buffer, headers);
-            match write_app_state(app, String::from_utf8_lossy(&body).to_string()) {
+            let body = match request_body(&mut stream, &buffer, headers) {
+                Ok(body) => body,
+                Err(error) => {
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", error.as_bytes());
+                    return;
+                }
+            };
+            let contents = match String::from_utf8(body) {
+                Ok(contents) => contents,
+                Err(error) => {
+                    let message = format!("App state request was not valid UTF-8: {error}");
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", message.as_bytes());
+                    return;
+                }
+            };
+            match write_app_state(app, contents) {
                 Ok(()) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}"),
                 Err(error) => send_response(&mut stream, "500 Internal Server Error", "text/plain; charset=utf-8", error.as_bytes()),
             }
@@ -936,7 +999,13 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
             return;
         }
         if method == "POST" {
-            let body = body_from_request(&mut stream, &buffer, headers);
+            let body = match request_body(&mut stream, &buffer, headers) {
+                Ok(body) => body,
+                Err(error) => {
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", error.as_bytes());
+                    return;
+                }
+            };
             let name = query_value(path, "name");
             let library = query_value(path, "library");
             match save_uploaded_file(app, name, library, body) {
@@ -946,7 +1015,13 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
             return;
         }
         if method == "PUT" {
-            let body = body_from_request(&mut stream, &buffer, headers);
+            let body = match request_body(&mut stream, &buffer, headers) {
+                Ok(body) => body,
+                Err(error) => {
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", error.as_bytes());
+                    return;
+                }
+            };
             let file_path = query_value(path, "path");
             match overwrite_file_bytes(app, file_path, body) {
                 Ok(stored) => send_response(&mut stream, "200 OK", "application/json; charset=utf-8", serde_json::to_string(&stored).unwrap_or_default().as_bytes()),
@@ -976,7 +1051,13 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
             return;
         }
         if method == "POST" {
-            let body = body_from_request(&mut stream, &buffer, headers);
+            let body = match request_body(&mut stream, &buffer, headers) {
+                Ok(body) => body,
+                Err(error) => {
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", error.as_bytes());
+                    return;
+                }
+            };
             match serde_json::from_slice::<StorageScanRequest>(&body)
                 .map_err(|error| format!("Invalid storage scan request: {error}"))
                 .and_then(|request| scan_storage_inner(app, request.referenced_paths, request.delete_paths.unwrap_or_default()))
