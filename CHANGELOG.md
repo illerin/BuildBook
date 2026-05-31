@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.197-test.9 - 2026-05-31
+
+Changes since test-v0.3.197-test.7.
+
+### Changes
+
+- Made it so password could not be changed from the webserver
+- Limit web password changes to desktop
+
 ## 0.3.197-test.7 - 2026-05-31
 
 Changes since test-v0.3.197-test.6.

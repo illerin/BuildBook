@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "buildbook"
-version = "0.3.197-test.8"
+version = "0.3.197-test.9"
 dependencies = [
  "pbkdf2",
  "serde",

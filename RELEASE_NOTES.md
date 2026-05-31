@@ -1,11 +1,9 @@
-# BuildBook 0.3.197-test.7 Test Release
+# BuildBook 0.3.197-test.9 Test Release
 
-Changes since test-v0.3.197-test.6.
+Changes since test-v0.3.197-test.7.
 
 ## Changes
 
-- Harden web access security
-- Fix web login prompt handling
-- Add optional web login security
-- Add generated release notes
+- Made it so password could not be changed from the webserver
+- Limit web password changes to desktop
 
