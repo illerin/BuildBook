@@ -175,7 +175,7 @@ async function fetchReleaseSummary() {
   const releases = await response.json();
   return {
     live: releases.find((release) => /^v\d+\.\d+\.\d+$/.test(release.tag_name || '') && !release.prerelease) || null,
-    test: releases.find((release) => /^test-v\d+\.\d+\.\d+-test\.\d+$/.test(release.tag_name || '') && release.prerelease) || null,
+    test: releases.find((release) => /^test-v\d+\.\d+\.\d+-test\.(0|[1-9]\d*)$/.test(release.tag_name || '') && release.prerelease) || null,
   };
 }
 

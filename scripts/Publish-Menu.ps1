@@ -145,12 +145,12 @@ function Increment-TestVersion {
 
     if ($Version -match '^(\d+)\.(\d+)\.(\d+)-test\.(\d+)$') {
         $test = [int]$matches[4] + 1
-        return "$($matches[1]).$($matches[2]).$($matches[3])-test.$($test.ToString('00'))"
+        return "$($matches[1]).$($matches[2]).$($matches[3])-test.$test"
     }
 
     if ($Version -match '^(\d+)\.(\d+)\.(\d+)$') {
         $build = [int]$matches[3] + 1
-        return "$($matches[1]).$($matches[2]).$build-test.00"
+        return "$($matches[1]).$($matches[2]).$build-test.0"
     }
 
     throw "Invalid test version format: $Version"
@@ -232,7 +232,7 @@ function Publish-Live {
     Invoke-Git merge $MainBranch
 
     $nextTestBuild = Increment-LiveVersion $newLiveVersion
-    $newTestVersion = "$nextTestBuild-test.00"
+    $newTestVersion = "$nextTestBuild-test.0"
     Set-AppVersion $newTestVersion
     Invoke-Git add -- @VersionFiles
 

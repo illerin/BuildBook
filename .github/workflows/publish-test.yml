@@ -36,7 +36,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json | ConvertFrom-Json).version
-          if ($version -notmatch '^\d+\.\d+\.\d+-test\.\d{2}$') {
+          if ($version -notmatch '^\d+\.\d+\.\d+-test\.(0|[1-9]\d*)$') {
             throw "Test release version must use SemVer prerelease format. Found $version."
           }
           if ("${{ github.ref_name }}" -ne "test-v$version") {
