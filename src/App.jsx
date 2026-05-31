@@ -562,11 +562,11 @@ function repairStoredImageSources(html) {
   for (const match of matches) {
     const tag = match[0];
     const path = match[1];
-    const src = tag.match(/\ssrc=["']([^"']*)["']/i)?.[1] || '';
-    if (src && !src.startsWith('blob:')) continue;
+    if (!path) continue;
+    const nextSrc = assetUrl(path);
     const nextTag = /\ssrc=["'][^"']*["']/i.test(tag)
-      ? tag.replace(/\ssrc=["'][^"']*["']/i, ` src="${escapeHtml(assetUrl(path))}"`)
-      : tag.replace(/<img\b/, `<img src="${escapeHtml(assetUrl(path))}"`);
+      ? tag.replace(/\ssrc=["'][^"']*["']/i, ` src="${escapeHtml(nextSrc)}"`)
+      : tag.replace(/<img\b/, `<img src="${escapeHtml(nextSrc)}"`);
     nextHtml = nextHtml.replace(tag, nextTag);
   }
   return nextHtml;
@@ -3117,7 +3117,7 @@ function Search({ state, setTab }) {
 function normalizeRichText(value) {
   const text = String(value || '');
   if (!text.trim()) return '';
-  if (/<[a-z][\s\S]*>/i.test(text)) return text;
+  if (/<[a-z][\s\S]*>/i.test(text)) return repairStoredImageSources(text);
   return text
     .split(/\n{2,}/)
     .map((block) => `<p>${escapeHtml(block).replace(/\n/g, '<br>')}</p>`)
