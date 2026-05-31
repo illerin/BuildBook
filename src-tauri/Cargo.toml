@@ -1,6 +1,6 @@
 [package]
 name = "buildbook"
-version = "0.3.197-test.6"
+version = "0.3.197-test.7"
 description = "Desktop electronics project tracker"
 authors = ["BuildBook"]
 edition = "2021"
