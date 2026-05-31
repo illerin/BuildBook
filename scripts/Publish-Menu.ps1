@@ -63,23 +63,22 @@ function Assert-TagAvailable {
     }
 }
 
-function Read-JsonFile {
-    param([string]$Path)
-    return Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
-}
-
-function Write-JsonFile {
+function Write-TextFile {
     param(
         [string]$Path,
-        [object]$Json
+        [string]$Text
     )
 
-    $text = $Json | ConvertTo-Json -Depth 100
-    [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath $Path), "$text`r`n", [System.Text.UTF8Encoding]::new($false))
+    [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath $Path), $Text, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Get-AppVersion {
-    return (Read-JsonFile 'package.json').version
+    $text = Get-Content -Raw -LiteralPath 'package.json'
+    $match = [regex]::Match($text, '(?m)^\s*"version"\s*:\s*"([^"]+)"')
+    if (-not $match.Success) {
+        throw 'Could not read version from package.json.'
+    }
+    return $match.Groups[1].Value
 }
 
 function Get-VersionChannel {
@@ -98,48 +97,44 @@ function Set-AppVersion {
     $updaterEndpoint = if ($channel -eq 'test') { $TestUpdaterEndpoint } else { $LiveUpdaterEndpoint }
 
     if (Test-Path -LiteralPath 'package.json') {
-        $json = Read-JsonFile 'package.json'
-        $json.version = $Version
-        Write-JsonFile 'package.json' $json
+        $text = Get-Content -Raw -LiteralPath 'package.json'
+        $text = [regex]::Replace($text, '(?m)^(\s*"version"\s*:\s*")[^"]+(")', "`${1}$Version`${2}", 1)
+        Write-TextFile 'package.json' $text
     }
 
     if (Test-Path -LiteralPath 'package-lock.json') {
-        $json = Read-JsonFile 'package-lock.json'
-        $json.version = $Version
-        if ($json.packages -and $json.packages.PSObject.Properties['']) {
-            $json.packages.PSObject.Properties[''].Value.version = $Version
-        }
-        Write-JsonFile 'package-lock.json' $json
+        $text = Get-Content -Raw -LiteralPath 'package-lock.json'
+        $regex = [regex]'(?m)^(\s*"version"\s*:\s*")[^"]+(")'
+        $text = $regex.Replace($text, { param($m) $m.Groups[1].Value + $Version + $m.Groups[2].Value }, 2)
+        Write-TextFile 'package-lock.json' $text
     }
 
     foreach ($path in @('src-tauri/tauri.conf.json', 'src-tauri/tauri.conf.json5')) {
         if (Test-Path -LiteralPath $path) {
-            $json = Read-JsonFile $path
-            $json.version = $Version
-            if ($json.plugins -and $json.plugins.updater) {
-                $json.plugins.updater.endpoints = @($updaterEndpoint)
-            }
-            Write-JsonFile $path $json
+            $text = Get-Content -Raw -LiteralPath $path
+            $text = [regex]::Replace($text, '(?m)^(\s*"version"\s*:\s*")[^"]+(")', "`${1}$Version`${2}", 1)
+            $text = [regex]::Replace($text, '(?s)("endpoints"\s*:\s*\[\s*")[^"]+(")', "`${1}$updaterEndpoint`${2}", 1)
+            Write-TextFile $path $text
         }
     }
 
     if (Test-Path -LiteralPath 'src-tauri/Cargo.toml') {
         $text = Get-Content -Raw -LiteralPath 'src-tauri/Cargo.toml'
         $text = [regex]::Replace($text, '(?m)^version\s*=\s*"[^"]+"', "version = `"$Version`"", 1)
-        [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath 'src-tauri/Cargo.toml'), $text, [System.Text.UTF8Encoding]::new($false))
+        Write-TextFile 'src-tauri/Cargo.toml' $text
     }
 
     if (Test-Path -LiteralPath 'src-tauri/Cargo.lock') {
         $text = Get-Content -Raw -LiteralPath 'src-tauri/Cargo.lock'
         $pattern = '(?ms)(\[\[package\]\]\s+name = "buildbook"\s+version = ")[^"]+(")'
         $text = [regex]::Replace($text, $pattern, { param($m) $m.Groups[1].Value + $Version + $m.Groups[2].Value }, 1)
-        [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath 'src-tauri/Cargo.lock'), $text, [System.Text.UTF8Encoding]::new($false))
+        Write-TextFile 'src-tauri/Cargo.lock' $text
     }
 
     if (Test-Path -LiteralPath 'src/data.js') {
         $text = Get-Content -Raw -LiteralPath 'src/data.js'
         $text = [regex]::Replace($text, "export const APP_VERSION = '[^']+';", "export const APP_VERSION = '$Version';", 1)
-        [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath 'src/data.js'), $text, [System.Text.UTF8Encoding]::new($false))
+        Write-TextFile 'src/data.js' $text
     }
 
     Write-Host "Version set to $Version"
