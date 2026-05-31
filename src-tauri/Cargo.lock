@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "buildbook"
-version = "0.3.197-test.2"
+version = "0.3.197-test.3"
 dependencies = [
  "serde",
  "serde_json",
