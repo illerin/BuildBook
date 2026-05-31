@@ -43,6 +43,19 @@ jobs:
             throw "Release tag ${{ github.ref_name }} does not match app version v$version."
           }
 
+      - name: Load release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $body = if (Test-Path RELEASE_NOTES.md) {
+            Get-Content -Raw RELEASE_NOTES.md
+          } else {
+            'Download the Windows setup executable below to install BuildBook.'
+          }
+          "body<<BUILDBOOK_NOTES" >> $env:GITHUB_OUTPUT
+          $body >> $env:GITHUB_OUTPUT
+          "BUILDBOOK_NOTES" >> $env:GITHUB_OUTPUT
+
       - name: Build and publish Windows LIVE installer
         uses: tauri-apps/tauri-action@v0
         env:
@@ -51,7 +64,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'BuildBook ${{ github.ref_name }}'
-          releaseBody: 'Download the Windows setup executable below to install BuildBook.'
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           args: --bundles nsis

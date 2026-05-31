@@ -13,7 +13,9 @@ $VersionFiles = @(
     'src-tauri/tauri.conf.json5',
     'src-tauri/Cargo.toml',
     'src-tauri/Cargo.lock',
-    'src/data.js'
+    'src/data.js',
+    'CHANGELOG.md',
+    'RELEASE_NOTES.md'
 ) | Where-Object { Test-Path -LiteralPath $_ }
 
 function Invoke-Git {
@@ -69,7 +71,12 @@ function Write-TextFile {
         [string]$Text
     )
 
-    [System.IO.File]::WriteAllText((Resolve-Path -LiteralPath $Path), $Text, [System.Text.UTF8Encoding]::new($false))
+    $fullPath = if (Test-Path -LiteralPath $Path) {
+        (Resolve-Path -LiteralPath $Path).Path
+    } else {
+        Join-Path (Get-Location) $Path
+    }
+    [System.IO.File]::WriteAllText($fullPath, $Text, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Get-AppVersion {
@@ -167,13 +174,102 @@ function Increment-LiveVersion {
     throw "Invalid live version format: $Version"
 }
 
+function Get-PreviousTag {
+    param([string]$Pattern)
+
+    $output = & git describe --tags --match $Pattern --abbrev=0 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($output -join '').Trim())) {
+        return ''
+    }
+    return (($output | Select-Object -First 1) -as [string]).Trim()
+}
+
+function Get-ReleaseChangeLines {
+    param([string]$PreviousTag)
+
+    $args = @('log', '--no-merges', '--pretty=format:%s')
+    if (-not [string]::IsNullOrWhiteSpace($PreviousTag)) {
+        $args += "$PreviousTag..HEAD"
+    }
+    $raw = Get-GitText @args
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return @('- No code changes since the previous release.')
+    }
+    $lines = $raw -split "`n" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object {
+            $_ -and
+            $_ -notmatch '^(Test Release|Live Release|Reset test version)\b'
+        } |
+        Select-Object -Unique
+
+    if (!$lines.Count) {
+        return @('- No code changes since the previous release.')
+    }
+    return $lines | ForEach-Object { "- $_" }
+}
+
+function Write-ReleaseNotes {
+    param(
+        [string]$Version,
+        [string]$Channel,
+        [string]$PreviousTag
+    )
+
+    $date = Get-Date -Format 'yyyy-MM-dd'
+    $heading = if ($Channel -eq 'test') { "BuildBook $Version Test Release" } else { "BuildBook $Version" }
+    $range = if ($PreviousTag) { "Changes since $PreviousTag." } else { 'Initial tracked release notes.' }
+    $lines = Get-ReleaseChangeLines $PreviousTag
+    $notes = @(
+        "# $heading",
+        '',
+        $range,
+        '',
+        '## Changes',
+        ''
+    ) + $lines + @('')
+
+    Write-TextFile 'RELEASE_NOTES.md' (($notes -join "`r`n") + "`r`n")
+
+    $changelogHeader = "# Changelog`r`n`r`n"
+    $section = @(
+        "## $Version - $date",
+        '',
+        $range,
+        '',
+        '### Changes',
+        ''
+    ) + $lines + @('', '')
+    $existing = if (Test-Path -LiteralPath 'CHANGELOG.md') { Get-Content -Raw -LiteralPath 'CHANGELOG.md' } else { $changelogHeader }
+    $body = $existing
+    if ($body -notmatch '^# Changelog') {
+        $body = $changelogHeader + $body.TrimStart()
+    }
+    $body = $body -replace '^# Changelog\s*', "# Changelog`r`n`r`n"
+    Write-TextFile 'CHANGELOG.md' ("# Changelog`r`n`r`n" + (($section -join "`r`n") + ($body -replace '^# Changelog\s*', '')).TrimStart())
+}
+
 function Commit-Version {
     param(
         [string]$Version,
-        [string]$Message
+        [string]$Message,
+        [string]$Channel = 'live',
+        [string]$PreviousTag = ''
     )
 
     Set-AppVersion $Version
+    Write-ReleaseNotes $Version $Channel $PreviousTag
+    $script:VersionFiles = @(
+        'package.json',
+        'package-lock.json',
+        'src-tauri/tauri.conf.json',
+        'src-tauri/tauri.conf.json5',
+        'src-tauri/Cargo.toml',
+        'src-tauri/Cargo.lock',
+        'src/data.js',
+        'CHANGELOG.md',
+        'RELEASE_NOTES.md'
+    ) | Where-Object { Test-Path -LiteralPath $_ }
     Invoke-Git add -- @VersionFiles
 
     & git diff --cached --quiet -- @VersionFiles
@@ -194,8 +290,9 @@ function Publish-Test {
     $newVersion = Increment-TestVersion (Get-AppVersion)
     $tag = "test-v$newVersion"
     Assert-TagAvailable $tag
+    $previousTag = Get-PreviousTag 'test-v*'
 
-    Commit-Version $newVersion "Test Release $newVersion"
+    Commit-Version $newVersion "Test Release $newVersion" 'test' $previousTag
     Invoke-Git push origin $TestBranch
     Invoke-Git tag $tag
     Invoke-Git push origin $tag
@@ -221,9 +318,10 @@ function Publish-Live {
     $newLiveVersion = Increment-LiveVersion $mainVersion
     $liveTag = "v$newLiveVersion"
     Assert-TagAvailable $liveTag
+    $previousLiveTag = Get-PreviousTag 'v[0-9]*'
 
     Invoke-Git merge $TestBranch
-    Commit-Version $newLiveVersion "Live Release $newLiveVersion"
+    Commit-Version $newLiveVersion "Live Release $newLiveVersion" 'live' $previousLiveTag
     Invoke-Git push origin $MainBranch
     Invoke-Git tag $liveTag
     Invoke-Git push origin $liveTag
