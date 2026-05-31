@@ -3361,7 +3361,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     }
     editorRef.current?.focus();
     restoreSelection();
-    const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
+    const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" draggable="false" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
     document.execCommand('insertHTML', false, html);
     rememberSelection();
     emitChange();
@@ -3404,9 +3404,13 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         onFocus={focusEmptyEditor}
         onInput={emitChange}
         onDragOver={(event) => event.preventDefault()}
+        onDragStart={(event) => {
+          if (event.target?.tagName === 'IMG') event.preventDefault();
+        }}
         onDrop={async (event) => {
           const file = firstDroppedFile(event, fileLooksImage);
           if (file) await insertImage(file);
+          event.preventDefault();
         }}
         onPaste={async (event) => {
           const files = [...(event.clipboardData?.files || [])];

@@ -1201,7 +1201,31 @@ article h3,
 }
 
 .rich-image-tools input {
-  width: 120px;
+  width: 126px;
+  min-height: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.rich-image-tools input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-soft);
+}
+
+.rich-image-tools input[type="range"]::-webkit-slider-thumb {
+  margin-top: -5px;
+}
+
+.rich-image-tools input[type="range"]::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--text-soft);
 }
 
 .rich-area {
@@ -1228,6 +1252,8 @@ article h3,
   max-width: 100%;
   height: auto;
   margin: 10px 0;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .rich-area img.rich-image-selected {
