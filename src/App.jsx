@@ -572,6 +572,46 @@ function repairStoredImageSources(html) {
   return nextHtml;
 }
 
+function richTextStorageHtml(html) {
+  let nextHtml = repairStoredImageSources(html).replace(/\srich-image-selected\b/g, '');
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-path=["']([^"']+)["'][^>]*>/gi)];
+  for (const match of matches) {
+    const tag = match[0];
+    const path = match[1];
+    if (!path) continue;
+    const storedSrc = assetUrl(path);
+    const nextTag = /\ssrc=["'][^"']*["']/i.test(tag)
+      ? tag.replace(/\ssrc=["'][^"']*["']/i, ` src="${escapeHtml(storedSrc)}"`)
+      : tag.replace(/<img\b/, `<img src="${escapeHtml(storedSrc)}"`);
+    nextHtml = nextHtml.replace(tag, nextTag);
+  }
+  return nextHtml;
+}
+
+async function hydrateRichTextForEditor(html) {
+  let nextHtml = normalizeRichText(html);
+  const objectUrls = [];
+  const matches = [...nextHtml.matchAll(/<img\b[^>]*data-project-image-path=["']([^"']+)["'][^>]*>/gi)];
+  for (const match of matches) {
+    const tag = match[0];
+    const path = match[1];
+    if (!path) continue;
+    try {
+      const bytes = await readStoredFile(path);
+      if (!bytes?.length) continue;
+      const objectUrl = URL.createObjectURL(new Blob([bytes], { type: imageMimeType(path) }));
+      objectUrls.push(objectUrl);
+      const nextTag = /\ssrc=["'][^"']*["']/i.test(tag)
+        ? tag.replace(/\ssrc=["'][^"']*["']/i, ` src="${escapeHtml(objectUrl)}"`)
+        : tag.replace(/<img\b/, `<img src="${escapeHtml(objectUrl)}"`);
+      nextHtml = nextHtml.replace(tag, nextTag);
+    } catch {
+      // Keep the repaired stored-path source if byte hydration fails.
+    }
+  }
+  return { html: nextHtml, objectUrls };
+}
+
 async function normalizeRichTextImages(html, library) {
   return repairStoredImageSources(await externalizeInlineDataImages(html, library));
 }
@@ -3213,6 +3253,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
   const editorRef = useRef(null);
   const selectionRef = useRef(null);
   const fileInputRef = useRef(null);
+  const objectUrlsRef = useRef([]);
   const [selectedImage, setSelectedImage] = useState(null);
   const [imageWidth, setImageWidth] = useState(100);
   const [markupSource, setMarkupSource] = useState('');
@@ -3221,8 +3262,30 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     const editor = editorRef.current;
     if (!editor) return;
     const normalized = normalizeRichText(value);
-    if (editor.innerHTML !== normalized) editor.innerHTML = normalized;
+    if (richTextStorageHtml(editor.innerHTML) === normalized) return undefined;
+    let active = true;
+    hydrateRichTextForEditor(normalized)
+      .then(({ html, objectUrls }) => {
+        if (!active) {
+          objectUrls.forEach((url) => URL.revokeObjectURL(url));
+          return;
+        }
+        objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+        objectUrlsRef.current = objectUrls;
+        editor.innerHTML = html;
+      })
+      .catch(() => {
+        if (active) editor.innerHTML = normalized;
+      });
+    return () => {
+      active = false;
+    };
   }, [value]);
+
+  useEffect(() => () => {
+    objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    objectUrlsRef.current = [];
+  }, []);
 
   const rememberSelection = () => {
     const selection = window.getSelection();
@@ -3241,7 +3304,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
   };
 
   const emitChange = () => {
-    onChange(editorRef.current?.innerHTML || '');
+    onChange(richTextStorageHtml(editorRef.current?.innerHTML || ''));
   };
 
   const focusEmptyEditor = () => {
@@ -3286,7 +3349,16 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     if (!source) return;
     const stored = await onUploadImage(source);
     if (!stored?.path) return;
-    const previewUrl = assetUrl(stored.path);
+    let previewUrl = assetUrl(stored.path);
+    try {
+      const bytes = await readStoredFile(stored.path);
+      if (bytes?.length) {
+        previewUrl = URL.createObjectURL(new Blob([bytes], { type: imageMimeType(stored.path) }));
+        objectUrlsRef.current.push(previewUrl);
+      }
+    } catch {
+      // Keep stored-path preview URL if byte hydration fails.
+    }
     editorRef.current?.focus();
     restoreSelection();
     const html = `<p><img src="${escapeHtml(previewUrl)}" alt="${escapeHtml(stored.name || 'Project note image')}" style="width:100%;max-width:100%;height:auto;border-radius:6px;" data-project-image-path="${escapeHtml(stored.path)}"></p><p><br></p>`;
@@ -3362,7 +3434,17 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
             if (selectedImage) {
               const stored = await onUploadImage(dataUrl);
               if (stored?.path) {
-                selectedImage.src = assetUrl(stored.path);
+                let nextSrc = assetUrl(stored.path);
+                try {
+                  const bytes = await readStoredFile(stored.path);
+                  if (bytes?.length) {
+                    nextSrc = URL.createObjectURL(new Blob([bytes], { type: imageMimeType(stored.path) }));
+                    objectUrlsRef.current.push(nextSrc);
+                  }
+                } catch {
+                  // Keep stored-path preview URL if byte hydration fails.
+                }
+                selectedImage.src = nextSrc;
                 selectedImage.setAttribute('data-project-image-path', stored.path);
               }
               emitChange();
