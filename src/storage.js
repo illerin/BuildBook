@@ -38,8 +38,11 @@ export async function loadAppState() {
   if (isLanWebClient()) {
     const response = await fetch('/api/state', { headers: { 'X-BuildBook-Token': lanToken() } });
     if (response.ok) return normalizeState(await response.json());
-    if (response.status === 401) throw new Error('BuildBook access code is required.');
-    throw new Error(await response.text() || 'Could not load BuildBook from this computer.');
+    const message = await response.text();
+    if (response.status === 401) {
+      throw new Error(message || 'BuildBook access is required.');
+    }
+    throw new Error(message || 'Could not load BuildBook from this computer.');
   }
 
   try {
