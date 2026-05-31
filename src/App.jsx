@@ -5890,6 +5890,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   const [stagedAttachment, setStagedAttachment] = useState(null);
   const [fileError, setFileError] = useState('');
   const [fileBusy, setFileBusy] = useState(false);
+  const [fileNotice, setFileNotice] = useState('');
   const [editSessions, setEditSessions] = useState({});
   const [selectedFileId, setSelectedFileId] = useState('');
   const [viewerScope, setViewerScope] = useState('latest');
@@ -6421,7 +6422,10 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   }, [project.id]);
   const downloadProjectFile = async (file) => {
     try {
+      setFileError('');
+      setFileNotice('');
       await downloadStoredProjectFile(file);
+      setFileNotice(`${file.type === 'folder' ? 'Folder' : 'File'} downloaded: ${file.name}`);
     } catch (error) {
       setFileError(String(error));
     }
@@ -6695,6 +6699,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           )}
           <BusyNotice label={fileBusyLabel} />
           {fileError && <p className="error-text">{fileError}</p>}
+          {fileNotice && <p className="success-text">{fileNotice}</p>}
         </section>
 
         {grouped.length === 0 ? <section className="panel empty-panel">No files attached yet.</section> : grouped.map(({ tracker, files }) => {
@@ -6726,8 +6731,12 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
               {visibleFiles.map((file) => (
                 <div key={file.id} className="file-row">
                   <div className="file-row-left">
-                    {(file.path || file.type === 'folder') && <button className="file-link-button" onClick={() => { setSelectedFileId(file.id); beginEdit(file); }} disabled={fileBusy}>Open</button>}
-                    {(file.path || file.type === 'folder') && <button className="file-download-button" onClick={() => downloadProjectFile(file)}>Download</button>}
+                    {(file.path || file.type === 'folder') && (
+                      isRemoteBuildBookClient()
+                        ? <button className="file-link-button" onClick={() => downloadProjectFile(file)} disabled={fileBusy}>Download</button>
+                        : <button className="file-link-button" onClick={() => { setSelectedFileId(file.id); beginEdit(file); }} disabled={fileBusy}>Open</button>
+                    )}
+                    {!isRemoteBuildBookClient() && (file.path || file.type === 'folder') && <button className="file-download-button" onClick={() => downloadProjectFile(file)}>Download</button>}
                     <strong>{file.type === 'folder' ? `${file.name}, ${(file.folderFiles || []).length} files` : file.name}</strong>
                     <div className="file-note-field">
                       <span>Note:</span>
