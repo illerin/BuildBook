@@ -8526,6 +8526,7 @@ function Imports({ state, updateState }) {
 }
 
 function Settings({ state, updateState }) {
+  const remoteClient = isRemoteBuildBookClient();
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [showRevisionSettings, setShowRevisionSettings] = useState(false);
@@ -9100,7 +9101,7 @@ function Settings({ state, updateState }) {
             Require admin login
           </label>
         </div>
-        {isRemoteBuildBookClient() && (
+        {remoteClient && (
           <div className="settings-actions left-actions">
             <button className="secondary" onClick={logoutWebSession}>Log Out This Browser</button>
           </div>
@@ -9136,17 +9137,21 @@ function Settings({ state, updateState }) {
             />
           </label>
         </div>
-        <div className="web-auth-password-row">
-          <label>
-            New password
-            <input type="password" value={webPassword} onChange={(event) => setWebPassword(event.target.value)} autoComplete="new-password" />
-          </label>
-          <label>
-            Confirm password
-            <input type="password" value={webPasswordConfirm} onChange={(event) => setWebPasswordConfirm(event.target.value)} autoComplete="new-password" />
-          </label>
-          <button className="secondary" onClick={saveWebPassword}>Save Password</button>
-        </div>
+        {remoteClient ? (
+          <p className="settings-note">Password changes are only available in the local desktop app. Open BuildBook on the host computer to change the admin password.</p>
+        ) : (
+          <div className="web-auth-password-row">
+            <label>
+              New password
+              <input type="password" value={webPassword} onChange={(event) => setWebPassword(event.target.value)} autoComplete="new-password" />
+            </label>
+            <label>
+              Confirm password
+              <input type="password" value={webPasswordConfirm} onChange={(event) => setWebPasswordConfirm(event.target.value)} autoComplete="new-password" />
+            </label>
+            <button className="secondary" onClick={saveWebPassword}>Save Password</button>
+          </div>
+        )}
         <p className="settings-note">
           Password status: {state.webAuth?.passwordHash ? 'set' : 'not set'}. Local desktop use never requires this login. Local IP and localhost access are always allowed.
         </p>

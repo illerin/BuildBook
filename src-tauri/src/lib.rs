@@ -1001,6 +1001,10 @@ fn send_response_with_headers(stream: &mut TcpStream, status: &str, content_type
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    let _ = write!(stream, "X-Content-Type-Options: nosniff\r\n");
+    let _ = write!(stream, "X-Frame-Options: DENY\r\n");
+    let _ = write!(stream, "Referrer-Policy: no-referrer\r\n");
+    let _ = write!(stream, "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n");
     for header in headers {
         let _ = write!(stream, "{header}\r\n");
     }
