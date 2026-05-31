@@ -8567,10 +8567,15 @@ function Settings({ state, updateState }) {
       const liveReference = latestLive ? ` Latest live: ${latestLive}.` : '';
       if (window.__TAURI_INTERNALS__) {
         const update = await checkForTauriUpdate();
+        const release = channel === 'test' ? releaseSummary?.test : releaseSummary?.live;
+        const latestVersion = release?.tag_name || release?.name || '';
         if (update) {
           setAvailableUpdate(update);
           setAvailableReleaseUrl(GITHUB_REPOSITORY_URL);
           setUpdateNotice(`${channel === 'test' ? 'Test update' : 'Update'} available: v${update.version}. Installed: v${APP_VERSION}.${liveReference}`);
+        } else if (latestVersion && isNewerVersion(latestVersion, APP_VERSION)) {
+          setAvailableReleaseUrl(release?.html_url || GITHUB_REPOSITORY_URL);
+          setUpdateNotice(`${channel === 'test' ? 'Test update' : 'Update'} available: ${latestVersion}. Installed: v${APP_VERSION}. Installer metadata is not available yet; open the release page to install manually.${liveReference}`);
         } else {
           setUpdateNotice(`BuildBook ${channel} channel is up to date. Installed: v${APP_VERSION}.${liveReference}`);
         }
