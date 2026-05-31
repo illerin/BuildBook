@@ -88,8 +88,25 @@ async function sha256Hex(text) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
+async function pbkdf2Hex(password, salt, iterations) {
+  if (!crypto?.subtle) return sha256Hex(`${salt}\0${password}`);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: new TextEncoder().encode(salt), iterations },
+    key,
+    256,
+  );
+  return [...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 async function hashWebPassword(password, salt = randomSecret()) {
-  return { passwordSalt: salt, passwordHash: await sha256Hex(`${salt}\0${password}`) };
+  const iterations = DEFAULT_WEB_AUTH.passwordIterations;
+  return {
+    passwordSalt: salt,
+    passwordHash: await pbkdf2Hex(password, salt, iterations),
+    passwordAlgorithm: 'pbkdf2-sha256',
+    passwordIterations: iterations,
+  };
 }
 
 function droppedFileList(event, accept = () => true) {
@@ -8598,7 +8615,7 @@ function Settings({ state, updateState }) {
     }
     try {
       const hashed = await hashWebPassword(webPassword);
-      updateWebAuth({ ...hashed, sessionSecret: state.webAuth?.sessionSecret || randomSecret() });
+      updateWebAuth({ ...hashed, sessionSecret: randomSecret() });
       setWebPassword('');
       setWebPasswordConfirm('');
       setWebAuthNotice('Admin password saved.');
@@ -9110,6 +9127,14 @@ function Settings({ state, updateState }) {
               onChange={(event) => updateWebAuth({ rememberDays: Number(event.target.value) || 30 })}
             />
           </label>
+          <label>
+            Allowed domains
+            <input
+              value={state.webAuth?.allowedHosts || ''}
+              onChange={(event) => updateWebAuth({ allowedHosts: event.target.value })}
+              placeholder="buildbook.example.com, *.tailnet.ts.net"
+            />
+          </label>
         </div>
         <div className="web-auth-password-row">
           <label>
@@ -9123,7 +9148,7 @@ function Settings({ state, updateState }) {
           <button className="secondary" onClick={saveWebPassword}>Save Password</button>
         </div>
         <p className="settings-note">
-          Password status: {state.webAuth?.passwordHash ? 'set' : 'not set'}. Local desktop use never requires this login.
+          Password status: {state.webAuth?.passwordHash ? 'set' : 'not set'}. Local desktop use never requires this login. Local IP and localhost access are always allowed.
         </p>
         {webAuthNotice && <p className="success-text">{webAuthNotice}</p>}
         {webAuthError && <p className="error-text">{webAuthError}</p>}

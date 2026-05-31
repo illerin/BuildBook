@@ -3,6 +3,7 @@ import { DEFAULT_STATE, normalizeState } from './data';
 
 const STORAGE_KEY = 'buildbook-state';
 const LAN_TOKEN_KEY = 'buildbook-lan-token';
+const APP_REQUEST_HEADER = '1';
 
 function isTauri() {
   return Boolean(window.__TAURI_INTERNALS__);
@@ -28,6 +29,15 @@ export function lanToken() {
   return localStorage.getItem(LAN_TOKEN_KEY) || '';
 }
 
+function apiHeaders(extra = {}) {
+  const token = lanToken();
+  return {
+    ...extra,
+    'X-BuildBook-Request': APP_REQUEST_HEADER,
+    ...(token ? { 'X-BuildBook-Token': token } : {}),
+  };
+}
+
 export async function loadAppState() {
   if (isTauri()) {
     const contents = await invoke('read_app_state');
@@ -36,7 +46,7 @@ export async function loadAppState() {
   }
 
   if (isLanWebClient()) {
-    const response = await fetch('/api/state', { headers: { 'X-BuildBook-Token': lanToken() } });
+    const response = await fetch('/api/state', { headers: apiHeaders() });
     if (response.ok) return normalizeState(await response.json());
     const message = await response.text();
     if (response.status === 401) {
@@ -57,7 +67,7 @@ export async function webLogin(username, password) {
   if (!isLanWebClient()) return;
   const response = await fetch('/api/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: apiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ username, password }),
   });
   if (!response.ok) throw new Error(await response.text() || 'Could not log in.');
@@ -65,7 +75,7 @@ export async function webLogin(username, password) {
 
 export async function webLogout() {
   if (!isLanWebClient()) return;
-  await fetch('/api/logout', { method: 'POST' });
+  await fetch('/api/logout', { method: 'POST', headers: apiHeaders() });
 }
 
 export async function saveAppState(state) {
@@ -81,7 +91,7 @@ export async function saveAppState(state) {
   if (isLanWebClient()) {
     const response = await fetch('/api/state', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-BuildBook-Token': lanToken() },
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: contents,
     });
     if (!response.ok) throw new Error(await response.text());

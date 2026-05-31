@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 const LAN_TOKEN_KEY = 'buildbook-lan-token';
+const APP_REQUEST_HEADER = '1';
 
 function isTauri() {
   return Boolean(window.__TAURI_INTERNALS__);
@@ -17,6 +18,15 @@ function fileApiUrl(path) {
 
 function lanToken() {
   return localStorage.getItem(LAN_TOKEN_KEY) || new URLSearchParams(window.location.search).get('access') || '';
+}
+
+function apiHeaders(extra = {}) {
+  const token = lanToken();
+  return {
+    ...extra,
+    'X-BuildBook-Request': APP_REQUEST_HEADER,
+    ...(token ? { 'X-BuildBook-Token': token } : {}),
+  };
 }
 
 export async function attachLocalFile(sourcePath, library) {
@@ -48,7 +58,7 @@ export async function saveBytesFile(name, library, bytes) {
   if (isLanWebClient()) {
     const response = await fetch(`/api/files?library=${encodeURIComponent(library)}&name=${encodeURIComponent(name)}`, {
       method: 'POST',
-      headers: { 'X-BuildBook-Token': lanToken() },
+      headers: apiHeaders(),
       body: bytes,
     });
     if (!response.ok) throw new Error(await response.text());
@@ -65,7 +75,7 @@ export async function saveBytesFile(name, library, bytes) {
 export async function overwriteBytesFile(path, bytes, name = 'updated-file') {
   const data = Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
   if (isLanWebClient()) {
-    const response = await fetch(fileApiUrl(path), { method: 'PUT', headers: { 'X-BuildBook-Token': lanToken() }, body: bytes });
+    const response = await fetch(fileApiUrl(path), { method: 'PUT', headers: apiHeaders(), body: bytes });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
@@ -104,7 +114,7 @@ export async function downloadUrlFile(url, library, name) {
   if (isLanWebClient()) {
     const response = await fetch(`/api/download-url?url=${encodeURIComponent(url)}&library=${encodeURIComponent(library)}&name=${encodeURIComponent(name)}`, {
       method: 'POST',
-      headers: { 'X-BuildBook-Token': lanToken() },
+      headers: apiHeaders(),
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
@@ -124,7 +134,7 @@ export async function readStoredFile(path) {
   if (!path) return new Uint8Array();
 
   if (isLanWebClient()) {
-    const response = await fetch(fileApiUrl(path), { headers: { 'X-BuildBook-Token': lanToken() } });
+    const response = await fetch(fileApiUrl(path), { headers: apiHeaders() });
     if (!response.ok) throw new Error(await response.text());
     return new Uint8Array(await response.arrayBuffer());
   }
@@ -141,7 +151,7 @@ export async function scanStorage(referencedPaths) {
   if (isLanWebClient()) {
     const response = await fetch('/api/storage-scan', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-BuildBook-Token': lanToken() },
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ referencedPaths, deletePaths: [] }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -155,7 +165,7 @@ export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
   if (isLanWebClient()) {
     const response = await fetch('/api/storage-scan', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-BuildBook-Token': lanToken() },
+      headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ referencedPaths, deletePaths }),
     });
     if (!response.ok) throw new Error(await response.text());
@@ -172,7 +182,7 @@ export async function deleteManagedFiles(paths) {
 
 export async function resetManagedStorage() {
   if (isLanWebClient()) {
-    const response = await fetch('/api/reset-storage', { method: 'POST', headers: { 'X-BuildBook-Token': lanToken() } });
+    const response = await fetch('/api/reset-storage', { method: 'POST', headers: apiHeaders() });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }

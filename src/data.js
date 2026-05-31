@@ -110,8 +110,11 @@ export const DEFAULT_WEB_AUTH = {
   username: 'admin',
   passwordSalt: '',
   passwordHash: '',
+  passwordAlgorithm: 'pbkdf2-sha256',
+  passwordIterations: 210000,
   sessionSecret: '',
   rememberDays: 30,
+  allowedHosts: '',
 };
 
 const now = () => new Date().toISOString();
@@ -201,6 +204,7 @@ function normalizePartStorage(part, storageLocations) {
   }
   const container = storageLocations.find((location) => location.id === storageContainerId);
   const slot = container?.slots?.find((item) => item.id === storageSlotId);
+
   return {
     storageContainerId,
     storageSlotId,
@@ -227,6 +231,9 @@ export function normalizeState(raw, options = {}) {
   const validCategoryIds = new Set(categories.map((category) => category.id));
   const rawSteps = Array.isArray(template.steps) ? template.steps : [];
   const storageLocations = normalizeStorageLocations(state.storageLocations, state.parts);
+  const webAuthPasswordAlgorithm = state.webAuth?.passwordHash && !state.webAuth?.passwordAlgorithm
+    ? 'sha256'
+    : (typeof state.webAuth?.passwordAlgorithm === 'string' ? state.webAuth.passwordAlgorithm : DEFAULT_WEB_AUTH.passwordAlgorithm);
 
   return {
     ...DEFAULT_STATE,
@@ -256,8 +263,11 @@ export function normalizeState(raw, options = {}) {
       username: String(state.webAuth?.username || DEFAULT_WEB_AUTH.username).trim() || DEFAULT_WEB_AUTH.username,
       passwordSalt: typeof state.webAuth?.passwordSalt === 'string' ? state.webAuth.passwordSalt : '',
       passwordHash: typeof state.webAuth?.passwordHash === 'string' ? state.webAuth.passwordHash : '',
+      passwordAlgorithm: webAuthPasswordAlgorithm,
+      passwordIterations: Math.min(1000000, Math.max(100000, Number(state.webAuth?.passwordIterations) || DEFAULT_WEB_AUTH.passwordIterations)),
       sessionSecret: typeof state.webAuth?.sessionSecret === 'string' ? state.webAuth.sessionSecret : '',
       rememberDays: Math.min(365, Math.max(1, Number(state.webAuth?.rememberDays) || DEFAULT_WEB_AUTH.rememberDays)),
+      allowedHosts: typeof state.webAuth?.allowedHosts === 'string' ? state.webAuth.allowedHosts : '',
     },
     storageLocations,
     template: {

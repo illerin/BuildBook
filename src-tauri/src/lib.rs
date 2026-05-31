@@ -3,6 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
 use tauri::{
     menu::{Menu, MenuItem},
@@ -393,8 +394,11 @@ struct WebAuthConfig {
     username: String,
     password_salt: String,
     password_hash: String,
+    password_algorithm: Option<String>,
+    password_iterations: Option<u32>,
     session_secret: String,
     remember_days: Option<u32>,
+    allowed_hosts: Option<String>,
 }
 
 struct LanServerHandle {
@@ -797,8 +801,14 @@ fn sha256_hex(text: &str) -> String {
     hex_encode(&hasher.finalize())
 }
 
-fn password_hash(password: &str, salt: &str) -> String {
-    sha256_hex(&format!("{salt}\0{password}"))
+fn password_hash(password: &str, auth: &WebAuthConfig) -> String {
+    if auth.password_algorithm.as_deref() == Some("pbkdf2-sha256") {
+        let iterations = auth.password_iterations.unwrap_or(210_000).clamp(100_000, 1_000_000);
+        let mut output = [0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), auth.password_salt.as_bytes(), iterations, &mut output);
+        return hex_encode(&output);
+    }
+    sha256_hex(&format!("{}\0{password}", auth.password_salt))
 }
 
 fn now_seconds() -> u64 {
@@ -832,8 +842,62 @@ fn host_is_local_or_private(headers: &str) -> bool {
     false
 }
 
+fn host_matches_allowed_entry(host: &str, entry: &str) -> bool {
+    let clean = entry
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if clean.is_empty() {
+        return false;
+    }
+    if let Some(suffix) = clean.strip_prefix("*.") {
+        return host.ends_with(&format!(".{suffix}"));
+    }
+    host == clean
+}
+
+fn host_is_allowed(auth: &WebAuthConfig, headers: &str) -> bool {
+    if !auth.enabled || host_is_local_or_private(headers) {
+        return true;
+    }
+    let allowed = auth.allowed_hosts.as_deref().unwrap_or("").trim();
+    if allowed.is_empty() {
+        return true;
+    }
+    let host = host_without_port(headers);
+    allowed
+        .split([',', '\n', '\r', ';'])
+        .any(|entry| host_matches_allowed_entry(&host, entry))
+}
+
+fn request_is_https(headers: &str) -> bool {
+    header_value(headers, "x-forwarded-proto")
+        .split(',')
+        .any(|value| value.trim().eq_ignore_ascii_case("https"))
+        || header_value(headers, "forwarded")
+            .to_lowercase()
+            .split(';')
+            .any(|value| value.trim() == "proto=https")
+}
+
+fn request_has_app_header(headers: &str) -> bool {
+    header_value(headers, "x-buildbook-request") == "1"
+        || !header_value(headers, "x-buildbook-token").is_empty()
+}
+
+fn method_requires_csrf_header(method: &str) -> bool {
+    !matches!(method, "GET" | "HEAD" | "OPTIONS")
+}
+
 fn session_signature(auth: &WebAuthConfig, expires: u64) -> String {
-    sha256_hex(&format!("{}\0{}\0{}", auth.session_secret, auth.username, expires))
+    sha256_hex(&format!("{}\0{}\0{}\0{}", auth.session_secret, auth.username, auth.password_hash, expires))
 }
 
 fn web_auth_requires_login(auth: &WebAuthConfig, headers: &str) -> bool {
@@ -857,12 +921,15 @@ fn request_has_web_session(auth: &WebAuthConfig, headers: &str) -> bool {
     expires > now_seconds() && signature == session_signature(auth, expires)
 }
 
-fn request_auth_error(path: &str, headers: &str) -> Option<&'static str> {
+fn request_auth_error(method: &str, path: &str, headers: &str) -> Option<&'static str> {
     let (expected, require_token, web_auth) = lan_mutex()
         .lock()
         .ok()
         .and_then(|guard| guard.as_ref().map(|server| (server.token.clone(), server.require_token, server.web_auth.clone())))
         .unwrap_or_else(|| (String::new(), true, WebAuthConfig::default()));
+    if !host_is_allowed(&web_auth, headers) {
+        return Some("BuildBook host is not allowed.");
+    }
     if require_token {
         if expected.is_empty() {
             return Some("BuildBook access code is required.");
@@ -871,8 +938,13 @@ fn request_auth_error(path: &str, headers: &str) -> Option<&'static str> {
             return Some("BuildBook access code is required.");
         }
     }
-    if web_auth_requires_login(&web_auth, headers) && !request_has_web_session(&web_auth, headers) {
-        return Some("BuildBook login is required.");
+    if web_auth_requires_login(&web_auth, headers) {
+        if !request_has_web_session(&web_auth, headers) {
+            return Some("BuildBook login is required.");
+        }
+        if method_requires_csrf_header(method) && !request_has_app_header(headers) {
+            return Some("BuildBook request header is required.");
+        }
     }
     None
 }
@@ -1104,7 +1176,7 @@ fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
         }
     };
     let expected_user = if auth.username.trim().is_empty() { "admin" } else { auth.username.trim() };
-    let expected_hash = password_hash(&request.password, &auth.password_salt);
+    let expected_hash = password_hash(&request.password, &auth);
     if request.username.trim() != expected_user || expected_hash != auth.password_hash {
         send_response(stream, "401 Unauthorized", "text/plain; charset=utf-8", b"Invalid BuildBook username or password.");
         return;
@@ -1113,7 +1185,8 @@ fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
     let max_age = remember_days * 24 * 60 * 60;
     let expires = now_seconds() + max_age;
     let value = format!("{}.{}", expires, session_signature(&auth, expires));
-    let cookie = format!("Set-Cookie: buildbook_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax");
+    let secure = if request_is_https(headers) { "; Secure" } else { "" };
+    let cookie = format!("Set-Cookie: buildbook_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax{secure}");
     send_response_with_headers(stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}", &[cookie]);
 }
 
@@ -1147,6 +1220,11 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 
     let headers = request.split("\r\n\r\n").next().unwrap_or("");
 
+    if !host_is_allowed(&current_web_auth(), headers) {
+        send_response(&mut stream, "403 Forbidden", "text/plain; charset=utf-8", b"BuildBook host is not allowed.");
+        return;
+    }
+
     if path.starts_with("/api/auth-status") {
         send_web_auth_status(&mut stream, headers);
         return;
@@ -1154,6 +1232,10 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 
     if path.starts_with("/api/login") {
         if method == "POST" {
+            if !request_has_app_header(headers) {
+                send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook request header is required.");
+                return;
+            }
             let body = match request_body(&mut stream, &buffer, headers) {
                 Ok(body) => body,
                 Err(error) => {
@@ -1168,13 +1250,17 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 
     if path.starts_with("/api/logout") {
         if method == "POST" {
+            if !request_has_app_header(headers) {
+                send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook request header is required.");
+                return;
+            }
             handle_web_logout(&mut stream);
             return;
         }
     }
 
     if path.starts_with("/api/state") {
-        if let Some(error) = request_auth_error(path, headers) {
+        if let Some(error) = request_auth_error(method, path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
@@ -1210,7 +1296,7 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/files") {
-        if let Some(error) = request_auth_error(path, headers) {
+        if let Some(error) = request_auth_error(method, path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
@@ -1256,7 +1342,7 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/download-url") {
-        if let Some(error) = request_auth_error(path, headers) {
+        if let Some(error) = request_auth_error(method, path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
@@ -1270,7 +1356,7 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/storage-scan") {
-        if let Some(error) = request_auth_error(path, headers) {
+        if let Some(error) = request_auth_error(method, path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
@@ -1294,7 +1380,7 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/reset-storage") {
-        if let Some(error) = request_auth_error(path, headers) {
+        if let Some(error) = request_auth_error(method, path, headers) {
             send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
