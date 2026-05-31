@@ -104,6 +104,16 @@ export const DEFAULT_REVISION_SETTINGS = {
   trackLinkedFiles: false,
 };
 
+export const DEFAULT_WEB_AUTH = {
+  enabled: false,
+  scope: 'domain',
+  username: 'admin',
+  passwordSalt: '',
+  passwordHash: '',
+  sessionSecret: '',
+  rememberDays: 30,
+};
+
 const now = () => new Date().toISOString();
 
 export const DEFAULT_STATE = {
@@ -115,6 +125,7 @@ export const DEFAULT_STATE = {
     token: '',
     requireToken: true,
   },
+  webAuth: DEFAULT_WEB_AUTH,
   theme: DEFAULT_THEME,
   categories: DEFAULT_CATEGORIES,
   template: {
@@ -236,6 +247,17 @@ export function normalizeState(raw, options = {}) {
       delayEnabled: Boolean(state.revisionSettings?.delayEnabled),
       trackLinkedFiles: Boolean(state.revisionSettings?.trackLinkedFiles),
       retentionMode: state.revisionSettings?.retentionMode === 'hybrid' ? 'hybrid' : 'last-n',
+    },
+    webAuth: {
+      ...DEFAULT_WEB_AUTH,
+      ...(state.webAuth && typeof state.webAuth === 'object' ? state.webAuth : {}),
+      enabled: Boolean(state.webAuth?.enabled),
+      scope: state.webAuth?.scope === 'all' ? 'all' : 'domain',
+      username: String(state.webAuth?.username || DEFAULT_WEB_AUTH.username).trim() || DEFAULT_WEB_AUTH.username,
+      passwordSalt: typeof state.webAuth?.passwordSalt === 'string' ? state.webAuth.passwordSalt : '',
+      passwordHash: typeof state.webAuth?.passwordHash === 'string' ? state.webAuth.passwordHash : '',
+      sessionSecret: typeof state.webAuth?.sessionSecret === 'string' ? state.webAuth.sessionSecret : '',
+      rememberDays: Math.min(365, Math.max(1, Number(state.webAuth?.rememberDays) || DEFAULT_WEB_AUTH.rememberDays)),
     },
     storageLocations,
     template: {

@@ -3,6 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use sha2::{Digest, Sha256};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -384,11 +385,24 @@ struct LanServerInfo {
     port: u16,
 }
 
+#[derive(serde::Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WebAuthConfig {
+    enabled: bool,
+    scope: String,
+    username: String,
+    password_salt: String,
+    password_hash: String,
+    session_secret: String,
+    remember_days: Option<u32>,
+}
+
 struct LanServerHandle {
     port: u16,
     url: String,
     token: String,
     require_token: bool,
+    web_auth: WebAuthConfig,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -760,19 +774,107 @@ fn header_value(headers: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-fn request_is_authorized(path: &str, headers: &str) -> bool {
-    let (expected, require_token) = lan_mutex()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|server| (server.token.clone(), server.require_token)))
-        .unwrap_or_else(|| (String::new(), true));
-    if !require_token {
+fn cookie_value(headers: &str, key: &str) -> String {
+    header_value(headers, "cookie")
+        .split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .find(|(name, _)| *name == key)
+        .map(|(_, value)| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push_str(&format!("{byte:02x}"));
+    }
+    output
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hex_encode(&hasher.finalize())
+}
+
+fn password_hash(password: &str, salt: &str) -> String {
+    sha256_hex(&format!("{salt}\0{password}"))
+}
+
+fn now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn host_without_port(headers: &str) -> String {
+    let host = header_value(headers, "host").to_lowercase();
+    if host.starts_with('[') {
+        return host.trim_start_matches('[').split(']').next().unwrap_or("").to_string();
+    }
+    host.split(':').next().unwrap_or("").to_string()
+}
+
+fn host_is_local_or_private(headers: &str) -> bool {
+    let host = host_without_port(headers);
+    if host.is_empty() || host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    if expected.is_empty() {
+    let parts = host.split('.').filter_map(|part| part.parse::<u8>().ok()).collect::<Vec<_>>();
+    if parts.len() == 4 {
+        return parts[0] == 10
+            || parts[0] == 127
+            || (parts[0] == 192 && parts[1] == 168)
+            || (parts[0] == 172 && (16..=31).contains(&parts[1]))
+            || (parts[0] == 100 && (64..=127).contains(&parts[1]));
+    }
+    false
+}
+
+fn session_signature(auth: &WebAuthConfig, expires: u64) -> String {
+    sha256_hex(&format!("{}\0{}\0{}", auth.session_secret, auth.username, expires))
+}
+
+fn web_auth_requires_login(auth: &WebAuthConfig, headers: &str) -> bool {
+    if !auth.enabled {
         return false;
     }
-    query_value(path, "access") == expected || header_value(headers, "X-BuildBook-Token") == expected
+    if auth.password_hash.is_empty() || auth.password_salt.is_empty() || auth.session_secret.is_empty() {
+        return true;
+    }
+    auth.scope == "all" || !host_is_local_or_private(headers)
+}
+
+fn request_has_web_session(auth: &WebAuthConfig, headers: &str) -> bool {
+    let value = cookie_value(headers, "buildbook_session");
+    let Some((expires_text, signature)) = value.split_once('.') else {
+        return false;
+    };
+    let Ok(expires) = expires_text.parse::<u64>() else {
+        return false;
+    };
+    expires > now_seconds() && signature == session_signature(auth, expires)
+}
+
+fn request_auth_error(path: &str, headers: &str) -> Option<&'static str> {
+    let (expected, require_token, web_auth) = lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| (server.token.clone(), server.require_token, server.web_auth.clone())))
+        .unwrap_or_else(|| (String::new(), true, WebAuthConfig::default()));
+    if require_token {
+        if expected.is_empty() {
+            return Some("BuildBook access code is required.");
+        }
+        if query_value(path, "access") != expected && header_value(headers, "X-BuildBook-Token") != expected {
+            return Some("BuildBook access code is required.");
+        }
+    }
+    if web_auth_requires_login(&web_auth, headers) && !request_has_web_session(&web_auth, headers) {
+        return Some("BuildBook login is required.");
+    }
+    None
 }
 
 fn validate_public_web_url(url: &str) -> Result<String, String> {
@@ -818,12 +920,36 @@ fn content_type(path: &str) -> &'static str {
 }
 
 fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
+    send_response_with_headers(stream, status, content_type, body, &[]);
+}
+
+fn send_response_with_headers(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8], headers: &[String]) {
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     );
+    for header in headers {
+        let _ = write!(stream, "{header}\r\n");
+    }
+    let _ = write!(stream, "\r\n");
     let _ = stream.write_all(body);
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebLoginRequest {
+    username: String,
+    password: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebAuthStatus {
+    login_enabled: bool,
+    login_required: bool,
+    authenticated: bool,
+    username: String,
 }
 
 fn find_index_html(root: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
@@ -939,6 +1065,68 @@ fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result
     body_from_request(stream, initial, headers)
 }
 
+fn current_web_auth() -> WebAuthConfig {
+    lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| server.web_auth.clone()))
+        .unwrap_or_default()
+}
+
+fn send_web_auth_status(stream: &mut TcpStream, headers: &str) {
+    let auth = current_web_auth();
+    let status = WebAuthStatus {
+        login_enabled: auth.enabled,
+        login_required: web_auth_requires_login(&auth, headers),
+        authenticated: request_has_web_session(&auth, headers),
+        username: if auth.username.trim().is_empty() { "admin".to_string() } else { auth.username.clone() },
+    };
+    let body = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
+    send_response(stream, "200 OK", "application/json; charset=utf-8", body.as_bytes());
+}
+
+fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
+    let auth = current_web_auth();
+    if !web_auth_requires_login(&auth, headers) {
+        send_response(stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}");
+        return;
+    }
+    if auth.password_hash.is_empty() || auth.password_salt.is_empty() || auth.session_secret.is_empty() {
+        send_response(stream, "403 Forbidden", "text/plain; charset=utf-8", b"Web login is enabled but no admin password is configured.");
+        return;
+    }
+    let request = match serde_json::from_slice::<WebLoginRequest>(body) {
+        Ok(request) => request,
+        Err(error) => {
+            let message = format!("Invalid login request: {error}");
+            send_response(stream, "400 Bad Request", "text/plain; charset=utf-8", message.as_bytes());
+            return;
+        }
+    };
+    let expected_user = if auth.username.trim().is_empty() { "admin" } else { auth.username.trim() };
+    let expected_hash = password_hash(&request.password, &auth.password_salt);
+    if request.username.trim() != expected_user || expected_hash != auth.password_hash {
+        send_response(stream, "401 Unauthorized", "text/plain; charset=utf-8", b"Invalid BuildBook username or password.");
+        return;
+    }
+    let remember_days = auth.remember_days.unwrap_or(30).clamp(1, 365) as u64;
+    let max_age = remember_days * 24 * 60 * 60;
+    let expires = now_seconds() + max_age;
+    let value = format!("{}.{}", expires, session_signature(&auth, expires));
+    let cookie = format!("Set-Cookie: buildbook_session={value}; Path=/; Max-Age={max_age}; HttpOnly; SameSite=Lax");
+    send_response_with_headers(stream, "200 OK", "application/json; charset=utf-8", b"{\"ok\":true}", &[cookie]);
+}
+
+fn handle_web_logout(stream: &mut TcpStream) {
+    send_response_with_headers(
+        stream,
+        "200 OK",
+        "application/json; charset=utf-8",
+        b"{\"ok\":true}",
+        &["Set-Cookie: buildbook_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax".to_string()],
+    );
+}
+
 fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     let mut buffer = vec![0; 64 * 1024];
     let count = match stream.read(&mut buffer) {
@@ -959,9 +1147,35 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 
     let headers = request.split("\r\n\r\n").next().unwrap_or("");
 
+    if path.starts_with("/api/auth-status") {
+        send_web_auth_status(&mut stream, headers);
+        return;
+    }
+
+    if path.starts_with("/api/login") {
+        if method == "POST" {
+            let body = match request_body(&mut stream, &buffer, headers) {
+                Ok(body) => body,
+                Err(error) => {
+                    send_response(&mut stream, "400 Bad Request", "text/plain; charset=utf-8", error.as_bytes());
+                    return;
+                }
+            };
+            handle_web_login(&mut stream, &body, headers);
+            return;
+        }
+    }
+
+    if path.starts_with("/api/logout") {
+        if method == "POST" {
+            handle_web_logout(&mut stream);
+            return;
+        }
+    }
+
     if path.starts_with("/api/state") {
-        if !request_is_authorized(path, headers) {
-            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+        if let Some(error) = request_auth_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
         if method == "GET" {
@@ -996,8 +1210,8 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/files") {
-        if !request_is_authorized(path, headers) {
-            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+        if let Some(error) = request_auth_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
         if method == "GET" {
@@ -1042,8 +1256,8 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/download-url") {
-        if !request_is_authorized(path, headers) {
-            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+        if let Some(error) = request_auth_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
         if method == "POST" {
@@ -1056,8 +1270,8 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/storage-scan") {
-        if !request_is_authorized(path, headers) {
-            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+        if let Some(error) = request_auth_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
         if method == "POST" {
@@ -1080,8 +1294,8 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     }
 
     if path.starts_with("/api/reset-storage") {
-        if !request_is_authorized(path, headers) {
-            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", b"BuildBook access code is required.");
+        if let Some(error) = request_auth_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
             return;
         }
         if method == "POST" {
@@ -1108,13 +1322,17 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
 }
 
 #[tauri::command]
-fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_token: bool) -> Result<LanServerInfo, String> {
+fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_token: bool, web_auth: Option<WebAuthConfig>) -> Result<LanServerInfo, String> {
     if require_token && token.trim().is_empty() {
         return Err("LAN access code is missing.".to_string());
     }
+    let web_auth = web_auth.unwrap_or_default();
+    if web_auth.enabled && (web_auth.password_hash.is_empty() || web_auth.password_salt.is_empty() || web_auth.session_secret.is_empty()) {
+        return Err("Web login is enabled but no admin password is configured.".to_string());
+    }
     let mut guard = lan_mutex().lock().map_err(|_| "Could not lock LAN server state.".to_string())?;
     if let Some(server) = guard.as_ref() {
-        if server.port == port && server.token == token && server.require_token == require_token {
+        if server.port == port && server.token == token && server.require_token == require_token && server.web_auth == web_auth {
             return Ok(LanServerInfo { running: true, url: server.url.clone(), port: server.port });
         }
         drop(guard);
@@ -1145,7 +1363,7 @@ fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_tok
         }
     });
 
-    *guard = Some(LanServerHandle { port, url: url.clone(), token, require_token, stop, thread: Some(thread) });
+    *guard = Some(LanServerHandle { port, url: url.clone(), token, require_token, web_auth, stop, thread: Some(thread) });
     Ok(LanServerInfo { running: true, url, port })
 }
 

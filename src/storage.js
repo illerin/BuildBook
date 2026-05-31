@@ -50,6 +50,21 @@ export async function loadAppState() {
   }
 }
 
+export async function webLogin(username, password) {
+  if (!isLanWebClient()) return;
+  const response = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  if (!response.ok) throw new Error(await response.text() || 'Could not log in.');
+}
+
+export async function webLogout() {
+  if (!isLanWebClient()) return;
+  await fetch('/api/logout', { method: 'POST' });
+}
+
 export async function saveAppState(state) {
   const normalized = normalizeState(state);
   const pretty = isTauri() || !isLanWebClient();

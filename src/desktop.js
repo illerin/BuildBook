@@ -267,9 +267,9 @@ export function assetUrl(path) {
   return isTauri() ? convertFileSrc(path) : path;
 }
 
-export async function startLanServer(port, token, requireToken = true) {
+export async function startLanServer(port, token, requireToken = true, webAuth = {}) {
   if (!isTauri()) return { running: false, url: '' };
-  return invoke('start_lan_server', { port: Number(port) || 8787, token, requireToken });
+  return invoke('start_lan_server', { port: Number(port) || 8787, token, requireToken, webAuth });
 }
 
 export async function stopLanServer() {

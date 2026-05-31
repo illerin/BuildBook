@@ -7,6 +7,7 @@ import {
   DEFAULT_REVISION_SETTINGS,
   DEFAULT_STATE,
   DEFAULT_THEME,
+  DEFAULT_WEB_AUTH,
   STATUSES,
   categoryLabel,
   fileTrackerLabel,
@@ -43,7 +44,7 @@ import {
   startLanServer,
   stopLanServer,
 } from './desktop';
-import { isRemoteBuildBookClient, loadAppState, saveAppState } from './storage';
+import { isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
 import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
@@ -74,6 +75,22 @@ const FULL_PROJECT_EXPORT_OPTIONS = {
 const GITHUB_REPOSITORY_URL = 'https://github.com/illerin/BuildBook';
 const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/illerin/BuildBook/releases/latest';
 const GITHUB_RELEASES_API = 'https://api.github.com/repos/illerin/BuildBook/releases?per_page=30';
+
+function randomSecret() {
+  if (crypto?.randomUUID) return crypto.randomUUID();
+  const values = new Uint8Array(16);
+  crypto?.getRandomValues?.(values);
+  return values.length ? [...values].map((byte) => byte.toString(16).padStart(2, '0')).join('') : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hashWebPassword(password, salt = randomSecret()) {
+  return { passwordSalt: salt, passwordHash: await sha256Hex(`${salt}\0${password}`) };
+}
 
 function droppedFileList(event, accept = () => true) {
   event.preventDefault();
@@ -2370,6 +2387,10 @@ export default function App() {
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [accessCode, setAccessCode] = useState('');
+  const [loginName, setLoginName] = useState('admin');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [loginError, setLoginError] = useState('');
   const [loadBusy, setLoadBusy] = useState(true);
   const [stateBackups, setStateBackups] = useState([]);
   const [restoreBusy, setRestoreBusy] = useState(false);
@@ -2433,6 +2454,20 @@ export default function App() {
     }
   };
 
+  const submitWebLogin = async () => {
+    setLoginBusy(true);
+    setLoginError('');
+    try {
+      await webLogin(loginName.trim() || 'admin', loginPassword);
+      setLoginPassword('');
+      await reloadState();
+    } catch (error) {
+      setLoginError(String(error?.message || error));
+    } finally {
+      setLoginBusy(false);
+    }
+  };
+
   useEffect(() => {
     reloadState();
   }, []);
@@ -2492,17 +2527,34 @@ export default function App() {
   useEffect(() => {
     if (!state) return;
     const lan = state.lanServer || {};
+    const webAuth = state.webAuth || DEFAULT_WEB_AUTH;
+    if (webAuth.enabled && !webAuth.sessionSecret) {
+      updateState((current) => ({ ...current, webAuth: { ...(current.webAuth || DEFAULT_WEB_AUTH), sessionSecret: randomSecret() } }));
+      return;
+    }
     if (lan.enabled && lan.requireToken !== false && !lan.token) {
       const token = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), token } }));
       return;
     }
     if (lan.enabled && (lan.token || lan.requireToken === false)) {
-      startLanServer(lan.port || 8787, lan.token || '', lan.requireToken !== false).catch((error) => console.error(error));
+      startLanServer(lan.port || 8787, lan.token || '', lan.requireToken !== false, webAuth).catch((error) => console.error(error));
       return;
     }
     stopLanServer().catch(() => {});
-  }, [state?.lanServer?.enabled, state?.lanServer?.port, state?.lanServer?.token, state?.lanServer?.requireToken]);
+  }, [
+    state?.lanServer?.enabled,
+    state?.lanServer?.port,
+    state?.lanServer?.token,
+    state?.lanServer?.requireToken,
+    state?.webAuth?.enabled,
+    state?.webAuth?.scope,
+    state?.webAuth?.username,
+    state?.webAuth?.passwordSalt,
+    state?.webAuth?.passwordHash,
+    state?.webAuth?.sessionSecret,
+    state?.webAuth?.rememberDays,
+  ]);
 
   useEffect(() => {
     if (!state) return;
@@ -2560,7 +2612,29 @@ export default function App() {
               </button>
             </>
           )}
-          {!loadError.includes('access code') && (
+          {loadError.includes('login') && (
+            <>
+              <label>
+                Username
+                <input value={loginName} onChange={(event) => setLoginName(event.target.value)} placeholder="admin" autoComplete="username" />
+              </label>
+              <label>
+                Password
+                <input
+                  type="password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  onKeyDown={(event) => event.key === 'Enter' && submitWebLogin()}
+                  autoComplete="current-password"
+                />
+              </label>
+              <button onClick={submitWebLogin} disabled={loginBusy || !loginPassword}>
+                {loginBusy ? 'Logging in...' : 'Log In'}
+              </button>
+              {loginError && <p className="error-text">{loginError}</p>}
+            </>
+          )}
+          {!loadError.includes('access code') && !loadError.includes('login') && (
             <>
               <div className="startup-recovery-actions">
                 <button onClick={reloadState} disabled={restoreBusy}>Retry</button>
@@ -8461,6 +8535,10 @@ function Settings({ state, updateState }) {
   const [availableReleaseUrl, setAvailableReleaseUrl] = useState('');
   const [availableUpdate, setAvailableUpdate] = useState(null);
   const [updateProgress, setUpdateProgress] = useState('');
+  const [webPassword, setWebPassword] = useState('');
+  const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
+  const [webAuthNotice, setWebAuthNotice] = useState('');
+  const [webAuthError, setWebAuthError] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -8468,6 +8546,10 @@ function Settings({ state, updateState }) {
 
   const updateLanServer = (patch) => {
     updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), ...patch } }));
+  };
+
+  const updateWebAuth = (patch) => {
+    updateState((current) => ({ ...current, webAuth: { ...(current.webAuth || DEFAULT_WEB_AUTH), ...patch } }));
   };
 
   const updateTheme = (theme) => {
@@ -8503,6 +8585,48 @@ function Settings({ state, updateState }) {
     });
   };
 
+  const saveWebPassword = async () => {
+    setWebAuthError('');
+    setWebAuthNotice('');
+    if (webPassword.length < 8) {
+      setWebAuthError('Use at least 8 characters for the admin password.');
+      return;
+    }
+    if (webPassword !== webPasswordConfirm) {
+      setWebAuthError('Password confirmation does not match.');
+      return;
+    }
+    try {
+      const hashed = await hashWebPassword(webPassword);
+      updateWebAuth({ ...hashed, sessionSecret: state.webAuth?.sessionSecret || randomSecret() });
+      setWebPassword('');
+      setWebPasswordConfirm('');
+      setWebAuthNotice('Admin password saved.');
+    } catch (error) {
+      setWebAuthError(String(error?.message || error));
+    }
+  };
+
+  const setWebLoginEnabled = (enabled) => {
+    setWebAuthError('');
+    setWebAuthNotice('');
+    if (enabled && !state.webAuth?.passwordHash) {
+      setWebAuthError('Set an admin password before enabling web login.');
+      return;
+    }
+    updateWebAuth({ enabled, sessionSecret: state.webAuth?.sessionSecret || randomSecret() });
+  };
+
+  const logoutWebSession = async () => {
+    setWebAuthError('');
+    try {
+      await webLogout();
+      window.location.reload();
+    } catch (error) {
+      setWebAuthError(String(error?.message || error));
+    }
+  };
+
   useEffect(() => {
     let active = true;
     const syncLanServer = async () => {
@@ -8512,7 +8636,7 @@ function Settings({ state, updateState }) {
         if (state.lanServer?.enabled) {
           const token = state.lanServer.token;
           const requireToken = state.lanServer.requireToken !== false;
-          const info = await startLanServer(state.lanServer.port || 8787, token || '', requireToken);
+          const info = await startLanServer(state.lanServer.port || 8787, token || '', requireToken, state.webAuth || DEFAULT_WEB_AUTH);
           const accessUrl = info.url ? (requireToken ? `${info.url}?access=${encodeURIComponent(token)}` : info.url) : '';
           const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
           if (active) {
@@ -8537,7 +8661,18 @@ function Settings({ state, updateState }) {
     };
     syncLanServer();
     return () => { active = false; };
-  }, [state.lanServer?.enabled, state.lanServer?.port, state.lanServer?.token, state.lanServer?.requireToken]);
+  }, [
+    state.lanServer?.enabled,
+    state.lanServer?.port,
+    state.lanServer?.token,
+    state.lanServer?.requireToken,
+    state.webAuth?.enabled,
+    state.webAuth?.scope,
+    state.webAuth?.username,
+    state.webAuth?.passwordHash,
+    state.webAuth?.sessionSecret,
+    state.webAuth?.rememberDays,
+  ]);
 
   const exportBackup = async () => {
     setBackupExportBusy(true);
@@ -8932,6 +9067,66 @@ function Settings({ state, updateState }) {
         {lanNotice && <p className="success-text">{lanNotice}</p>}
         {lanError && <p className="error-text">{lanError}</p>}
         <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
+      </section>
+      <section className="panel settings-section">
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Web Login Security</h2>
+            <p>Require an admin login for browser access when using a domain or reverse proxy.</p>
+          </div>
+          <label className="check-row settings-toggle">
+            <input
+              type="checkbox"
+              checked={Boolean(state.webAuth?.enabled)}
+              onChange={(event) => setWebLoginEnabled(event.target.checked)}
+            />
+            Require admin login
+          </label>
+        </div>
+        {isRemoteBuildBookClient() && (
+          <div className="settings-actions left-actions">
+            <button className="secondary" onClick={logoutWebSession}>Log Out This Browser</button>
+          </div>
+        )}
+        <div className="web-auth-grid">
+          <label>
+            Apply login to
+            <select value={state.webAuth?.scope || 'domain'} onChange={(event) => updateWebAuth({ scope: event.target.value })}>
+              <option value="domain">Domain/proxy access only</option>
+              <option value="all">All browser access</option>
+            </select>
+          </label>
+          <label>
+            Admin username
+            <input value={state.webAuth?.username || 'admin'} onChange={(event) => updateWebAuth({ username: event.target.value || 'admin' })} />
+          </label>
+          <label>
+            Remember device days
+            <input
+              type="number"
+              min="1"
+              max="365"
+              value={state.webAuth?.rememberDays || 30}
+              onChange={(event) => updateWebAuth({ rememberDays: Number(event.target.value) || 30 })}
+            />
+          </label>
+        </div>
+        <div className="web-auth-password-row">
+          <label>
+            New password
+            <input type="password" value={webPassword} onChange={(event) => setWebPassword(event.target.value)} autoComplete="new-password" />
+          </label>
+          <label>
+            Confirm password
+            <input type="password" value={webPasswordConfirm} onChange={(event) => setWebPasswordConfirm(event.target.value)} autoComplete="new-password" />
+          </label>
+          <button className="secondary" onClick={saveWebPassword}>Save Password</button>
+        </div>
+        <p className="settings-note">
+          Password status: {state.webAuth?.passwordHash ? 'set' : 'not set'}. Local desktop use never requires this login.
+        </p>
+        {webAuthNotice && <p className="success-text">{webAuthNotice}</p>}
+        {webAuthError && <p className="error-text">{webAuthError}</p>}
       </section>
       <section className="panel settings-section">
         <div className="settings-section-row">
