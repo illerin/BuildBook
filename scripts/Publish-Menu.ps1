@@ -174,6 +174,17 @@ function Increment-LiveVersion {
     throw "Invalid live version format: $Version"
 }
 
+function Increment-LiveMajorVersion {
+    param([string]$Version)
+
+    if ($Version -match '^(\d+)\.(\d+)\.(\d+)(?:-test\.\d+)?$') {
+        $major = [int]$matches[1] + 1
+        return "$major.0.0"
+    }
+
+    throw "Invalid live version format: $Version"
+}
+
 function Get-PreviousTag {
     param([string]$Pattern)
 
@@ -349,6 +360,51 @@ function Publish-Live {
     Write-Host "Test Reset To: $newTestVersion"
 }
 
+function Publish-LiveMajor {
+    Assert-CleanRepo
+
+    Invoke-Git checkout $TestBranch
+    Invoke-Git pull --ff-only origin $TestBranch
+    Assert-CleanRepo
+
+    Invoke-Git checkout $MainBranch
+    Invoke-Git pull --ff-only origin $MainBranch
+    Assert-CleanRepo
+
+    $mainVersion = Get-AppVersion
+    $newLiveVersion = Increment-LiveMajorVersion $mainVersion
+    $liveTag = "v$newLiveVersion"
+    Assert-TagAvailable $liveTag
+    $previousLiveTag = Get-PreviousTag 'v[0-9]*'
+
+    Invoke-Git merge $TestBranch
+    Commit-Version $newLiveVersion "Live Release $newLiveVersion" 'live' $previousLiveTag
+    Invoke-Git push origin $MainBranch
+    Invoke-Git tag $liveTag
+    Invoke-Git push origin $liveTag
+
+    Invoke-Git checkout $TestBranch
+    Invoke-Git merge $MainBranch
+
+    $newTestVersion = "$newLiveVersion-test.0"
+    Set-AppVersion $newTestVersion
+    Invoke-Git add -- @VersionFiles
+
+    & git diff --cached --quiet -- @VersionFiles
+    if ($LASTEXITCODE -ne 0) {
+        Invoke-Git commit -m "Reset test version $newTestVersion"
+        Invoke-Git push origin $TestBranch
+    } else {
+        Write-Host "Test branch already has version $newTestVersion"
+    }
+
+    Write-Host ""
+    Write-Host "LIVE major release published."
+    Write-Host "Live Version: $newLiveVersion"
+    Write-Host "Live Tag: $liveTag"
+    Write-Host "Test Reset To: $newTestVersion"
+}
+
 Write-Host ""
 Write-Host "==========================="
 Write-Host " BuildBook Publish Menu"
@@ -356,6 +412,7 @@ Write-Host "==========================="
 Write-Host ""
 Write-Host "1. Publish TEST"
 Write-Host "2. Publish LIVE"
+Write-Host "3. Publish LIVE Major REV"
 Write-Host ""
 
 $choice = Read-Host "Select option"
@@ -363,5 +420,6 @@ $choice = Read-Host "Select option"
 switch ($choice) {
     '1' { Publish-Test }
     '2' { Publish-Live }
+    '3' { Publish-LiveMajor }
     default { throw 'Invalid selection.' }
 }
