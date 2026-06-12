@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0-test.1 - 2026-06-11
+
+Changes since test-v0.3.197-test.9.
+
+### Changes
+
+- Add connection/auth status UI and checks
+- Add live minor publish option
+- Add major live publish option
+
 ## 0.4.0 - 2026-06-10
 
 Changes since v0.3.193.
