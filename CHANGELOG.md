@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0-test.2 - 2026-06-11
+
+Changes since test-v0.4.0-test.1.
+
+### Changes
+
+- Fixed publish script
+- Add multi-computer sync and host discovery
+
 ## 0.4.0-test.1 - 2026-06-11
 
 Changes since test-v0.3.197-test.9.
