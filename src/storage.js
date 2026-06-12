@@ -78,6 +78,24 @@ export async function webLogout() {
   await fetch('/api/logout', { method: 'POST', headers: apiHeaders() });
 }
 
+export async function fetchWebAuthStatus() {
+  if (!isLanWebClient()) {
+    return {
+      loginEnabled: false,
+      loginRequired: false,
+      authenticated: true,
+      username: 'local',
+    };
+  }
+
+  const response = await fetch('/api/auth-status', { headers: apiHeaders() });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || 'Could not reach the BuildBook host.');
+  }
+  return response.json();
+}
+
 export async function saveAppState(state) {
   const normalized = normalizeState(state);
   const pretty = isTauri() || !isLanWebClient();

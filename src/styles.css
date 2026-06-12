@@ -310,6 +310,49 @@ label {
   padding: 16px 18px 0;
 }
 
+.sidebar-status {
+  display: grid;
+  gap: 6px;
+  margin-top: auto;
+  padding: 16px 18px 0;
+}
+
+.connection-state,
+.connection-banner {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.connection-banner {
+  margin-bottom: 12px;
+  background: var(--surface);
+  color: var(--text-soft);
+}
+
+.connection-local,
+.connection-connected {
+  background: rgba(60, 160, 88, 0.12);
+  border-color: rgba(60, 160, 88, 0.4);
+  color: #6be08e;
+}
+
+.connection-checking,
+.connection-login-required {
+  background: rgba(217, 164, 45, 0.12);
+  border-color: rgba(217, 164, 45, 0.4);
+  color: #f2c76c;
+}
+
+.connection-disconnected {
+  background: rgba(220, 70, 70, 0.12);
+  border-color: rgba(220, 70, 70, 0.45);
+  color: #ff8c8c;
+}
+
 .save-state.error {
   color: var(--danger);
 }
@@ -3896,6 +3939,10 @@ article h3,
   }
 
   .save-state {
+    display: none;
+  }
+
+  .sidebar-status {
     display: none;
   }
 

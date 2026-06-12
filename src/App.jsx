@@ -44,7 +44,7 @@ import {
   startLanServer,
   stopLanServer,
 } from './desktop';
-import { isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
+import { fetchWebAuthStatus, isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
 import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
@@ -2413,6 +2413,8 @@ export default function App() {
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [restoreError, setRestoreError] = useState('');
   const [saveState, setSaveState] = useState('saved');
+  const [connectionState, setConnectionState] = useState(isRemoteBuildBookClient() ? 'checking' : 'local');
+  const [connectionMessage, setConnectionMessage] = useState(isRemoteBuildBookClient() ? 'Checking connection...' : 'Local app');
   const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
   const saveChainRef = useRef(Promise.resolve());
@@ -2423,6 +2425,27 @@ export default function App() {
 
   const persistedStateText = (value) => JSON.stringify(normalizeState(value), null, 2);
 
+  const refreshConnectionStatus = async () => {
+    if (!isRemoteBuildBookClient()) {
+      setConnectionState('local');
+      setConnectionMessage('Local app');
+      return;
+    }
+    try {
+      const status = await fetchWebAuthStatus();
+      if (status.loginEnabled && status.loginRequired && !status.authenticated) {
+        setConnectionState('login-required');
+        setConnectionMessage('Login required to save to the host.');
+        return;
+      }
+      setConnectionState('connected');
+      setConnectionMessage(`Connected to host${status.username ? ` as ${status.username}` : ''}.`);
+    } catch (error) {
+      setConnectionState('disconnected');
+      setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
+    }
+  };
+
   const reloadState = async () => {
     setLoadBusy(true);
     setLoadError('');
@@ -2432,10 +2455,15 @@ export default function App() {
       setState(loaded);
       setStateBackups([]);
       setRestoreError('');
+      await refreshConnectionStatus();
     } catch (error) {
       setState(null);
       setLoadError(String(error?.message || error));
       listStateBackups().then(setStateBackups).catch(() => setStateBackups([]));
+      if (isRemoteBuildBookClient()) {
+        setConnectionState('disconnected');
+        setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
+      }
     } finally {
       setLoadBusy(false);
     }
@@ -2478,6 +2506,7 @@ export default function App() {
       await webLogin(loginName.trim() || 'admin', loginPassword);
       setLoginPassword('');
       await reloadState();
+      await refreshConnectionStatus();
     } catch (error) {
       setLoginError(String(error?.message || error));
     } finally {
@@ -2583,6 +2612,7 @@ export default function App() {
     const timer = window.setInterval(async () => {
       if (!stateRef.current || saveStateRef.current === 'saving') return;
       try {
+        await refreshConnectionStatus();
         const loaded = await loadAppState();
         const loadedText = persistedStateText(loaded);
         if (loadedText === lastPersistedStateRef.current) return;
@@ -2591,6 +2621,10 @@ export default function App() {
         setSaveState('saved');
       } catch (error) {
         console.error(error);
+        if (isRemoteBuildBookClient()) {
+          setConnectionState('disconnected');
+          setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
+        }
       }
     }, 2000);
     return () => window.clearInterval(timer);
@@ -2730,9 +2764,13 @@ export default function App() {
             {label}
           </button>
         ))}
-        <div className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>{saveState}</div>
+        <div className="sidebar-status">
+          <div className={`connection-state connection-${connectionState}`}>{connectionState === 'login-required' ? 'Login required' : connectionState === 'disconnected' ? 'Disconnected' : connectionState === 'connected' ? 'Connected' : connectionState === 'local' ? 'Local' : 'Checking...'}</div>
+          <div className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>{saveState}</div>
+        </div>
       </aside>
       <main className="workspace">
+        {isRemoteBuildBookClient() && <div className={`connection-banner connection-${connectionState}`}>{connectionMessage}</div>}
         {tab === 'projects' && <Projects state={state} updateState={updateState} />}
         {tab === 'completed-projects' && <Projects state={state} updateState={updateState} initialFilter="completed" lockedFilter />}
         {tab === 'parts' && <Parts state={state} updateState={updateState} />}
