@@ -19,6 +19,7 @@ import {
   assetUrl,
   cleanupOrphanedFiles,
   deleteManagedFiles,
+  discoverBuildBookHosts,
   downloadBytes,
   downloadUrlFile,
   extensionAllowed,
@@ -33,6 +34,8 @@ import {
   pickLinkedFolderPath,
   pickLinkedFilePath,
   prepareEditableFile,
+  probeBuildBookHost,
+  readSyncConfig,
   readShellThumbnail,
   readStoredFile,
   resetManagedStorage,
@@ -43,6 +46,7 @@ import {
   setCloseToTray,
   startLanServer,
   stopLanServer,
+  writeSyncConfig,
 } from './desktop';
 import { fetchWebAuthStatus, isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
 import { createZip, readZip, zipText } from './zip';
@@ -8595,6 +8599,14 @@ function Settings({ state, updateState }) {
   const [webPasswordConfirm, setWebPasswordConfirm] = useState('');
   const [webAuthNotice, setWebAuthNotice] = useState('');
   const [webAuthError, setWebAuthError] = useState('');
+  const [syncConfig, setSyncConfig] = useState(null);
+  const [syncDeviceName, setSyncDeviceName] = useState('');
+  const [syncHostUrl, setSyncHostUrl] = useState('');
+  const [syncHostToken, setSyncHostToken] = useState('');
+  const [syncHosts, setSyncHosts] = useState([]);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncNotice, setSyncNotice] = useState('');
+  const [syncError, setSyncError] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -8614,6 +8626,121 @@ function Settings({ state, updateState }) {
 
   const updateRevisionSettings = (revisionSettings) => {
     updateState((current) => ({ ...current, revisionSettings: normalizeRevisionSettings(revisionSettings) }));
+  };
+
+  useEffect(() => {
+    if (remoteClient) return;
+    readSyncConfig()
+      .then((config) => {
+        setSyncConfig(config);
+        setSyncDeviceName(config.deviceName || '');
+        setSyncHostUrl(config.hostUrl || '');
+        setSyncHostToken(config.hostToken || '');
+      })
+      .catch((error) => setSyncError(String(error)));
+  }, [remoteClient]);
+
+  const saveDeviceName = async () => {
+    if (!syncConfig || !syncDeviceName.trim()) return;
+    setSyncBusy(true);
+    setSyncError('');
+    try {
+      const saved = await writeSyncConfig({ ...syncConfig, deviceName: syncDeviceName.trim() });
+      setSyncConfig(saved);
+      setSyncNotice('Device name saved.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const createHostFromThisComputer = async () => {
+    if (!syncConfig) return;
+    if (!window.confirm('Make this computer the authoritative BuildBook host using its current projects, parts, settings, and files?')) return;
+    setSyncBusy(true);
+    setSyncError('');
+    setSyncNotice('');
+    try {
+      const saved = await writeSyncConfig({
+        ...syncConfig,
+        mode: 'host',
+        deviceName: syncDeviceName.trim() || syncConfig.deviceName,
+        hostUrl: '',
+        hostToken: '',
+      });
+      setSyncConfig(saved);
+      updateLanServer({
+        enabled: true,
+        requireToken: state.lanServer?.requireToken !== false,
+        token: state.lanServer?.token || (crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`),
+      });
+      setSyncNotice('This computer is now marked as the BuildBook host. LAN access is starting.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const discoverHosts = async () => {
+    setSyncBusy(true);
+    setSyncError('');
+    setSyncNotice('');
+    try {
+      const hosts = await discoverBuildBookHosts(state.lanServer?.port || 8787);
+      setSyncHosts(hosts);
+      setSyncNotice(hosts.length ? `Found ${hosts.length} BuildBook host${hosts.length === 1 ? '' : 's'}.` : 'No BuildBook hosts were found on this network.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const connectToHost = async () => {
+    if (!syncConfig || !syncHostUrl.trim()) return;
+    setSyncBusy(true);
+    setSyncError('');
+    setSyncNotice('');
+    try {
+      const info = await probeBuildBookHost(syncHostUrl, syncHostToken);
+      if (!info.hostingEnabled) {
+        throw new Error(`${info.deviceName || 'That computer'} is serving BuildBook, but it has not been configured as an authoritative host.`);
+      }
+      const saved = await writeSyncConfig({
+        ...syncConfig,
+        mode: 'client',
+        deviceName: syncDeviceName.trim() || syncConfig.deviceName,
+        hostUrl: info.url,
+        hostToken: syncHostToken.trim(),
+      });
+      setSyncConfig(saved);
+      setSyncHostUrl(info.url);
+      setSyncNotice(`Paired with ${info.deviceName}. Local data has not been replaced; synchronized data activation is the next phase.`);
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const returnToLocalMode = async () => {
+    if (!syncConfig) return;
+    setSyncBusy(true);
+    setSyncError('');
+    try {
+      const saved = await writeSyncConfig({ ...syncConfig, mode: 'local', hostUrl: '', hostToken: '' });
+      setSyncConfig(saved);
+      setSyncHostUrl('');
+      setSyncHostToken('');
+      setSyncHosts([]);
+      setSyncNotice('This computer is using its standalone local data.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
   };
 
   const exportTheme = () => {
@@ -9066,6 +9193,67 @@ function Settings({ state, updateState }) {
           </div>
         ) : null}
         {storageError && <p className="error-text">{storageError}</p>}
+      </section>
+      <section className="panel settings-section">
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Multi-Computer Setup</h2>
+            <p>Use this installation locally, make it the authoritative host, or pair it with another BuildBook host.</p>
+          </div>
+          {syncConfig && <span className={`sync-mode-badge sync-mode-${syncConfig.mode}`}>{syncConfig.mode}</span>}
+        </div>
+        {remoteClient ? (
+          <p className="settings-note">Host and client setup must be changed from the desktop app.</p>
+        ) : (
+          <>
+            <div className="sync-device-row">
+              <label>
+                This computer
+                <input value={syncDeviceName} onChange={(event) => setSyncDeviceName(event.target.value)} placeholder="Workshop PC" />
+              </label>
+              <button className="secondary" onClick={saveDeviceName} disabled={syncBusy || !syncDeviceName.trim()}>Save Name</button>
+              {syncConfig?.deviceId && <span className="settings-note">Device ID: {syncConfig.deviceId}</span>}
+            </div>
+            <div className="sync-mode-actions">
+              <button onClick={createHostFromThisComputer} disabled={syncBusy || !syncConfig}>Create Host from This Computer</button>
+              <button className="secondary" onClick={returnToLocalMode} disabled={syncBusy || !syncConfig || syncConfig.mode === 'local'}>Use Standalone Local Data</button>
+            </div>
+            <div className="sync-connect-panel">
+              <div className="section-title">
+                <h3>Connect to a Host</h3>
+                <button className="secondary" onClick={discoverHosts} disabled={syncBusy}>{syncBusy ? 'Working...' : 'Find Hosts'}</button>
+              </div>
+              {syncHosts.length > 0 && (
+                <div className="sync-host-list">
+                  {syncHosts.map((host) => (
+                    <button
+                      key={host.deviceId}
+                      type="button"
+                      className="secondary"
+                      onClick={() => setSyncHostUrl(host.url)}
+                    >
+                      <strong>{host.deviceName}</strong>
+                      <span>{host.url}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="sync-connect-row">
+                <label>
+                  Host address
+                  <input value={syncHostUrl} onChange={(event) => setSyncHostUrl(event.target.value)} placeholder="http://192.168.1.20:8787" />
+                </label>
+                <label>
+                  Access token
+                  <input type="password" value={syncHostToken} onChange={(event) => setSyncHostToken(event.target.value)} placeholder="Optional if disabled on host" />
+                </label>
+                <button onClick={connectToHost} disabled={syncBusy || !syncHostUrl.trim()}>Connect</button>
+              </div>
+            </div>
+          </>
+        )}
+        {syncNotice && <p className="success-text">{syncNotice}</p>}
+        {syncError && <p className="error-text">{syncError}</p>}
       </section>
       <section className="panel settings-section">
         <div className="settings-section-row">

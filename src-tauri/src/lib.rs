@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -124,6 +124,10 @@ pub fn run() {
             start_lan_server,
             stop_lan_server,
             lan_server_status,
+            read_sync_config,
+            write_sync_config,
+            discover_buildbook_hosts,
+            probe_buildbook_host,
             set_close_to_tray
         ])
         .run(tauri::generate_context!())
@@ -156,6 +160,115 @@ fn state_file_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String>
         .map_err(|error| format!("Could not create app data folder: {error}"))?;
 
     Ok(dir.join("buildbook-state.json"))
+}
+
+fn sync_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data folder: {error}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Could not create app data folder: {error}"))?;
+    Ok(dir.join("buildbook-device.json"))
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SyncConfig {
+    mode: String,
+    device_id: String,
+    device_name: String,
+    host_url: String,
+    host_token: String,
+}
+
+impl Default for SyncConfig {
+    fn default() -> Self {
+        let device_name = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "BuildBook Computer".to_string());
+        let seed = format!(
+            "{}:{}:{}",
+            device_name,
+            now_seconds(),
+            std::env::current_exe().ok().map(|path| path.display().to_string()).unwrap_or_default()
+        );
+        Self {
+            mode: "local".to_string(),
+            device_id: format!("device-{}", &sha256_hex(&seed)[..24]),
+            device_name,
+            host_url: String::new(),
+            host_token: String::new(),
+        }
+    }
+}
+
+fn normalized_host_url(value: &str) -> Result<String, String> {
+    let mut url = value.trim().trim_end_matches('/').to_string();
+    if url.is_empty() {
+        return Err("Enter a BuildBook host address.".to_string());
+    }
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        url = format!("http://{url}");
+    }
+    reqwest::Url::parse(&url).map_err(|_| "Enter a valid http or https BuildBook host address.".to_string())?;
+    Ok(url)
+}
+
+fn load_sync_config(app: &tauri::AppHandle) -> Result<SyncConfig, String> {
+    let path = sync_config_path(app)?;
+    if path.is_file() {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|error| format!("Could not read device settings: {error}"))?;
+        let mut config: SyncConfig = serde_json::from_str(&contents)
+            .map_err(|error| format!("Device settings are not valid JSON: {error}"))?;
+        if !matches!(config.mode.as_str(), "local" | "host" | "client") {
+            config.mode = "local".to_string();
+        }
+        if config.device_id.trim().is_empty() {
+            config.device_id = SyncConfig::default().device_id;
+        }
+        if config.device_name.trim().is_empty() {
+            config.device_name = "BuildBook Computer".to_string();
+        }
+        return Ok(config);
+    }
+    let config = SyncConfig::default();
+    save_sync_config(app, &config)?;
+    Ok(config)
+}
+
+fn save_sync_config(app: &tauri::AppHandle, config: &SyncConfig) -> Result<(), String> {
+    if !matches!(config.mode.as_str(), "local" | "host" | "client") {
+        return Err("Invalid BuildBook operating mode.".to_string());
+    }
+    if config.device_id.trim().is_empty() || config.device_name.trim().is_empty() {
+        return Err("Device id and device name are required.".to_string());
+    }
+    if config.mode == "client" {
+        normalized_host_url(&config.host_url)?;
+    }
+    let path = sync_config_path(app)?;
+    let contents = serde_json::to_string_pretty(config)
+        .map_err(|error| format!("Could not encode device settings: {error}"))?;
+    let temp_path = path.with_extension("json.tmp");
+    std::fs::write(&temp_path, contents)
+        .map_err(|error| format!("Could not write device settings: {error}"))?;
+    std::fs::rename(&temp_path, &path).or_else(|_| {
+        let _ = std::fs::remove_file(&path);
+        std::fs::rename(&temp_path, &path)
+    }).map_err(|error| format!("Could not replace device settings: {error}"))
+}
+
+#[tauri::command]
+fn read_sync_config(app: tauri::AppHandle) -> Result<SyncConfig, String> {
+    load_sync_config(&app)
+}
+
+#[tauri::command]
+fn write_sync_config(app: tauri::AppHandle, config: SyncConfig) -> Result<SyncConfig, String> {
+    save_sync_config(&app, &config)?;
+    Ok(config)
 }
 
 fn backup_existing_state(path: &std::path::Path) {
@@ -409,9 +522,93 @@ struct LanServerHandle {
     web_auth: WebAuthConfig,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    discovery_thread: Option<JoinHandle<()>>,
 }
 
 static LAN_SERVER: OnceLock<Mutex<Option<LanServerHandle>>> = OnceLock::new();
+
+const HOST_SYNC_PROTOCOL: &str = "1.0";
+const DISCOVERY_REQUEST: &[u8] = b"BUILD_BOOK_DISCOVER_V1";
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BuildBookHostInfo {
+    product: String,
+    app_version: String,
+    protocol_version: String,
+    device_id: String,
+    device_name: String,
+    url: String,
+    hosting_enabled: bool,
+}
+
+fn host_info(app: &tauri::AppHandle, url: String) -> BuildBookHostInfo {
+    let config = load_sync_config(app).unwrap_or_default();
+    BuildBookHostInfo {
+        product: "BuildBook".to_string(),
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: HOST_SYNC_PROTOCOL.to_string(),
+        device_id: config.device_id,
+        device_name: config.device_name,
+        url,
+        hosting_enabled: config.mode == "host",
+    }
+}
+
+#[tauri::command]
+fn probe_buildbook_host(url: String, token: String) -> Result<BuildBookHostInfo, String> {
+    let host_url = normalized_host_url(&url)?;
+    let endpoint = format!("{host_url}/api/host-info");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("Could not prepare host connection: {error}"))?;
+    let mut request = client.get(endpoint).header("X-BuildBook-Request", "1");
+    if !token.trim().is_empty() {
+        request = request.header("X-BuildBook-Token", token.trim());
+    }
+    let response = request.send().map_err(|error| format!("Could not reach BuildBook host: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("BuildBook host returned {}.", response.status()));
+    }
+    let mut info = response.json::<BuildBookHostInfo>()
+        .map_err(|error| format!("Host response was not valid BuildBook data: {error}"))?;
+    info.url = host_url;
+    if info.product != "BuildBook" {
+        return Err("The address is not a BuildBook host.".to_string());
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+fn discover_buildbook_hosts(port: u16) -> Result<Vec<BuildBookHostInfo>, String> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0))
+        .map_err(|error| format!("Could not start host discovery: {error}"))?;
+    socket.set_broadcast(true)
+        .map_err(|error| format!("Could not enable host discovery: {error}"))?;
+    socket.set_read_timeout(Some(std::time::Duration::from_millis(900)))
+        .map_err(|error| format!("Could not configure host discovery: {error}"))?;
+    socket.send_to(DISCOVERY_REQUEST, ("255.255.255.255", port))
+        .map_err(|error| format!("Could not broadcast host discovery: {error}"))?;
+
+    let started = std::time::Instant::now();
+    let mut results = Vec::new();
+    while started.elapsed() < std::time::Duration::from_millis(1000) {
+        let mut buffer = [0u8; 4096];
+        match socket.recv_from(&mut buffer) {
+            Ok((count, _)) => {
+                if let Ok(info) = serde_json::from_slice::<BuildBookHostInfo>(&buffer[..count]) {
+                    if info.product == "BuildBook" && !results.iter().any(|item: &BuildBookHostInfo| item.device_id == info.device_id) {
+                        results.push(info);
+                    }
+                }
+            },
+            Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
+            Err(error) => return Err(format!("Host discovery failed: {error}")),
+        }
+    }
+    Ok(results)
+}
 
 fn safe_file_name(name: &str) -> String {
     let cleaned: String = name
@@ -949,6 +1146,24 @@ fn request_auth_error(method: &str, path: &str, headers: &str) -> Option<&'stati
     None
 }
 
+fn request_token_error(path: &str, headers: &str) -> Option<&'static str> {
+    let (expected, require_token) = lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| (server.token.clone(), server.require_token)))
+        .unwrap_or_else(|| (String::new(), true));
+    if !require_token {
+        return None;
+    }
+    if expected.is_empty() {
+        return Some("BuildBook access code is required.");
+    }
+    if query_value(path, "access") != expected && header_value(headers, "X-BuildBook-Token") != expected {
+        return Some("BuildBook access code is required.");
+    }
+    None
+}
+
 fn validate_public_web_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim().to_string();
     let lower = trimmed.to_lowercase();
@@ -1229,6 +1444,21 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         return;
     }
 
+    if path.starts_with("/api/host-info") {
+        if let Some(error) = request_token_error(path, headers) {
+            send_response(&mut stream, "401 Unauthorized", "text/plain; charset=utf-8", error.as_bytes());
+            return;
+        }
+        let url = lan_mutex()
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|server| server.url.clone()))
+            .unwrap_or_default();
+        let body = serde_json::to_vec(&host_info(&app, url)).unwrap_or_else(|_| b"{}".to_vec());
+        send_response(&mut stream, "200 OK", "application/json; charset=utf-8", &body);
+        return;
+    }
+
     if path.starts_with("/api/auth-status") {
         send_web_auth_status(&mut stream, headers);
         return;
@@ -1437,8 +1667,11 @@ fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_tok
     listener.set_nonblocking(true).map_err(|error| format!("Could not configure LAN server: {error}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
+    let discovery_stop = stop.clone();
     let app_thread = app.clone();
+    let discovery_app = app.clone();
     let url = format!("http://{}:{}/", local_lan_ip(), port);
+    let discovery_url = url.clone();
     let thread = std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
@@ -1453,7 +1686,35 @@ fn start_lan_server(app: tauri::AppHandle, port: u16, token: String, require_tok
         }
     });
 
-    *guard = Some(LanServerHandle { port, url: url.clone(), token, require_token, web_auth, stop, thread: Some(thread) });
+    let discovery_thread = UdpSocket::bind(("0.0.0.0", port)).ok().map(|socket| {
+        let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(250)));
+        std::thread::spawn(move || {
+            while !discovery_stop.load(Ordering::Relaxed) {
+                let mut buffer = [0u8; 256];
+                match socket.recv_from(&mut buffer) {
+                    Ok((count, source)) if &buffer[..count] == DISCOVERY_REQUEST => {
+                        if let Ok(bytes) = serde_json::to_vec(&host_info(&discovery_app, discovery_url.clone())) {
+                            let _ = socket.send_to(&bytes, source);
+                        }
+                    },
+                    Ok(_) => {},
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {},
+                    Err(_) => break,
+                }
+            }
+        })
+    });
+
+    *guard = Some(LanServerHandle {
+        port,
+        url: url.clone(),
+        token,
+        require_token,
+        web_auth,
+        stop,
+        thread: Some(thread),
+        discovery_thread,
+    });
     Ok(LanServerInfo { running: true, url, port })
 }
 
@@ -1464,6 +1725,9 @@ fn stop_lan_server() -> Result<LanServerInfo, String> {
         server.stop.store(true, Ordering::Relaxed);
         let _ = TcpStream::connect(("127.0.0.1", server.port));
         if let Some(thread) = server.thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = server.discovery_thread.take() {
             let _ = thread.join();
         }
     }

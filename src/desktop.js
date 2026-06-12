@@ -292,6 +292,28 @@ export async function lanServerStatus() {
   return invoke('lan_server_status');
 }
 
+export async function readSyncConfig() {
+  if (!isTauri()) {
+    return { mode: 'local', deviceId: 'browser', deviceName: 'Browser', hostUrl: '', hostToken: '' };
+  }
+  return invoke('read_sync_config');
+}
+
+export async function writeSyncConfig(config) {
+  if (!isTauri()) return config;
+  return invoke('write_sync_config', { config });
+}
+
+export async function discoverBuildBookHosts(port = 8787) {
+  if (!isTauri()) return [];
+  return invoke('discover_buildbook_hosts', { port: Number(port) || 8787 });
+}
+
+export async function probeBuildBookHost(url, token = '') {
+  if (!isTauri()) throw new Error('Host pairing is only available in the desktop app.');
+  return invoke('probe_buildbook_host', { url, token });
+}
+
 export async function setCloseToTray(enabled) {
   if (!isTauri()) return;
   await invoke('set_close_to_tray', { enabled: Boolean(enabled) });
