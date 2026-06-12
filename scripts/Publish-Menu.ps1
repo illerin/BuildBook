@@ -217,13 +217,13 @@ function Get-ReleaseChangeLines {
     if ([string]::IsNullOrWhiteSpace($raw)) {
         return @('- No code changes since the previous release.')
     }
-    $lines = $raw -split "`n" |
+    $lines = @($raw -split "`n" |
         ForEach-Object { $_.Trim() } |
         Where-Object {
             $_ -and
             $_ -notmatch '^(Test Release|Live Release|Reset test version)\b'
         } |
-        Select-Object -Unique
+        Select-Object -Unique)
 
     if (!$lines.Count) {
         return @('- No code changes since the previous release.')
@@ -279,27 +279,36 @@ function Commit-Version {
         [string]$PreviousTag = ''
     )
 
-    Set-AppVersion $Version
-    Write-ReleaseNotes $Version $Channel $PreviousTag
-    $script:VersionFiles = @(
-        'package.json',
-        'package-lock.json',
-        'src-tauri/tauri.conf.json',
-        'src-tauri/tauri.conf.json5',
-        'src-tauri/Cargo.toml',
-        'src-tauri/Cargo.lock',
-        'src/data.js',
-        'CHANGELOG.md',
-        'RELEASE_NOTES.md'
-    ) | Where-Object { Test-Path -LiteralPath $_ }
-    Invoke-Git add -- @VersionFiles
+    try {
+        Set-AppVersion $Version
+        Write-ReleaseNotes $Version $Channel $PreviousTag
+        $script:VersionFiles = @(
+            'package.json',
+            'package-lock.json',
+            'src-tauri/tauri.conf.json',
+            'src-tauri/tauri.conf.json5',
+            'src-tauri/Cargo.toml',
+            'src-tauri/Cargo.lock',
+            'src/data.js',
+            'CHANGELOG.md',
+            'RELEASE_NOTES.md'
+        ) | Where-Object { Test-Path -LiteralPath $_ }
+        Invoke-Git add -- @VersionFiles
 
-    & git diff --cached --quiet -- @VersionFiles
-    if ($LASTEXITCODE -eq 0) {
-        throw "No version file changes were staged."
+        & git diff --cached --quiet -- @VersionFiles
+        if ($LASTEXITCODE -eq 0) {
+            throw "No version file changes were staged."
+        }
+
+        Invoke-Git commit -m $Message
+    } catch {
+        & git diff --cached --quiet -- @VersionFiles
+        if ($LASTEXITCODE -ne 0) {
+            & git restore --staged -- @VersionFiles
+        }
+        & git restore -- @VersionFiles
+        throw
     }
-
-    Invoke-Git commit -m $Message
 }
 
 function Publish-Test {
@@ -468,8 +477,8 @@ Write-Host "==========================="
 Write-Host ""
 Write-Host "1. Publish TEST"
 Write-Host "2. Publish LIVE"
-Write-Host "3. Publish LIVE Major REV"
-Write-Host "4. Publish LIVE Minor"
+Write-Host "3. Publish LIVE Minor"
+Write-Host "4. Publish LIVE Major REV"
 Write-Host ""
 
 $choice = Read-Host "Select option"
@@ -477,7 +486,7 @@ $choice = Read-Host "Select option"
 switch ($choice) {
     '1' { Publish-Test }
     '2' { Publish-Live }
-    '3' { Publish-LiveMajor }
-    '4' { Publish-LiveMinor }
+    '3' { Publish-LiveMinor }
+    '4' { Publish-LiveMajor }
     default { throw 'Invalid selection.' }
 }
