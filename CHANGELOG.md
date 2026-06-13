@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.3 - 2026-06-12
+
+Changes since test-v0.4.0-test.2.
+
+### Changes
+
+- Creating Sync layer between two instances
+
 ## 0.4.0-test.2 - 2026-06-11
 
 Changes since test-v0.4.0-test.1.
