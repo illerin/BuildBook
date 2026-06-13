@@ -2,6 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 const LAN_TOKEN_KEY = 'buildbook-lan-token';
 const APP_REQUEST_HEADER = '1';
+const SYNC_CONFIG_KEY = 'buildbook-sync-config';
 
 function isTauri() {
   return Boolean(window.__TAURI_INTERNALS__);
@@ -29,6 +30,18 @@ function apiHeaders(extra = {}) {
   };
 }
 
+function cachedSyncConfig() {
+  try {
+    return JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+export function isHostSyncClient() {
+  return isTauri() && cachedSyncConfig().mode === 'client';
+}
+
 export async function attachLocalFile(sourcePath, library) {
   if (!isTauri()) {
     const name = sourcePath.split(/[\\/]/).pop() || 'attached-file';
@@ -50,6 +63,9 @@ export async function savePickedFile(file, library) {
 
   const buffer = await file.arrayBuffer();
   const bytes = Array.from(new Uint8Array(buffer));
+  if (cachedSyncConfig().mode === 'client') {
+    return invoke('sync_save_host_file', { name: file.name, library, bytes });
+  }
   return invoke('save_uploaded_file', { name: file.name, library, bytes });
 }
 
@@ -69,6 +85,9 @@ export async function saveBytesFile(name, library, bytes) {
     return { name, path: URL.createObjectURL(new Blob([bytes])), size: data.length };
   }
 
+  if (cachedSyncConfig().mode === 'client') {
+    return invoke('sync_save_host_file', { name, library, bytes: data });
+  }
   return invoke('save_uploaded_file', { name, library, bytes: data });
 }
 
@@ -84,6 +103,9 @@ export async function overwriteBytesFile(path, bytes, name = 'updated-file') {
     return { name, path: URL.createObjectURL(new Blob([bytes])), size: data.length };
   }
 
+  if (cachedSyncConfig().mode === 'client') {
+    return invoke('sync_overwrite_host_file', { path, bytes: data });
+  }
   return invoke('overwrite_file_bytes', { path, bytes: data });
 }
 
@@ -92,6 +114,10 @@ export async function prepareEditableFile(path, name, library) {
     return { name, path, size: 0 };
   }
 
+  if (cachedSyncConfig().mode === 'client') {
+    const stored = await invoke('sync_prepare_host_edit_file', { path, name, library });
+    return { ...stored, clientLocal: true };
+  }
   return invoke('prepare_edit_file', { path, name, library });
 }
 
@@ -127,10 +153,13 @@ export async function downloadUrlFile(url, library, name) {
     return saveBytesFile(name, library, bytes);
   }
 
+  if (cachedSyncConfig().mode === 'client') {
+    return invoke('sync_download_url_to_host', { url, library, name });
+  }
   return invoke('download_url_to_file', { url, library, name });
 }
 
-export async function readStoredFile(path) {
+export async function readStoredFile(path, clientLocal = false) {
   if (!path) return new Uint8Array();
 
   if (isLanWebClient()) {
@@ -142,6 +171,10 @@ export async function readStoredFile(path) {
   if (!isTauri()) {
     const response = await fetch(path);
     return new Uint8Array(await response.arrayBuffer());
+  }
+
+  if (cachedSyncConfig().mode === 'client' && !clientLocal) {
+    return new Uint8Array(await invoke('sync_read_host_file', { path }));
   }
 
   return new Uint8Array(await invoke('read_file_bytes', { path }));
@@ -177,6 +210,9 @@ export async function cleanupOrphanedFiles(referencedPaths, deletePaths) {
 
 export async function deleteManagedFiles(paths) {
   if (!isTauri() || !Array.isArray(paths) || !paths.length) return { deletedPaths: [], failedPaths: [] };
+  if (cachedSyncConfig().mode === 'client') {
+    return invoke('sync_delete_host_files', { paths });
+  }
   return invoke('delete_managed_files', { paths });
 }
 
@@ -221,7 +257,7 @@ export function acceptFromExtensions(extensions) {
     .join(',');
 }
 
-export async function openStoredFile(path) {
+export async function openStoredFile(path, clientLocal = false) {
   if (!path) return;
 
   if (isLanWebClient()) {
@@ -231,6 +267,12 @@ export async function openStoredFile(path) {
 
   if (!isTauri()) {
     window.alert(`Desktop open is only available in the Tauri app.\n\n${path}`);
+    return;
+  }
+
+  if (cachedSyncConfig().mode === 'client' && !clientLocal) {
+    const name = path.split(/[\\/]/).pop() || 'host-file';
+    await invoke('sync_open_host_file', { path, name });
     return;
   }
 
@@ -274,6 +316,11 @@ export async function openExternalUrl(url) {
 export function assetUrl(path) {
   if (!path) return '';
   if (isLanWebClient()) return fileApiUrl(path);
+  const syncConfig = cachedSyncConfig();
+  if (isTauri() && syncConfig.mode === 'client' && syncConfig.hostUrl) {
+    const base = syncConfig.hostUrl.replace(/\/+$/, '');
+    return `${base}/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(syncConfig.hostToken || '')}&device=${encodeURIComponent(syncConfig.deviceId || '')}`;
+  }
   return isTauri() ? convertFileSrc(path) : path;
 }
 
@@ -296,12 +343,16 @@ export async function readSyncConfig() {
   if (!isTauri()) {
     return { mode: 'local', deviceId: 'browser', deviceName: 'Browser', hostUrl: '', hostToken: '' };
   }
-  return invoke('read_sync_config');
+  const config = await invoke('read_sync_config');
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+  return config;
 }
 
 export async function writeSyncConfig(config) {
   if (!isTauri()) return config;
-  return invoke('write_sync_config', { config });
+  const saved = await invoke('write_sync_config', { config });
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(saved));
+  return saved;
 }
 
 export async function discoverBuildBookHosts(port = 8787) {
@@ -312,6 +363,18 @@ export async function discoverBuildBookHosts(port = 8787) {
 export async function probeBuildBookHost(url, token = '') {
   if (!isTauri()) throw new Error('Host pairing is only available in the desktop app.');
   return invoke('probe_buildbook_host', { url, token });
+}
+
+export async function resolveSyncConflict(choice) {
+  if (!isTauri()) throw new Error('Sync conflict resolution is only available in the desktop app.');
+  return invoke('resolve_sync_conflict', { choice });
+}
+
+export async function fileCheckout(path, action = 'acquire') {
+  if (!isTauri() || !path) {
+    return { acquired: true, offline: false, lease: null, message: '' };
+  }
+  return invoke('sync_file_checkout', { path, action });
 }
 
 export async function setCloseToTray(enabled) {

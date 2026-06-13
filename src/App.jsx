@@ -23,6 +23,8 @@ import {
   downloadBytes,
   downloadUrlFile,
   extensionAllowed,
+  fileCheckout,
+  isHostSyncClient,
   linkedLocalFile,
   lanServerStatus,
   listStateBackups,
@@ -39,6 +41,7 @@ import {
   readShellThumbnail,
   readStoredFile,
   resetManagedStorage,
+  resolveSyncConflict,
   restoreStateBackup,
   scanStorage,
   saveBytesFile,
@@ -48,7 +51,7 @@ import {
   stopLanServer,
   writeSyncConfig,
 } from './desktop';
-import { fetchWebAuthStatus, isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
+import { fetchWebAuthStatus, getLastSyncStatus, isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
 import { createZip, readZip, zipText } from './zip';
 
 const TABS = [
@@ -2429,7 +2432,24 @@ export default function App() {
 
   const persistedStateText = (value) => JSON.stringify(normalizeState(value), null, 2);
 
+  const applyDesktopSyncStatus = (status = getLastSyncStatus()) => {
+    if (!window.__TAURI_INTERNALS__) return;
+    const nextStatus = status?.status || 'local';
+    setConnectionState(nextStatus);
+    setConnectionMessage(status?.message || (
+      nextStatus === 'host' ? 'Hosting BuildBook data.'
+        : nextStatus === 'connected' ? 'Connected to BuildBook host.'
+          : nextStatus === 'offline' ? 'Offline. Changes will synchronize when the host returns.'
+            : nextStatus === 'conflict' ? 'Synchronization conflict requires attention.'
+              : 'Using local BuildBook data.'
+    ));
+  };
+
   const refreshConnectionStatus = async () => {
+    if (window.__TAURI_INTERNALS__) {
+      applyDesktopSyncStatus();
+      return;
+    }
     if (!isRemoteBuildBookClient()) {
       setConnectionState('local');
       setConnectionMessage('Local app');
@@ -2459,7 +2479,8 @@ export default function App() {
       setState(loaded);
       setStateBackups([]);
       setRestoreError('');
-      await refreshConnectionStatus();
+      if (window.__TAURI_INTERNALS__) applyDesktopSyncStatus();
+      else await refreshConnectionStatus();
     } catch (error) {
       setState(null);
       setLoadError(String(error?.message || error));
@@ -2519,6 +2540,12 @@ export default function App() {
   };
 
   useEffect(() => {
+    const handleSyncStatus = (event) => applyDesktopSyncStatus(event.detail);
+    window.addEventListener('buildbook-sync-status', handleSyncStatus);
+    return () => window.removeEventListener('buildbook-sync-status', handleSyncStatus);
+  }, []);
+
+  useEffect(() => {
     reloadState();
   }, []);
 
@@ -2576,6 +2603,10 @@ export default function App() {
 
   useEffect(() => {
     if (!state) return;
+    if (isHostSyncClient()) {
+      stopLanServer().catch(() => {});
+      return;
+    }
     const lan = state.lanServer || {};
     const webAuth = state.webAuth || DEFAULT_WEB_AUTH;
     if (webAuth.enabled && !webAuth.sessionSecret) {
@@ -2756,6 +2787,24 @@ export default function App() {
     selectionGuardRef.current = { source: null, x: 0, y: 0, block: false, timer: 0 };
   };
 
+  const resolveDesktopConflict = async (choice) => {
+    try {
+      setConnectionMessage('Resolving synchronization conflict...');
+      const result = await resolveSyncConflict(choice);
+      const loaded = normalizeState(JSON.parse(result.contents));
+      lastPersistedStateRef.current = persistedStateText(loaded);
+      setState(loaded);
+      setSaveState('saved');
+      applyDesktopSyncStatus(result);
+    } catch (error) {
+      setConnectionState('conflict');
+      setConnectionMessage(`Conflict resolution failed: ${String(error?.message || error)}`);
+    }
+  };
+
+  const showConnectionBanner = isRemoteBuildBookClient()
+    || (window.__TAURI_INTERNALS__ && connectionState !== 'local');
+
   return (
     <div className="app" onPointerDownCapture={handlePointerDownCapture} onPointerUpCapture={handlePointerUpCapture} onClickCapture={handleClickCapture}>
       <aside className="sidebar">
@@ -2769,12 +2818,23 @@ export default function App() {
           </button>
         ))}
         <div className="sidebar-status">
-          <div className={`connection-state connection-${connectionState}`}>{connectionState === 'login-required' ? 'Login required' : connectionState === 'disconnected' ? 'Disconnected' : connectionState === 'connected' ? 'Connected' : connectionState === 'local' ? 'Local' : 'Checking...'}</div>
+          <div className={`connection-state connection-${connectionState}`}>{connectionState === 'login-required' ? 'Login required' : connectionState === 'disconnected' ? 'Disconnected' : connectionState === 'connected' ? 'Connected' : connectionState === 'offline' ? 'Offline' : connectionState === 'conflict' ? 'Conflict' : connectionState === 'host' ? 'Host' : connectionState === 'local' ? 'Local' : 'Checking...'}</div>
           <div className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>{saveState}</div>
         </div>
       </aside>
       <main className="workspace">
-        {isRemoteBuildBookClient() && <div className={`connection-banner connection-${connectionState}`}>{connectionMessage}</div>}
+        {showConnectionBanner && (
+          <div className={`connection-banner connection-${connectionState}`}>
+            <span>{connectionMessage}</span>
+            {connectionState === 'conflict' && (
+              <div className="connection-banner-actions">
+                <button className="secondary" onClick={() => resolveDesktopConflict('host')}>Use Host Version</button>
+                <button className="secondary" onClick={() => resolveDesktopConflict('combine')}>Combine Changes</button>
+                <button onClick={() => resolveDesktopConflict('local')}>Use This Computer</button>
+              </div>
+            )}
+          </div>
+        )}
         {tab === 'projects' && <Projects state={state} updateState={updateState} />}
         {tab === 'completed-projects' && <Projects state={state} updateState={updateState} initialFilter="completed" lockedFilter />}
         {tab === 'parts' && <Parts state={state} updateState={updateState} />}
@@ -4492,8 +4552,8 @@ function integrityLabel(status) {
   return '';
 }
 
-async function fileHash(path) {
-  const bytes = await readStoredFile(path);
+async function fileHash(path, clientLocal = false) {
+  const bytes = await readStoredFile(path, clientLocal);
   if (crypto?.subtle) {
     const digest = await crypto.subtle.digest('SHA-256', bytes);
     return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
@@ -6030,6 +6090,8 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   const [expandedFileGroups, setExpandedFileGroups] = useState({});
   const [replaceTargetFileId, setReplaceTargetFileId] = useState('');
   const autoIntegrityBusyRef = useRef(false);
+  const editSessionsRef = useRef({});
+  const hostSyncClient = isHostSyncClient();
   const projectFilesRef = useRef(project.files);
   const effectiveRevisionSettings = useMemo(
     () => projectRevisionSettings(project, revisionSettings),
@@ -6039,6 +6101,23 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   useEffect(() => {
     projectFilesRef.current = project.files;
   }, [project.files]);
+
+  useEffect(() => {
+    editSessionsRef.current = editSessions;
+  }, [editSessions]);
+
+  useEffect(() => {
+    const refreshCheckouts = () => {
+      const paths = [...new Set(Object.values(editSessionsRef.current).map((session) => session.checkoutPath).filter(Boolean))];
+      paths.forEach((path) => fileCheckout(path, 'heartbeat').catch(() => {}));
+    };
+    const timer = window.setInterval(refreshCheckouts, 30000);
+    return () => {
+      window.clearInterval(timer);
+      const paths = [...new Set(Object.values(editSessionsRef.current).map((session) => session.checkoutPath).filter(Boolean))];
+      paths.forEach((path) => fileCheckout(path, 'release').catch(() => {}));
+    };
+  }, [project.id]);
 
   const trackedItemKey = (file) => file.trackedItemId || file.id;
   const replaceTargetFile = project.files.find((file) => file.id === replaceTargetFileId) || null;
@@ -6572,11 +6651,23 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
     if (!file.path) return;
     setFileBusy(true);
     setFileError('');
+    let checkoutPath = '';
     try {
-      const baseHash = await fileHash(file.path);
+      if (file.storageMode !== 'link') {
+        const checkout = await fileCheckout(file.path, 'acquire');
+        if (!checkout.acquired) {
+          throw new Error(checkout.message || `This file is checked out by ${checkout.lease?.deviceName || 'another computer'}.`);
+        }
+        checkoutPath = file.path;
+        if (checkout.offline) setFileNotice(checkout.message);
+      }
       const editable = file.storageMode === 'link'
         ? { name: file.name, path: file.path, size: file.size || 0 }
         : await prepareEditableFile(file.path, file.name, `${fileLibrary(file)}/working/${file.id}`);
+      const baseHash = editable.baseHash || await fileHash(editable.path, editable.clientLocal === true);
+      if (editable.pending) {
+        setFileNotice(`${file.name} has unsynchronized edits in this computer's working copy.`);
+      }
 
       setEditSessions((current) => ({
         ...current,
@@ -6587,10 +6678,13 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           trackerId: file.trackerId,
           trackedItemId: trackedItemKey(file),
           sourcePath: file.storageMode === 'link' ? file.path : '',
+          clientLocal: editable.clientLocal === true,
+          checkoutPath,
         },
       }));
-      await openStoredFile(editable.path);
+      await openStoredFile(editable.path, editable.clientLocal === true);
     } catch (error) {
+      if (checkoutPath) fileCheckout(checkoutPath, 'release').catch(() => {});
       setFileError(String(error));
     } finally {
       setFileBusy(false);
@@ -6601,7 +6695,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
     if (!providedSession?.path) return false;
     try {
       if (file.nextRevisionCheckAt && Date.parse(file.nextRevisionCheckAt) > Date.now()) return false;
-      const currentHash = await fileHash(providedSession.path);
+      const currentHash = await fileHash(providedSession.path, providedSession.clientLocal === true);
       if (currentHash === providedSession.baseHash) {
         if (!options.quiet) setFileError(`No saved changes found for ${file.name}.`);
         return false;
@@ -6647,7 +6741,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         return true;
       }
 
-      const bytes = await readStoredFile(providedSession.path);
+      const bytes = await readStoredFile(providedSession.path, providedSession.clientLocal === true);
       const now = new Date().toISOString();
       if (providedSession.versionFileId && providedSession.versionPath) {
         const stored = await overwriteBytesFile(providedSession.versionPath, bytes, file.name);
@@ -6682,6 +6776,12 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
       }
 
       const stored = await saveBytesFile(file.name, fileLibrary(file), bytes);
+      let nextCheckoutPath = providedSession.checkoutPath || '';
+      if (providedSession.checkoutPath && providedSession.checkoutPath !== stored.path) {
+        await fileCheckout(providedSession.checkoutPath, 'release').catch(() => {});
+        const checkout = await fileCheckout(stored.path, 'acquire');
+        nextCheckoutPath = checkout.acquired ? stored.path : '';
+      }
       const newFileId = makeId('file');
       const newFile = {
         ...file,
@@ -6713,6 +6813,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           trackedItemId: itemKey,
           versionFileId: newFileId,
           versionPath: stored.path,
+          checkoutPath: nextCheckoutPath,
         };
         return next;
       });
@@ -6817,13 +6918,14 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
                 />
                 Upload Folder
               </label>
-              <button className={`upload-method ${stagedAttachment?.type === 'link-file' ? 'selected' : ''}`} onClick={selectLinkedProjectFile} disabled={fileBusy}>Link File</button>
-              <button className={`upload-method ${stagedAttachment?.type === 'link-folder' ? 'selected' : ''}`} onClick={selectLinkedProjectFolder} disabled={fileBusy}>Link Folder</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-file' ? 'selected' : ''}`} onClick={selectLinkedProjectFile} disabled={fileBusy || hostSyncClient} title={hostSyncClient ? 'Linked paths must be created on the host computer.' : ''}>Link File</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-folder' ? 'selected' : ''}`} onClick={selectLinkedProjectFolder} disabled={fileBusy || hostSyncClient} title={hostSyncClient ? 'Linked paths must be created on the host computer.' : ''}>Link Folder</button>
             </div>
             <button className={stagedAttachment ? '' : 'secondary'} onClick={loadStagedAttachment} disabled={fileBusy || !stagedAttachment}>
               {fileBusy ? 'Loading...' : stagedAttachment?.type?.includes('folder') ? 'Load Folder' : 'Load File'}
             </button>
           </div>
+          {hostSyncClient && <p className="settings-note">Linked paths belong to the host computer. Existing linked files can be viewed or downloaded here; create new links on the host.</p>}
           {stagedAttachment && (
             <div className="staged-attachment">
               <span title={stagedAttachmentName}>{stagedAttachmentName || 'Selected file'}</span>
@@ -8569,6 +8671,7 @@ function Imports({ state, updateState }) {
 
 function Settings({ state, updateState }) {
   const remoteClient = isRemoteBuildBookClient();
+  const hostSyncClient = isHostSyncClient();
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
   const [showThemeEditor, setShowThemeEditor] = useState(false);
   const [showRevisionSettings, setShowRevisionSettings] = useState(false);
@@ -8668,6 +8771,10 @@ function Settings({ state, updateState }) {
         deviceName: syncDeviceName.trim() || syncConfig.deviceName,
         hostUrl: '',
         hostToken: '',
+        hostRevision: '',
+        pendingSync: false,
+        lastConnectedAt: 0,
+        lastSyncError: '',
       });
       setSyncConfig(saved);
       updateLanServer({
@@ -8700,6 +8807,7 @@ function Settings({ state, updateState }) {
 
   const connectToHost = async () => {
     if (!syncConfig || !syncHostUrl.trim()) return;
+    if (!window.confirm('Use this host as the authoritative BuildBook source? This computer will keep a local cache, but its current standalone data will not be merged or uploaded.')) return;
     setSyncBusy(true);
     setSyncError('');
     setSyncNotice('');
@@ -8714,10 +8822,15 @@ function Settings({ state, updateState }) {
         deviceName: syncDeviceName.trim() || syncConfig.deviceName,
         hostUrl: info.url,
         hostToken: syncHostToken.trim(),
+        hostRevision: '',
+        pendingSync: false,
+        lastConnectedAt: 0,
+        lastSyncError: '',
       });
       setSyncConfig(saved);
       setSyncHostUrl(info.url);
-      setSyncNotice(`Paired with ${info.deviceName}. Local data has not been replaced; synchronized data activation is the next phase.`);
+      setSyncNotice(`Connected to ${info.deviceName}. Loading host data...`);
+      window.setTimeout(() => window.location.reload(), 250);
     } catch (error) {
       setSyncError(String(error));
     } finally {
@@ -8730,7 +8843,16 @@ function Settings({ state, updateState }) {
     setSyncBusy(true);
     setSyncError('');
     try {
-      const saved = await writeSyncConfig({ ...syncConfig, mode: 'local', hostUrl: '', hostToken: '' });
+      const saved = await writeSyncConfig({
+        ...syncConfig,
+        mode: 'local',
+        hostUrl: '',
+        hostToken: '',
+        hostRevision: '',
+        pendingSync: false,
+        lastConnectedAt: 0,
+        lastSyncError: '',
+      });
       setSyncConfig(saved);
       setSyncHostUrl('');
       setSyncHostToken('');
@@ -9147,7 +9269,7 @@ function Settings({ state, updateState }) {
             <p>Find orphaned files and thumbnails no longer referenced by any project.</p>
           </div>
           <div className="settings-actions">
-            <button className="secondary" onClick={runStorageScan} disabled={storageBusy}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
+            <button className="secondary" onClick={runStorageScan} disabled={storageBusy || hostSyncClient}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
             {storageScan && <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Delete Selected</button>}
             {storageScan && <button className="danger-fill" onClick={runFullStorageCleanup} disabled={storageBusy || !storageScan.orphans?.length}>Delete All Orphaned Files</button>}
           </div>
@@ -9202,6 +9324,7 @@ function Settings({ state, updateState }) {
           </div>
           {syncConfig && <span className={`sync-mode-badge sync-mode-${syncConfig.mode}`}>{syncConfig.mode}</span>}
         </div>
+        {hostSyncClient && <p className="settings-note">Storage cleanup must be run on the host computer.</p>}
         {remoteClient ? (
           <p className="settings-note">Host and client setup must be changed from the desktop app.</p>
         ) : (
@@ -9265,7 +9388,7 @@ function Settings({ state, updateState }) {
             <button
               className={state.lanServer?.enabled ? 'danger-fill' : 'secondary'}
               onClick={toggleLanServer}
-              disabled={lanBusy}
+              disabled={lanBusy || hostSyncClient}
             >
               {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
             </button>
@@ -9280,10 +9403,10 @@ function Settings({ state, updateState }) {
               max="65535"
               value={state.lanServer?.port || 8787}
               onChange={(event) => updateLanServer({ port: Number(event.target.value) || 8787 })}
-              disabled={state.lanServer?.enabled}
+              disabled={state.lanServer?.enabled || hostSyncClient}
             />
           </label>
-          <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled}>
+          <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled || hostSyncClient}>
             Regenerate Access Code
           </button>
         </div>
@@ -9292,7 +9415,7 @@ function Settings({ state, updateState }) {
             type="checkbox"
             checked={state.lanServer?.requireToken !== false}
             onChange={(event) => updateLanServer({ requireToken: event.target.checked })}
-            disabled={state.lanServer?.enabled}
+            disabled={state.lanServer?.enabled || hostSyncClient}
           />
           Require access token
         </label>
@@ -9310,6 +9433,7 @@ function Settings({ state, updateState }) {
         )}
         {lanNotice && <p className="success-text">{lanNotice}</p>}
         {lanError && <p className="error-text">{lanError}</p>}
+        {hostSyncClient && <p className="settings-note">Network access is controlled by the host computer.</p>}
         <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
       </section>
       <section className="panel settings-section">
@@ -9323,6 +9447,7 @@ function Settings({ state, updateState }) {
               type="checkbox"
               checked={Boolean(state.webAuth?.enabled)}
               onChange={(event) => setWebLoginEnabled(event.target.checked)}
+              disabled={hostSyncClient}
             />
             Require admin login
           </label>
@@ -9335,14 +9460,14 @@ function Settings({ state, updateState }) {
         <div className="web-auth-grid">
           <label>
             Apply login to
-            <select value={state.webAuth?.scope || 'domain'} onChange={(event) => updateWebAuth({ scope: event.target.value })}>
+            <select value={state.webAuth?.scope || 'domain'} onChange={(event) => updateWebAuth({ scope: event.target.value })} disabled={hostSyncClient}>
               <option value="domain">Domain/proxy access only</option>
               <option value="all">All browser access</option>
             </select>
           </label>
           <label>
             Admin username
-            <input value={state.webAuth?.username || 'admin'} onChange={(event) => updateWebAuth({ username: event.target.value || 'admin' })} />
+            <input value={state.webAuth?.username || 'admin'} onChange={(event) => updateWebAuth({ username: event.target.value || 'admin' })} disabled={hostSyncClient} />
           </label>
           <label>
             Remember device days
@@ -9352,6 +9477,7 @@ function Settings({ state, updateState }) {
               max="365"
               value={state.webAuth?.rememberDays || 30}
               onChange={(event) => updateWebAuth({ rememberDays: Number(event.target.value) || 30 })}
+              disabled={hostSyncClient}
             />
           </label>
           <label>
@@ -9360,11 +9486,12 @@ function Settings({ state, updateState }) {
               value={state.webAuth?.allowedHosts || ''}
               onChange={(event) => updateWebAuth({ allowedHosts: event.target.value })}
               placeholder="buildbook.example.com, *.tailnet.ts.net"
+              disabled={hostSyncClient}
             />
           </label>
         </div>
-        {remoteClient ? (
-          <p className="settings-note">Password changes are only available in the local desktop app. Open BuildBook on the host computer to change the admin password.</p>
+        {remoteClient || hostSyncClient ? (
+          <p className="settings-note">Password changes are only available in the host desktop app. Open BuildBook on the host computer to change the admin password.</p>
         ) : (
           <div className="web-auth-password-row">
             <label>
@@ -9407,13 +9534,14 @@ function Settings({ state, updateState }) {
             <p>Delete managed uploads and restore all projects, parts, categories, and settings to first-install defaults.</p>
           </div>
           <div className="settings-actions">
-            <button className="danger-fill" onClick={() => {
+            <button className="danger-fill" disabled={hostSyncClient} onClick={() => {
               setResetError('');
               setResetPhrase('');
               setShowFullReset(true);
             }}>Full Reset</button>
           </div>
         </div>
+        {hostSyncClient && <p className="settings-note">A full reset must be started on the host computer.</p>}
       </section>
       {showTemplatePreview && (
         <TemplatePreviewModal

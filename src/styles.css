@@ -334,7 +334,8 @@ label {
 }
 
 .connection-local,
-.connection-connected {
+.connection-connected,
+.connection-host {
   background: rgba(60, 160, 88, 0.12);
   border-color: rgba(60, 160, 88, 0.4);
   color: #6be08e;
@@ -347,10 +348,25 @@ label {
   color: #f2c76c;
 }
 
-.connection-disconnected {
+.connection-disconnected,
+.connection-offline,
+.connection-conflict {
   background: rgba(220, 70, 70, 0.12);
   border-color: rgba(220, 70, 70, 0.45);
   color: #ff8c8c;
+}
+
+.connection-banner {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.connection-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 
 .save-state.error {

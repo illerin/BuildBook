@@ -4,6 +4,8 @@ import { DEFAULT_STATE, normalizeState } from './data';
 const STORAGE_KEY = 'buildbook-state';
 const LAN_TOKEN_KEY = 'buildbook-lan-token';
 const APP_REQUEST_HEADER = '1';
+const SYNC_CONFIG_KEY = 'buildbook-sync-config';
+let lastSyncStatus = { status: 'local', pending: false, message: 'Using local BuildBook data.' };
 
 function isTauri() {
   return Boolean(window.__TAURI_INTERNALS__);
@@ -16,6 +18,20 @@ function isLanWebClient() {
 
 export function isRemoteBuildBookClient() {
   return isLanWebClient();
+}
+
+function publishSyncStatus(result) {
+  lastSyncStatus = {
+    status: result?.status || 'local',
+    pending: Boolean(result?.pending),
+    message: result?.message || '',
+    revision: result?.revision || '',
+  };
+  window.dispatchEvent(new CustomEvent('buildbook-sync-status', { detail: lastSyncStatus }));
+}
+
+export function getLastSyncStatus() {
+  return lastSyncStatus;
 }
 
 export function lanToken() {
@@ -40,7 +56,19 @@ function apiHeaders(extra = {}) {
 
 export async function loadAppState() {
   if (isTauri()) {
+    const config = await invoke('read_sync_config');
+    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+    if (config.mode === 'client') {
+      const result = await invoke('sync_client_load');
+      publishSyncStatus(result);
+      return normalizeState(JSON.parse(result.contents));
+    }
     const contents = await invoke('read_app_state');
+    publishSyncStatus({
+      status: config.mode === 'host' ? 'host' : 'local',
+      pending: false,
+      message: config.mode === 'host' ? 'Hosting BuildBook data.' : 'Using local BuildBook data.',
+    });
     if (!contents) return normalizeState(DEFAULT_STATE);
     return normalizeState(JSON.parse(contents));
   }
@@ -102,7 +130,22 @@ export async function saveAppState(state) {
   const contents = JSON.stringify(normalized, null, pretty ? 2 : 0);
 
   if (isTauri()) {
+    const config = await invoke('read_sync_config');
+    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+    if (config.mode === 'client') {
+      const result = await invoke('sync_client_save', { contents });
+      publishSyncStatus(result);
+      if (result.status === 'conflict') {
+        throw new Error(result.message);
+      }
+      return normalized;
+    }
     await invoke('write_app_state', { contents });
+    publishSyncStatus({
+      status: config.mode === 'host' ? 'host' : 'local',
+      pending: false,
+      message: config.mode === 'host' ? 'Saved on host.' : 'Saved locally.',
+    });
     return normalized;
   }
 
