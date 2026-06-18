@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.5 - 2026-06-17
+
+Changes since test-v0.4.0-test.4.
+
+### Changes
+
+- Exclude local host discovery and add settings sections
+
 ## 0.4.0-test.4 - 2026-06-17
 
 Changes since test-v0.4.0-test.3.
