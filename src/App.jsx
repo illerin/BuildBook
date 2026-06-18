@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check as checkForTauriUpdate } from '@tauri-apps/plugin-updater';
@@ -17,6 +17,7 @@ import {
 import {
   acceptFromExtensions,
   assetUrl,
+  clearSyncCheckout,
   cleanupOrphanedFiles,
   deleteManagedFiles,
   discoverBuildBookHosts,
@@ -24,6 +25,7 @@ import {
   downloadUrlFile,
   extensionAllowed,
   fileCheckout,
+  generateSyncPairingCode,
   isHostSyncClient,
   linkedLocalFile,
   lanServerStatus,
@@ -32,16 +34,21 @@ import {
   openExternalUrl,
   openStoredFile,
   openWithProgram,
+  pairBuildBookHost,
   overwriteBytesFile,
   pickLinkedFolderPath,
   pickLinkedFilePath,
   prepareEditableFile,
   probeBuildBookHost,
+  readSyncConflictSummary,
   readSyncConfig,
+  readSyncStatusDashboard,
   readShellThumbnail,
   readStoredFile,
+  revokePairedDevice,
   resetManagedStorage,
   resolveSyncConflict,
+  resolveSyncConflictSelections,
   restoreStateBackup,
   scanStorage,
   saveBytesFile,
@@ -73,6 +80,49 @@ const DEFAULT_PROJECT_EXPORT_OPTIONS = {
   allFileVersions: false,
   partDocuments: true,
 };
+
+const SYNC_BOOTSTRAP_KEY = 'buildbook-sync-bootstrap';
+
+const ConfirmContext = createContext(null);
+
+function useAppConfirm() {
+  const confirm = useContext(ConfirmContext);
+  if (!confirm) throw new Error('Confirm dialog is not available.');
+  return confirm;
+}
+
+function ConfirmProvider({ children }) {
+  const [request, setRequest] = useState(null);
+
+  const confirm = ({ title = 'Confirm action', message, confirmLabel = 'Confirm', danger = false }) => new Promise((resolve) => {
+    setRequest({ title, message, confirmLabel, danger, resolve });
+  });
+
+  const close = (answer) => {
+    if (request?.resolve) request.resolve(answer);
+    setRequest(null);
+  };
+
+  return (
+    <ConfirmContext.Provider value={confirm}>
+      {children}
+      {request && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && close(false)}>
+          <div className="modal confirm-modal">
+            <div className="modal-header">
+              <h2>{request.title}</h2>
+            </div>
+            <p>{request.message}</p>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => close(false)}>Cancel</button>
+              <button className={request.danger ? 'danger-fill' : ''} onClick={() => close(true)}>{request.confirmLabel}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </ConfirmContext.Provider>
+  );
+}
 
 const FULL_PROJECT_EXPORT_OPTIONS = {
   ...DEFAULT_PROJECT_EXPORT_OPTIONS,
@@ -2422,11 +2472,21 @@ export default function App() {
   const [saveState, setSaveState] = useState('saved');
   const [connectionState, setConnectionState] = useState(isRemoteBuildBookClient() ? 'checking' : 'local');
   const [connectionMessage, setConnectionMessage] = useState(isRemoteBuildBookClient() ? 'Checking connection...' : 'Local app');
+  const [syncConflictSummary, setSyncConflictSummary] = useState(null);
+  const [showConflictReview, setShowConflictReview] = useState(false);
+  const [remoteUnsaved, setRemoteUnsaved] = useState(false);
+  const [bootstrapProgress, setBootstrapProgress] = useState(() => {
+    if (!window.__TAURI_INTERNALS__) return null;
+    return sessionStorage.getItem(SYNC_BOOTSTRAP_KEY)
+      ? { stage: 'Connecting to host', detail: 'Loading notes and settings...', current: 0, total: 0, complete: false }
+      : null;
+  });
   const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
   const saveChainRef = useRef(Promise.resolve());
   const stateRef = useRef(null);
   const saveStateRef = useRef('saved');
+  const bootstrapStartedRef = useRef(false);
   const lastPersistedStateRef = useRef('');
   const selectionGuardRef = useRef({ source: null, x: 0, y: 0, block: false, timer: 0 });
 
@@ -2474,6 +2534,9 @@ export default function App() {
     setLoadBusy(true);
     setLoadError('');
     try {
+      if (sessionStorage.getItem(SYNC_BOOTSTRAP_KEY)) {
+        setBootstrapProgress({ stage: 'Syncing host data', detail: 'Loading notes, settings, and project records...', current: 0, total: 0, complete: false });
+      }
       const loaded = await loadAppState();
       lastPersistedStateRef.current = persistedStateText(loaded);
       setState(loaded);
@@ -2546,6 +2609,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!window.__TAURI_INTERNALS__ || connectionState !== 'conflict') {
+      setSyncConflictSummary(null);
+      return undefined;
+    }
+    let active = true;
+    readSyncConflictSummary()
+      .then((summary) => {
+        if (active) setSyncConflictSummary(summary);
+      })
+      .catch(() => {
+        if (active) setSyncConflictSummary(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [connectionState]);
+
+  useEffect(() => {
     reloadState();
   }, []);
 
@@ -2586,6 +2667,11 @@ export default function App() {
               lastPersistedStateRef.current = persistedStateText(next);
               saveStateRef.current = 'saved';
               setSaveState('saved');
+              if (isRemoteBuildBookClient()) {
+                setRemoteUnsaved(false);
+                setConnectionState('connected');
+                setConnectionMessage('Changes saved to host.');
+              }
             }
           })
           .catch((error) => {
@@ -2594,11 +2680,38 @@ export default function App() {
               const message = `error: ${String(error?.message || error).slice(0, 160)}`;
               saveStateRef.current = message;
               setSaveState(message);
+              if (isRemoteBuildBookClient()) {
+                setRemoteUnsaved(true);
+                setConnectionState('disconnected');
+                setConnectionMessage('Save failed. Browser changes are still on this screen but are not on the host yet.');
+              }
             }
           });
       }, 450);
       return next;
     });
+  };
+
+  const retryRemoteSave = async () => {
+    if (!stateRef.current) return;
+    saveStateRef.current = 'saving';
+    setSaveState('saving');
+    setConnectionMessage('Retrying save to host...');
+    try {
+      const normalized = await saveAppState(stateRef.current);
+      lastPersistedStateRef.current = persistedStateText(normalized);
+      saveStateRef.current = 'saved';
+      setSaveState('saved');
+      setRemoteUnsaved(false);
+      await refreshConnectionStatus();
+    } catch (error) {
+      const message = `error: ${String(error?.message || error).slice(0, 160)}`;
+      saveStateRef.current = message;
+      setSaveState(message);
+      setRemoteUnsaved(true);
+      setConnectionState('disconnected');
+      setConnectionMessage('Save still failed. Keep this tab open or copy your changes before refreshing.');
+    }
   };
 
   useEffect(() => {
@@ -2643,9 +2756,89 @@ export default function App() {
   }, [state?.closeToTray]);
 
   useEffect(() => {
+    if (!remoteUnsaved) return undefined;
+    const warnBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warnBeforeUnload);
+    return () => window.removeEventListener('beforeunload', warnBeforeUnload);
+  }, [remoteUnsaved]);
+
+  useEffect(() => {
+    if (!state || !isHostSyncClient() || !sessionStorage.getItem(SYNC_BOOTSTRAP_KEY) || bootstrapStartedRef.current) return undefined;
+    bootstrapStartedRef.current = true;
+    let cancelled = false;
+    const cachePaths = async (label, paths) => {
+      for (let index = 0; index < paths.length; index += 1) {
+        if (cancelled) return;
+        setBootstrapProgress({
+          stage: label,
+          detail: paths[index].split(/[\\/]/).pop() || paths[index],
+          current: index + 1,
+          total: paths.length,
+          complete: false,
+        });
+        try {
+          await readStoredFile(paths[index]);
+        } catch {
+          // Cache misses are non-fatal; the file can still be loaded on demand later.
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+    };
+    const runBootstrap = async () => {
+      const allPaths = collectReferencedPaths(state);
+      const thumbnailPaths = allPaths.filter((path) => /thumb|thumbnail/i.test(path));
+      const thumbnailSet = new Set(thumbnailPaths);
+      const immediatePaths = allPaths
+        .filter((path) => !thumbnailSet.has(path))
+        .filter((path) => /\.(png|jpe?g|webp|gif|svg|txt|csv|json|md|pdf)$/i.test(path))
+        .slice(0, 120);
+      const immediateSet = new Set([...thumbnailPaths, ...immediatePaths]);
+      const backgroundPaths = allPaths.filter((path) => !immediateSet.has(path));
+      await cachePaths('Downloading thumbnails', thumbnailPaths);
+      await cachePaths('Caching common files', immediatePaths);
+      if (!cancelled && backgroundPaths.length) {
+        setBootstrapProgress({
+          stage: 'Caching larger files',
+          detail: `${backgroundPaths.length} remaining files will cache in the background.`,
+          current: 0,
+          total: backgroundPaths.length,
+          complete: false,
+        });
+        cachePaths('Caching larger files', backgroundPaths).then(() => {
+          if (cancelled) return;
+          sessionStorage.removeItem(SYNC_BOOTSTRAP_KEY);
+          setBootstrapProgress({ stage: 'Client cache ready', detail: 'Host connection finished.', current: 1, total: 1, complete: true });
+          window.setTimeout(() => setBootstrapProgress(null), 2500);
+        });
+        return;
+      }
+      if (!cancelled) {
+        sessionStorage.removeItem(SYNC_BOOTSTRAP_KEY);
+        setBootstrapProgress({ stage: 'Client cache ready', detail: 'Host connection finished.', current: 1, total: 1, complete: true });
+        window.setTimeout(() => setBootstrapProgress(null), 2500);
+      }
+    };
+    runBootstrap();
+    return () => {
+      cancelled = true;
+    };
+  }, [state]);
+
+  useEffect(() => {
     if (!window.__TAURI_INTERNALS__ && !isRemoteBuildBookClient()) return undefined;
     const timer = window.setInterval(async () => {
       if (!stateRef.current || saveStateRef.current === 'saving') return;
+      if (isRemoteBuildBookClient() && saveStateRef.current.startsWith('error')) {
+        try {
+          await refreshConnectionStatus();
+        } catch {
+          // Keep unsaved browser edits visible until the user retries or refreshes intentionally.
+        }
+        return;
+      }
       try {
         await refreshConnectionStatus();
         const loaded = await loadAppState();
@@ -2675,7 +2868,14 @@ export default function App() {
   }, [state]);
 
   if (!state) {
-    if (!loadError || loadBusy) return <div className="loading">Loading BuildBook...</div>;
+    if (!loadError || loadBusy) {
+      return (
+        <div className="loading">
+          <strong>{bootstrapProgress?.stage || 'Loading BuildBook...'}</strong>
+          {bootstrapProgress?.detail && <span>{bootstrapProgress.detail}</span>}
+        </div>
+      );
+    }
     return (
       <div className="access-gate">
         <section className="panel access-gate-panel">
@@ -2796,6 +2996,25 @@ export default function App() {
       setState(loaded);
       setSaveState('saved');
       applyDesktopSyncStatus(result);
+      setSyncConflictSummary(null);
+      setShowConflictReview(false);
+    } catch (error) {
+      setConnectionState('conflict');
+      setConnectionMessage(`Conflict resolution failed: ${String(error?.message || error)}`);
+    }
+  };
+
+  const resolveDesktopConflictSelections = async (selections) => {
+    try {
+      setConnectionMessage('Resolving selected synchronization conflicts...');
+      const result = await resolveSyncConflictSelections(selections);
+      const loaded = normalizeState(JSON.parse(result.contents));
+      lastPersistedStateRef.current = persistedStateText(loaded);
+      setState(loaded);
+      setSaveState('saved');
+      applyDesktopSyncStatus(result);
+      setSyncConflictSummary(null);
+      setShowConflictReview(false);
     } catch (error) {
       setConnectionState('conflict');
       setConnectionMessage(`Conflict resolution failed: ${String(error?.message || error)}`);
@@ -2806,6 +3025,7 @@ export default function App() {
     || (window.__TAURI_INTERNALS__ && connectionState !== 'local');
 
   return (
+    <ConfirmProvider>
     <div className="app" onPointerDownCapture={handlePointerDownCapture} onPointerUpCapture={handlePointerUpCapture} onClickCapture={handleClickCapture}>
       <aside className="sidebar">
         <div className="brand">
@@ -2825,13 +3045,56 @@ export default function App() {
       <main className="workspace">
         {showConnectionBanner && (
           <div className={`connection-banner connection-${connectionState}`}>
-            <span>{connectionMessage}</span>
+            <div className="connection-banner-copy">
+              <span>{connectionMessage}</span>
+              {connectionState === 'conflict' && syncConflictSummary?.items?.length ? (
+                <div className="connection-conflict-list">
+                  {syncConflictSummary.items.slice(0, 6).map((item) => (
+                    <span key={item.path}>{item.label}</span>
+                  ))}
+                  {syncConflictSummary.items.length > 6 && <span>{syncConflictSummary.items.length - 6} more changed areas</span>}
+                </div>
+              ) : null}
+              {connectionState === 'conflict' && syncConflictSummary?.hasConflict && !syncConflictSummary.items?.length && (
+                <span className="connection-conflict-muted">Changes are broad or could not be summarized safely.</span>
+              )}
+            </div>
             {connectionState === 'conflict' && (
               <div className="connection-banner-actions">
                 <button className="secondary" onClick={() => resolveDesktopConflict('host')}>Use Host Version</button>
                 <button className="secondary" onClick={() => resolveDesktopConflict('combine')}>Combine Changes</button>
+                <button className="secondary" onClick={() => setShowConflictReview(true)} disabled={!syncConflictSummary?.items?.length}>Review</button>
                 <button onClick={() => resolveDesktopConflict('local')}>Use This Computer</button>
               </div>
+            )}
+          </div>
+        )}
+        {remoteUnsaved && (
+          <div className="connection-banner connection-unsaved">
+            <div className="connection-banner-copy">
+              <strong>Unsaved browser changes</strong>
+              <span>The host did not accept the last save. Do not refresh or close this tab until Retry Save succeeds.</span>
+            </div>
+            <div className="connection-banner-actions">
+              <button onClick={retryRemoteSave} disabled={saveState === 'saving'}>{saveState === 'saving' ? 'Saving...' : 'Retry Save'}</button>
+            </div>
+          </div>
+        )}
+        {showConflictReview && (
+          <SyncConflictReviewModal
+            summary={syncConflictSummary}
+            onCancel={() => setShowConflictReview(false)}
+            onResolve={resolveDesktopConflictSelections}
+          />
+        )}
+        {bootstrapProgress && (
+          <div className={`sync-bootstrap ${bootstrapProgress.complete ? 'complete' : ''}`}>
+            <div>
+              <strong>{bootstrapProgress.stage}</strong>
+              <span>{bootstrapProgress.detail}</span>
+            </div>
+            {bootstrapProgress.total > 0 && (
+              <progress value={bootstrapProgress.current} max={bootstrapProgress.total} />
             )}
           </div>
         )}
@@ -2843,10 +3106,70 @@ export default function App() {
         {tab === 'settings' && <Settings state={state} updateState={updateState} />}
       </main>
     </div>
+    </ConfirmProvider>
+  );
+}
+
+function SyncConflictReviewModal({ summary, onCancel, onResolve }) {
+  const items = summary?.items || [];
+  const [choices, setChoices] = useState(() => Object.fromEntries(items.map((item) => [item.path, 'combine'])));
+  const [busy, setBusy] = useState(false);
+
+  const setChoice = (path, choice) => {
+    setChoices((current) => ({ ...current, [path]: choice }));
+  };
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      await onResolve(items.map((item) => ({ path: item.path, choice: choices[item.path] || 'combine' })));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onMouseDown={onCancel}>
+      <div className="modal sync-conflict-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Review Sync Conflict</h2>
+        </div>
+        <p className="settings-note">Choose which side to keep for each changed area. Combine uses the automatic merge and combines conflicting project notes where possible.</p>
+        <div className="sync-conflict-review-list">
+          {items.map((item) => (
+            <section className="sync-conflict-review-item" key={item.path}>
+              <div className="sync-conflict-review-head">
+                <strong>{item.label}</strong>
+                <select value={choices[item.path] || 'combine'} onChange={(event) => setChoice(item.path, event.target.value)}>
+                  <option value="combine">Combine</option>
+                  <option value="host">Use Host</option>
+                  <option value="local">Use This Computer</option>
+                </select>
+              </div>
+              <div className="sync-conflict-preview-grid">
+                <div>
+                  <span>Host</span>
+                  <p>{item.hostPreview || 'No preview available.'}</p>
+                </div>
+                <div>
+                  <span>This computer</span>
+                  <p>{item.localPreview || 'No preview available.'}</p>
+                </div>
+              </div>
+            </section>
+          ))}
+        </div>
+        <div className="modal-actions">
+          <button className="secondary" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button onClick={submit} disabled={busy || !items.length}>{busy ? 'Resolving...' : 'Resolve Selected'}</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
 function Projects({ state, updateState, initialFilter = 'open', lockedFilter = false }) {
+  const confirm = useAppConfirm();
   const [selectedId, setSelectedId] = useState('');
   const [pendingImport, setPendingImport] = useState(null);
   const [importError, setImportError] = useState('');
@@ -2991,8 +3314,14 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
     return copy.id;
   };
 
-  const deletePart = (partId) => {
-    if (!window.confirm('Delete this part from the Parts Library and unlink it from projects?')) return false;
+  const deletePart = async (partId) => {
+    const confirmed = await confirm({
+      title: 'Delete part',
+      message: 'Delete this part from the Parts Library and unlink it from projects?',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return false;
     updateState((current) => ({
       ...current,
       parts: current.parts.filter((part) => part.id !== partId),
@@ -3084,8 +3413,14 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
     setSelectedId(copy.id);
   };
 
-  const deleteProject = (projectId) => {
-    if (!window.confirm('Delete this project from BuildBook? Attached copied files will remain in the app folder for now.')) return;
+  const deleteProject = async (projectId) => {
+    const confirmed = await confirm({
+      title: 'Delete project',
+      message: 'Delete this project from BuildBook? Attached copied files will remain in the app folder for now.',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return;
     updateState((current) => ({ ...current, projects: current.projects.filter((project) => project.id !== projectId) }));
     setSelectedId('');
   };
@@ -3450,6 +3785,8 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
   const [selectedImage, setSelectedImage] = useState(null);
   const [imageWidth, setImageWidth] = useState(100);
   const [markupSource, setMarkupSource] = useState('');
+  const [textColor, setTextColor] = useState('#f3f6fb');
+  const [highlightColor, setHighlightColor] = useState('#24558a');
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -3538,6 +3875,22 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     emitChange();
   };
 
+  const applyTextColor = (color) => {
+    setTextColor(color);
+    exec('foreColor', color);
+  };
+
+  const applyHighlightColor = (color) => {
+    setHighlightColor(color);
+    editorRef.current?.focus();
+    restoreSelection();
+    if (!document.execCommand('hiliteColor', false, color)) {
+      document.execCommand('backColor', false, color);
+    }
+    rememberSelection();
+    emitChange();
+  };
+
   const insertImage = async (source) => {
     if (!source) return;
     const stored = await onUploadImage(source);
@@ -3569,6 +3922,24 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('insertUnorderedList')}>List</button>
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<h2>')}>H2</button>
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<p>')}>Text</button>
+        <label className="rich-color-control" onMouseDown={rememberSelection}>
+          Text color
+          <input
+            type="color"
+            value={textColor}
+            onChange={(event) => applyTextColor(event.target.value)}
+            aria-label="Text color"
+          />
+        </label>
+        <label className="rich-color-control" onMouseDown={rememberSelection}>
+          Background
+          <input
+            type="color"
+            value={highlightColor}
+            onChange={(event) => applyHighlightColor(event.target.value)}
+            aria-label="Text background color"
+          />
+        </label>
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => fileInputRef.current?.click()}>Image</button>
         {selectedImage && (
           <div className="rich-image-tools">
@@ -4096,6 +4467,14 @@ function collectReferencedPaths(state) {
   });
   state.importBatches.forEach((batch) => (batch.items || []).forEach((item) => add(item.imagePath)));
   return [...paths];
+}
+
+function compactBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (value >= 1024 * 1024) return `${Math.round(value / 1024 / 1024)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
 }
 
 function runWhenIdle(callback) {
@@ -6056,9 +6435,9 @@ function ProjectPartsTab({
                 const target = parts.find((part) => part.id === editingPartId);
                 if (target) onDuplicatePart(target);
               }}
-              onDelete={() => {
-                onDeletePart(editingPartId);
-                setEditingPartId('');
+              onDelete={async () => {
+                const deleted = await onDeletePart(editingPartId);
+                if (deleted !== false) setEditingPartId('');
               }}
             />
           </div>
@@ -7328,6 +7707,7 @@ function CategoryManager({ categories, onUpdate, onClose }) {
 }
 
 function Parts({ state, updateState }) {
+  const confirm = useAppConfirm();
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
@@ -7515,14 +7895,21 @@ function Parts({ state, updateState }) {
     setSelectedId(copy.id);
   };
 
-  const deletePart = (partId) => {
-    if (!window.confirm('Delete this part from the Parts Library and unlink it from projects?')) return;
+  const deletePart = async (partId) => {
+    const confirmed = await confirm({
+      title: 'Delete part',
+      message: 'Delete this part from the Parts Library and unlink it from projects?',
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return false;
     updateState((current) => ({
       ...current,
       parts: current.parts.filter((part) => part.id !== partId),
       projects: current.projects.map((project) => ({ ...project, partIds: project.partIds.filter((id) => id !== partId) })),
     }));
     setSelectedId('');
+    return true;
   };
 
   const linkPartToProject = (projectId, partId) => {
@@ -8670,6 +9057,7 @@ function Imports({ state, updateState }) {
 }
 
 function Settings({ state, updateState }) {
+  const confirm = useAppConfirm();
   const remoteClient = isRemoteBuildBookClient();
   const hostSyncClient = isHostSyncClient();
   const [showTemplatePreview, setShowTemplatePreview] = useState(false);
@@ -8706,10 +9094,13 @@ function Settings({ state, updateState }) {
   const [syncDeviceName, setSyncDeviceName] = useState('');
   const [syncHostUrl, setSyncHostUrl] = useState('');
   const [syncHostToken, setSyncHostToken] = useState('');
+  const [syncPairingCode, setSyncPairingCode] = useState('');
   const [syncHosts, setSyncHosts] = useState([]);
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncNotice, setSyncNotice] = useState('');
   const [syncError, setSyncError] = useState('');
+  const [syncDashboard, setSyncDashboard] = useState(null);
+  const [syncPrefetchProgress, setSyncPrefetchProgress] = useState('');
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -8739,9 +9130,29 @@ function Settings({ state, updateState }) {
         setSyncDeviceName(config.deviceName || '');
         setSyncHostUrl(config.hostUrl || '');
         setSyncHostToken(config.hostToken || '');
+        setSyncPairingCode('');
       })
       .catch((error) => setSyncError(String(error)));
   }, [remoteClient]);
+
+  useEffect(() => {
+    if (remoteClient) return undefined;
+    let active = true;
+    const loadDashboard = async () => {
+      try {
+        const dashboard = await readSyncStatusDashboard();
+        if (active) setSyncDashboard(dashboard);
+      } catch {
+        if (active) setSyncDashboard(null);
+      }
+    };
+    loadDashboard();
+    const timer = window.setInterval(loadDashboard, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [remoteClient, syncConfig?.mode, syncConfig?.pairedDevices?.length, syncConfig?.pairingCodeExpiresAt]);
 
   const saveDeviceName = async () => {
     if (!syncConfig || !syncDeviceName.trim()) return;
@@ -8750,6 +9161,7 @@ function Settings({ state, updateState }) {
     try {
       const saved = await writeSyncConfig({ ...syncConfig, deviceName: syncDeviceName.trim() });
       setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       setSyncNotice('Device name saved.');
     } catch (error) {
       setSyncError(String(error));
@@ -8760,7 +9172,12 @@ function Settings({ state, updateState }) {
 
   const createHostFromThisComputer = async () => {
     if (!syncConfig) return;
-    if (!window.confirm('Make this computer the authoritative BuildBook host using its current projects, parts, settings, and files?')) return;
+    const confirmed = await confirm({
+      title: 'Create host',
+      message: 'Make this computer the authoritative BuildBook host using its current projects, parts, settings, and files?',
+      confirmLabel: 'Create Host',
+    });
+    if (!confirmed) return;
     setSyncBusy(true);
     setSyncError('');
     setSyncNotice('');
@@ -8771,12 +9188,14 @@ function Settings({ state, updateState }) {
         deviceName: syncDeviceName.trim() || syncConfig.deviceName,
         hostUrl: '',
         hostToken: '',
+        clientAuthToken: '',
         hostRevision: '',
         pendingSync: false,
         lastConnectedAt: 0,
         lastSyncError: '',
       });
       setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       updateLanServer({
         enabled: true,
         requireToken: state.lanServer?.requireToken !== false,
@@ -8805,14 +9224,98 @@ function Settings({ state, updateState }) {
     }
   };
 
-  const connectToHost = async () => {
-    if (!syncConfig || !syncHostUrl.trim()) return;
-    if (!window.confirm('Use this host as the authoritative BuildBook source? This computer will keep a local cache, but its current standalone data will not be merged or uploaded.')) return;
+  const generatePairingCode = async () => {
     setSyncBusy(true);
     setSyncError('');
     setSyncNotice('');
     try {
-      const info = await probeBuildBookHost(syncHostUrl, syncHostToken);
+      const saved = await generateSyncPairingCode();
+      setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
+      setSyncNotice(`Pairing code: ${saved.pairingCode}. It expires in 10 minutes.`);
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const revokeDevice = async (deviceId) => {
+    const confirmed = await confirm({
+      title: 'Revoke device',
+      message: 'Revoke this computer from host sync?',
+      confirmLabel: 'Revoke',
+      danger: true,
+    });
+    if (!confirmed) return;
+    setSyncBusy(true);
+    setSyncError('');
+    try {
+      const saved = await revokePairedDevice(deviceId);
+      setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
+      setSyncNotice('Device revoked.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const refreshSyncDashboard = async () => {
+    setSyncError('');
+    try {
+      const dashboard = await readSyncStatusDashboard();
+      setSyncDashboard(dashboard);
+      setSyncNotice('Sync dashboard refreshed.');
+    } catch (error) {
+      setSyncError(String(error));
+    }
+  };
+
+  const clearCheckout = async (path) => {
+    const confirmed = await confirm({
+      title: 'Clear checkout',
+      message: 'Clear this file checkout? Only do this if the other computer is no longer editing it.',
+      confirmLabel: 'Clear',
+      danger: true,
+    });
+    if (!confirmed) return;
+    setSyncBusy(true);
+    setSyncError('');
+    try {
+      await clearSyncCheckout(path);
+      const dashboard = await readSyncStatusDashboard();
+      setSyncDashboard(dashboard);
+      setSyncNotice('File checkout cleared.');
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+    }
+  };
+
+  const connectToHost = async () => {
+    if (!syncConfig || !syncHostUrl.trim()) return;
+    const confirmed = await confirm({
+      title: 'Connect to host',
+      message: 'Use this host as the authoritative BuildBook source? This computer will keep a local cache, but its current standalone data will not be merged or uploaded.',
+      confirmLabel: 'Connect',
+    });
+    if (!confirmed) return;
+    setSyncBusy(true);
+    setSyncError('');
+    setSyncNotice('');
+    try {
+      let info = null;
+      let clientAuthToken = '';
+      if (syncPairingCode.trim()) {
+        const paired = await pairBuildBookHost(syncHostUrl, syncPairingCode.trim());
+        info = paired.host;
+        clientAuthToken = paired.deviceToken;
+      } else {
+        info = await probeBuildBookHost(syncHostUrl, syncHostToken);
+      }
       if (!info.hostingEnabled) {
         throw new Error(`${info.deviceName || 'That computer'} is serving BuildBook, but it has not been configured as an authoritative host.`);
       }
@@ -8821,15 +9324,20 @@ function Settings({ state, updateState }) {
         mode: 'client',
         deviceName: syncDeviceName.trim() || syncConfig.deviceName,
         hostUrl: info.url,
-        hostToken: syncHostToken.trim(),
+        hostToken: syncPairingCode.trim() ? '' : syncHostToken.trim(),
+        clientAuthToken,
         hostRevision: '',
         pendingSync: false,
         lastConnectedAt: 0,
         lastSyncError: '',
       });
       setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       setSyncHostUrl(info.url);
+      setSyncPairingCode('');
+      setSyncHostToken('');
       setSyncNotice(`Connected to ${info.deviceName}. Loading host data...`);
+      sessionStorage.setItem(SYNC_BOOTSTRAP_KEY, '1');
       window.setTimeout(() => window.location.reload(), 250);
     } catch (error) {
       setSyncError(String(error));
@@ -8848,20 +9356,56 @@ function Settings({ state, updateState }) {
         mode: 'local',
         hostUrl: '',
         hostToken: '',
+        clientAuthToken: '',
         hostRevision: '',
         pendingSync: false,
         lastConnectedAt: 0,
         lastSyncError: '',
       });
       setSyncConfig(saved);
+      readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       setSyncHostUrl('');
       setSyncHostToken('');
+      setSyncPairingCode('');
       setSyncHosts([]);
       setSyncNotice('This computer is using its standalone local data.');
     } catch (error) {
       setSyncError(String(error));
     } finally {
       setSyncBusy(false);
+    }
+  };
+
+  const prefetchClientCache = async () => {
+    const paths = [...collectReferencedPaths(state)]
+      .filter((path) => typeof path === 'string' && path.trim())
+      .slice(0, 500);
+    if (!paths.length) {
+      setSyncNotice('No project files are available to cache.');
+      return;
+    }
+    setSyncBusy(true);
+    setSyncError('');
+    setSyncNotice('');
+    try {
+      let cached = 0;
+      let failed = 0;
+      for (let index = 0; index < paths.length; index += 1) {
+        setSyncPrefetchProgress(`Caching ${index + 1} of ${paths.length}`);
+        try {
+          await readStoredFile(paths[index]);
+          cached += 1;
+        } catch {
+          failed += 1;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+      setSyncNotice(`Client cache updated. Cached ${cached} file${cached === 1 ? '' : 's'}${failed ? `, ${failed} failed` : ''}.`);
+    } catch (error) {
+      setSyncError(String(error));
+    } finally {
+      setSyncBusy(false);
+      setSyncPrefetchProgress('');
     }
   };
 
@@ -8996,7 +9540,13 @@ function Settings({ state, updateState }) {
 
   const restoreBackup = async (file) => {
     if (!file) return;
-    if (!window.confirm('Restore will replace all current BuildBook data with this backup, including projects, parts, files, images, documents, imports, and settings. Continue?')) return;
+    const confirmed = await confirm({
+      title: 'Restore backup',
+      message: 'Restore will replace all current BuildBook data with this backup, including projects, parts, files, images, documents, imports, and settings. Continue?',
+      confirmLabel: 'Restore',
+      danger: true,
+    });
+    if (!confirmed) return;
     setBackupRestoreBusy(true);
     setRestoreError('');
     setBackupNotice('');
@@ -9030,7 +9580,13 @@ function Settings({ state, updateState }) {
   const runStorageCleanup = async () => {
     const deletePaths = [...selectedOrphans];
     if (!deletePaths.length) return;
-    if (!window.confirm(`Delete ${deletePaths.length} selected unreferenced stored files?`)) return;
+    const confirmed = await confirm({
+      title: 'Delete selected files',
+      message: `Delete ${deletePaths.length} selected unreferenced stored files?`,
+      confirmLabel: 'Delete Selected',
+      danger: true,
+    });
+    if (!confirmed) return;
     setStorageBusy(true);
     setStorageError('');
     try {
@@ -9047,7 +9603,13 @@ function Settings({ state, updateState }) {
   const runFullStorageCleanup = async () => {
     const deletePaths = (storageScan?.orphans || []).map((file) => file.path);
     if (!deletePaths.length) return;
-    if (!window.confirm(`Delete all ${deletePaths.length} orphaned stored files? This cannot be undone.`)) return;
+    const confirmed = await confirm({
+      title: 'Delete all orphaned files',
+      message: `Delete all ${deletePaths.length} orphaned stored files? This cannot be undone.`,
+      confirmLabel: 'Delete All',
+      danger: true,
+    });
+    if (!confirmed) return;
     setStorageBusy(true);
     setStorageError('');
     try {
@@ -9315,6 +9877,7 @@ function Settings({ state, updateState }) {
           </div>
         ) : null}
         {storageError && <p className="error-text">{storageError}</p>}
+        {hostSyncClient && <p className="settings-note">Storage cleanup must be run on the host computer.</p>}
       </section>
       <section className="panel settings-section">
         <div className="settings-section-row">
@@ -9324,7 +9887,6 @@ function Settings({ state, updateState }) {
           </div>
           {syncConfig && <span className={`sync-mode-badge sync-mode-${syncConfig.mode}`}>{syncConfig.mode}</span>}
         </div>
-        {hostSyncClient && <p className="settings-note">Storage cleanup must be run on the host computer.</p>}
         {remoteClient ? (
           <p className="settings-note">Host and client setup must be changed from the desktop app.</p>
         ) : (
@@ -9339,8 +9901,91 @@ function Settings({ state, updateState }) {
             </div>
             <div className="sync-mode-actions">
               <button onClick={createHostFromThisComputer} disabled={syncBusy || !syncConfig}>Create Host from This Computer</button>
+              <button className="secondary" onClick={generatePairingCode} disabled={syncBusy || syncConfig?.mode !== 'host'}>Generate Pairing Code</button>
+              <button className="secondary" onClick={prefetchClientCache} disabled={syncBusy || syncConfig?.mode !== 'client'}>Prefetch Client Cache</button>
               <button className="secondary" onClick={returnToLocalMode} disabled={syncBusy || !syncConfig || syncConfig.mode === 'local'}>Use Standalone Local Data</button>
             </div>
+            {syncPrefetchProgress && <p className="settings-note">{syncPrefetchProgress}</p>}
+            {syncConfig?.pairingCode && syncConfig?.pairingCodeExpiresAt > Math.floor(Date.now() / 1000) && (
+              <div className="sync-pairing-code">
+                <strong>{syncConfig.pairingCode}</strong>
+                <span>Expires {new Date(syncConfig.pairingCodeExpiresAt * 1000).toLocaleTimeString()}</span>
+              </div>
+            )}
+            {syncConfig?.mode === 'host' && Boolean(syncConfig?.pairedDevices?.length) && (
+              <div className="sync-device-list">
+                {(syncConfig.pairedDevices || []).map((device) => (
+                  <div key={device.deviceId} className={`sync-device-card ${device.revoked ? 'revoked' : ''}`}>
+                    <div>
+                      <strong>{device.deviceName || 'BuildBook Computer'}</strong>
+                      <span>{device.revoked ? 'Revoked' : `Last seen ${device.lastSeenAt ? new Date(device.lastSeenAt * 1000).toLocaleString() : 'never'}`}</span>
+                    </div>
+                    {!device.revoked && <button className="danger-fill" onClick={() => revokeDevice(device.deviceId)} disabled={syncBusy}>Revoke</button>}
+                  </div>
+                ))}
+              </div>
+            )}
+            {syncDashboard && (
+              <div className="sync-dashboard">
+                <div>
+                  <strong>Sync Status</strong>
+                  <span>{syncDashboard.pendingSync ? 'Pending local changes' : syncDashboard.mode === 'client' ? 'Connected cache' : syncDashboard.mode === 'host' ? 'Host ready' : 'Standalone'}</span>
+                </div>
+                <div>
+                  <strong>Paired Devices</strong>
+                  <span>{(syncDashboard.pairedDevices || []).filter((device) => !device.revoked).length} active, {(syncDashboard.pairedDevices || []).filter((device) => device.revoked).length} revoked</span>
+                </div>
+                <div>
+                  <strong>Client Cache</strong>
+                  <span>{syncDashboard.cacheFileCount || 0} files, {compactBytes(syncDashboard.cacheBytes || 0)}</span>
+                </div>
+                {syncDashboard.hostUrl && (
+                  <div>
+                    <strong>Host</strong>
+                    <span>{syncDashboard.hostUrl}</span>
+                  </div>
+                )}
+                {syncDashboard.lastConnectedAt ? (
+                  <div>
+                    <strong>Last sync</strong>
+                    <span>{new Date(syncDashboard.lastConnectedAt * 1000).toLocaleString()}</span>
+                  </div>
+                ) : null}
+                {syncDashboard.pairingLockedUntil > Math.floor(Date.now() / 1000) && (
+                  <div className="sync-warning">
+                    <strong>Pairing locked</strong>
+                    <span>Try again after {new Date(syncDashboard.pairingLockedUntil * 1000).toLocaleTimeString()}.</span>
+                  </div>
+                )}
+                {syncDashboard.lastSyncError && (
+                  <div className="sync-warning">
+                    <strong>Last error</strong>
+                    <span>{syncDashboard.lastSyncError}</span>
+                  </div>
+                )}
+                {syncDashboard.activeCheckouts?.length ? (
+                  <div className="sync-checkouts">
+                    <strong>Checked Out Files</strong>
+                    {syncDashboard.activeCheckouts.map((lease) => (
+                      <span key={`${lease.path}-${lease.deviceId}`}>
+                        {lease.path.split(/[\\/]/).pop()} by {lease.deviceName} until {new Date(lease.expiresAt * 1000).toLocaleTimeString()}
+                        {syncDashboard.mode === 'host' && (
+                          <button className="ghost compact-action" onClick={() => clearCheckout(lease.path)} disabled={syncBusy}>Clear</button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                ) : syncDashboard.mode === 'host' ? (
+                  <div>
+                    <strong>Checked Out Files</strong>
+                    <span>None</span>
+                  </div>
+                ) : null}
+                <div className="sync-dashboard-actions">
+                  <button className="secondary" onClick={refreshSyncDashboard} disabled={syncBusy}>Refresh Dashboard</button>
+                </div>
+              </div>
+            )}
             <div className="sync-connect-panel">
               <div className="section-title">
                 <h3>Connect to a Host</h3>
@@ -9367,7 +10012,11 @@ function Settings({ state, updateState }) {
                   <input value={syncHostUrl} onChange={(event) => setSyncHostUrl(event.target.value)} placeholder="http://192.168.1.20:8787" />
                 </label>
                 <label>
-                  Access token
+                  Pairing code
+                  <input value={syncPairingCode} onChange={(event) => setSyncPairingCode(event.target.value)} placeholder="8 digit code from host" />
+                </label>
+                <label>
+                  Legacy access token
                   <input type="password" value={syncHostToken} onChange={(event) => setSyncHostToken(event.target.value)} placeholder="Optional if disabled on host" />
                 </label>
                 <button onClick={connectToHost} disabled={syncBusy || !syncHostUrl.trim()}>Connect</button>

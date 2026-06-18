@@ -319,7 +319,7 @@ export function assetUrl(path) {
   const syncConfig = cachedSyncConfig();
   if (isTauri() && syncConfig.mode === 'client' && syncConfig.hostUrl) {
     const base = syncConfig.hostUrl.replace(/\/+$/, '');
-    return `${base}/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(syncConfig.hostToken || '')}&device=${encodeURIComponent(syncConfig.deviceId || '')}`;
+    return `${base}/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(syncConfig.hostToken || '')}&deviceToken=${encodeURIComponent(syncConfig.clientAuthToken || '')}&device=${encodeURIComponent(syncConfig.deviceId || '')}`;
   }
   return isTauri() ? convertFileSrc(path) : path;
 }
@@ -365,9 +365,65 @@ export async function probeBuildBookHost(url, token = '') {
   return invoke('probe_buildbook_host', { url, token });
 }
 
+export async function pairBuildBookHost(url, pairingCode = '') {
+  if (!isTauri()) throw new Error('Host pairing is only available in the desktop app.');
+  return invoke('pair_buildbook_host', { url, pairingCode });
+}
+
+export async function generateSyncPairingCode() {
+  if (!isTauri()) throw new Error('Pairing codes are only available in the desktop app.');
+  const config = await invoke('generate_sync_pairing_code');
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+  return config;
+}
+
+export async function revokePairedDevice(deviceId) {
+  if (!isTauri()) throw new Error('Paired devices are only managed in the desktop app.');
+  const config = await invoke('revoke_paired_device', { deviceId });
+  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+  return config;
+}
+
+export async function clearSyncCheckout(path) {
+  if (!isTauri()) throw new Error('File checkouts are only managed in the desktop app.');
+  return invoke('clear_sync_checkout', { path });
+}
+
+export async function readSyncStatusDashboard() {
+  if (!isTauri()) {
+    return {
+      mode: 'local',
+      deviceId: 'browser',
+      deviceName: 'Browser',
+      hostUrl: '',
+      hostRevision: '',
+      pendingSync: false,
+      lastConnectedAt: 0,
+      lastSyncError: '',
+      pairingCodeExpiresAt: 0,
+      pairingLockedUntil: 0,
+      pairedDevices: [],
+      activeCheckouts: [],
+      cacheFileCount: 0,
+      cacheBytes: 0,
+    };
+  }
+  return invoke('sync_status_dashboard');
+}
+
+export async function readSyncConflictSummary() {
+  if (!isTauri()) return { hasConflict: false, items: [] };
+  return invoke('sync_conflict_summary');
+}
+
 export async function resolveSyncConflict(choice) {
   if (!isTauri()) throw new Error('Sync conflict resolution is only available in the desktop app.');
   return invoke('resolve_sync_conflict', { choice });
+}
+
+export async function resolveSyncConflictSelections(selections) {
+  if (!isTauri()) throw new Error('Sync conflict resolution is only available in the desktop app.');
+  return invoke('resolve_sync_conflict_selections', { selections });
 }
 
 export async function fileCheckout(path, action = 'acquire') {

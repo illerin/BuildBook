@@ -1,34 +1,21 @@
-# Security
+# BuildBook Security Notes
 
-BuildBook is a local-first desktop app with an optional LAN web server. Leave local network access off unless you are actively using it.
+BuildBook is intended for trusted personal or workshop networks. Do not expose the direct LAN server port to the public internet.
 
-## Recommended Setup
+Recommended setup:
+- Use Tailscale, a VPN, or a reverse proxy with HTTPS for remote access.
+- Keep the LAN access token enabled unless all access is already protected by another trusted layer.
+- Enable web login when using a domain or reverse proxy.
+- Use pairing codes for multi-computer sync, then revoke devices that should no longer connect.
+- Keep Windows and BuildBook updated.
 
-- Use the desktop app directly for normal local use.
-- If exposing BuildBook through a reverse proxy, use HTTPS at the proxy.
-- Enable `Settings > Web Login Security`.
-- Set an admin password before enabling web login.
-- Keep the LAN access token enabled unless you have a specific reason to disable it.
-- Set `Allowed domains` to the exact reverse-proxy host names you expect, such as `buildbook.example.com`.
-- Do not expose the BuildBook LAN port directly to the public internet.
+Host sync model:
+- One computer acts as the authoritative host.
+- Paired client computers receive per-device credentials.
+- Pairing codes expire and are rate-limited after repeated bad attempts.
+- Linked file paths belong to the host computer; project exports pack those files as portable local copies.
 
-## What Web Login Protects
-
-Web login protects browser/API access to the BuildBook LAN server. It does not add multi-user permissions. Anyone with the admin password can access the full app and all stored project data.
-
-Sessions use an HttpOnly cookie. When BuildBook detects an HTTPS reverse proxy using `X-Forwarded-Proto: https`, it also marks the session cookie as Secure.
-
-## Reverse Proxy Notes
-
-For Nginx Proxy Manager or a similar proxy:
-
-- Forward to the BuildBook LAN address using HTTP.
-- Serve the public side with HTTPS.
-- Preserve the original Host header.
-- Send `X-Forwarded-Proto: https`.
-
-The optional allowed-domain list rejects unexpected Host headers while still allowing localhost and private LAN addresses.
-
-## Reporting Security Issues
-
-If this repository has GitHub Security Advisories enabled, report private vulnerabilities there. Otherwise, open a GitHub issue with minimal reproduction details and avoid posting private project data, passwords, tokens, or exported backups.
+Known limits:
+- BuildBook is not a multi-user internet service.
+- Reverse proxy authentication or VPN access is still recommended for any access outside the LAN.
+- If you suspect a security issue, report it through the GitHub repository issue tracker or security advisory feature if enabled.
