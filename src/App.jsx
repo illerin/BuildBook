@@ -70,6 +70,12 @@ const TABS = [
   ['settings', 'Settings'],
 ];
 
+const SETTINGS_SECTIONS = [
+  ['workspace', 'Workspace Setup'],
+  ['maintenance', 'Maintenance'],
+  ['network', 'Network & Sync'],
+];
+
 const DEFAULT_PROJECT_EXPORT_OPTIONS = {
   overviewNotes: true,
   overviewChecklist: true,
@@ -2458,6 +2464,7 @@ function findMatchingPart(parts, importedPart) {
 
 export default function App() {
   const [tab, setTab] = useState('projects');
+  const [settingsSection, setSettingsSection] = useState('workspace');
   const [state, setState] = useState(null);
   const [loadError, setLoadError] = useState('');
   const [accessCode, setAccessCode] = useState('');
@@ -3023,6 +3030,15 @@ export default function App() {
 
   const showConnectionBanner = isRemoteBuildBookClient()
     || (window.__TAURI_INTERNALS__ && connectionState !== 'local');
+  const connectionLabel = connectionState === 'login-required' ? 'Login required'
+    : connectionState === 'disconnected' ? 'Disconnected'
+      : connectionState === 'connected' ? 'Connected'
+        : connectionState === 'offline' ? 'Offline'
+          : connectionState === 'conflict' ? 'Conflict'
+            : connectionState === 'host' ? 'Host'
+              : connectionState === 'local' ? ''
+                : 'Checking';
+  const saveLabel = saveState.startsWith('error') ? saveState : saveState.charAt(0).toUpperCase() + saveState.slice(1);
 
   return (
     <ConfirmProvider>
@@ -3037,9 +3053,21 @@ export default function App() {
             {label}
           </button>
         ))}
-        <div className="sidebar-status">
-          <div className={`connection-state connection-${connectionState}`}>{connectionState === 'login-required' ? 'Login required' : connectionState === 'disconnected' ? 'Disconnected' : connectionState === 'connected' ? 'Connected' : connectionState === 'offline' ? 'Offline' : connectionState === 'conflict' ? 'Conflict' : connectionState === 'host' ? 'Host' : connectionState === 'local' ? 'Local' : 'Checking...'}</div>
-          <div className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>{saveState}</div>
+        {tab === 'settings' && SETTINGS_SECTIONS.map(([key, label]) => (
+          <button
+            key={key}
+            className={`settings-sub-nav ${settingsSection === key ? 'active' : ''}`}
+            onClick={() => setSettingsSection(key)}
+          >
+            {label}
+          </button>
+        ))}
+        <div className={`sidebar-status ${connectionState === 'local' ? 'local-status' : ''}`}>
+          {connectionState !== 'local' && <span className={`connection-state connection-${connectionState}`}>{connectionLabel}</span>}
+          <span className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>
+            {connectionState !== 'local' && ' - '}
+            {saveLabel}
+          </span>
         </div>
       </aside>
       <main className="workspace">
@@ -3103,7 +3131,7 @@ export default function App() {
         {tab === 'parts' && <Parts state={state} updateState={updateState} />}
         {tab === 'search' && <Search state={state} setTab={setTab} />}
         {tab === 'imports' && <Imports state={state} updateState={updateState} />}
-        {tab === 'settings' && <Settings state={state} updateState={updateState} />}
+        {tab === 'settings' && <Settings state={state} updateState={updateState} activeSection={settingsSection} />}
       </main>
     </div>
     </ConfirmProvider>
@@ -9056,7 +9084,7 @@ function Imports({ state, updateState }) {
   );
 }
 
-function Settings({ state, updateState }) {
+function Settings({ state, updateState, activeSection = 'workspace' }) {
   const confirm = useAppConfirm();
   const remoteClient = isRemoteBuildBookClient();
   const hostSyncClient = isHostSyncClient();
@@ -9214,7 +9242,13 @@ function Settings({ state, updateState }) {
     setSyncError('');
     setSyncNotice('');
     try {
-      const hosts = await discoverBuildBookHosts(state.lanServer?.port || 8787);
+      const primaryPort = state.lanServer?.port || 8787;
+      const ports = [...new Set([primaryPort, 8787])];
+      const hostGroups = await Promise.all(ports.map((port) => discoverBuildBookHosts(port).catch(() => [])));
+      const hosts = hostGroups
+        .flat()
+        .filter((host) => host.deviceId !== syncConfig?.deviceId)
+        .filter((host, index, list) => list.findIndex((item) => item.deviceId === host.deviceId) === index);
       setSyncHosts(hosts);
       setSyncNotice(hosts.length ? `Found ${hosts.length} BuildBook host${hosts.length === 1 ? '' : 's'}.` : 'No BuildBook hosts were found on this network.');
     } catch (error) {
@@ -9748,6 +9782,8 @@ function Settings({ state, updateState }) {
   return (
     <div className="settings-page">
       <Header title="Settings" subtitle="Manage workspace defaults, appearance, and system preferences." />
+      {activeSection === 'workspace' && (
+        <>
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
@@ -9782,6 +9818,10 @@ function Settings({ state, updateState }) {
           </div>
         </div>
       </section>
+        </>
+      )}
+      {activeSection === 'maintenance' && (
+        <>
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
@@ -9879,6 +9919,10 @@ function Settings({ state, updateState }) {
         {storageError && <p className="error-text">{storageError}</p>}
         {hostSyncClient && <p className="settings-note">Storage cleanup must be run on the host computer.</p>}
       </section>
+        </>
+      )}
+      {activeSection === 'network' && (
+        <>
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
@@ -10160,6 +10204,10 @@ function Settings({ state, updateState }) {
         {webAuthNotice && <p className="success-text">{webAuthNotice}</p>}
         {webAuthError && <p className="error-text">{webAuthError}</p>}
       </section>
+        </>
+      )}
+      {activeSection === 'maintenance' && (
+        <>
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">
@@ -10192,6 +10240,8 @@ function Settings({ state, updateState }) {
         </div>
         {hostSyncClient && <p className="settings-note">A full reset must be started on the host computer.</p>}
       </section>
+        </>
+      )}
       {showTemplatePreview && (
         <TemplatePreviewModal
           template={state.template}

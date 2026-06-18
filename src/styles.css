@@ -311,16 +311,31 @@ label {
   font-size: 13px;
 }
 
+.sidebar > button.settings-sub-nav {
+  padding-left: 34px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.sidebar > button.settings-sub-nav.active {
+  color: var(--accent);
+  background: var(--sidebar-active);
+}
+
 .save-state {
   margin-top: auto;
   padding: 16px 18px 0;
 }
 
 .sidebar-status {
-  display: grid;
-  gap: 6px;
+  display: flex;
+  gap: 0;
+  align-items: center;
   margin-top: auto;
   padding: 16px 18px 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .connection-state,
@@ -331,6 +346,20 @@ label {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.01em;
+}
+
+.sidebar-status .connection-state,
+.sidebar-status .save-state {
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+}
+
+.sidebar-status.local-status {
+  justify-content: flex-start;
 }
 
 .connection-banner {
@@ -4309,6 +4338,12 @@ article h3,
   .sidebar > button,
   .sidebar > button.sub-nav {
     width: auto;
+  }
+
+  .sidebar > button.settings-sub-nav {
+    min-width: max-content;
+    padding-left: 14px;
+    font-size: 12px;
   }
 
   .save-state {

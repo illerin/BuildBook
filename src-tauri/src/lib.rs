@@ -2364,7 +2364,10 @@ fn scan_local_subnet_for_hosts(port: u16) -> Vec<BuildBookHostInfo> {
 }
 
 #[tauri::command]
-fn discover_buildbook_hosts(port: u16) -> Result<Vec<BuildBookHostInfo>, String> {
+fn discover_buildbook_hosts(app: tauri::AppHandle, port: u16) -> Result<Vec<BuildBookHostInfo>, String> {
+    let local_device_id = load_sync_config(&app)
+        .map(|config| config.device_id)
+        .unwrap_or_default();
     let socket = UdpSocket::bind(("0.0.0.0", 0))
         .map_err(|error| format!("Could not start host discovery: {error}"))?;
     socket
@@ -2388,6 +2391,7 @@ fn discover_buildbook_hosts(port: u16) -> Result<Vec<BuildBookHostInfo>, String>
             Ok((count, _)) => {
                 if let Ok(info) = serde_json::from_slice::<BuildBookHostInfo>(&buffer[..count]) {
                     if info.product == "BuildBook"
+                        && info.device_id != local_device_id
                         && !results
                             .iter()
                             .any(|item: &BuildBookHostInfo| item.device_id == info.device_id)
@@ -2408,7 +2412,9 @@ fn discover_buildbook_hosts(port: u16) -> Result<Vec<BuildBookHostInfo>, String>
         }
     }
     for info in scan_local_subnet_for_hosts(port) {
-        if !results.iter().any(|item| item.device_id == info.device_id) {
+        if info.device_id != local_device_id
+            && !results.iter().any(|item| item.device_id == info.device_id)
+        {
             results.push(info);
         }
     }
