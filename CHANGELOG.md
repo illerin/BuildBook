@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.4 - 2026-06-17
+
+Changes since test-v0.4.0-test.3.
+
+### Changes
+
+- Add sync pairing, conflict resolution, and docs
+
 ## 0.4.0-test.3 - 2026-06-12
 
 Changes since test-v0.4.0-test.2.

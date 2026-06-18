@@ -1,8 +1,8 @@
-# BuildBook 0.4.0-test.3 Test Release
+# BuildBook 0.4.0-test.4 Test Release
 
-Changes since test-v0.4.0-test.2.
+Changes since test-v0.4.0-test.3.
 
 ## Changes
 
-- Creating Sync layer between two instances
+- Add sync pairing, conflict resolution, and docs
 
