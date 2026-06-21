@@ -1418,6 +1418,11 @@ article h3,
   min-width: 38px;
 }
 
+.rich-area a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .rich-color-control {
   display: inline-flex;
   flex-direction: row;
@@ -4068,6 +4073,11 @@ article h3,
 .file-group-title-row .linked-status {
   color: var(--accent);
   font-weight: 800;
+}
+
+.linked-owner-label {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .file-group-header h3,

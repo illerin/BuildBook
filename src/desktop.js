@@ -38,6 +38,10 @@ function cachedSyncConfig() {
   }
 }
 
+export function currentSyncConfig() {
+  return cachedSyncConfig();
+}
+
 export function isHostSyncClient() {
   return isTauri() && cachedSyncConfig().mode === 'client';
 }

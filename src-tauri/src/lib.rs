@@ -1313,26 +1313,11 @@ fn summarize_array_conflicts(
     }
 }
 
-#[tauri::command]
-fn sync_conflict_summary(app: tauri::AppHandle) -> Result<SyncConflictSummary, String> {
-    let conflict_path = sync_conflict_path(&app)?;
-    if !conflict_path.is_file() {
-        return Ok(SyncConflictSummary {
-            has_conflict: false,
-            items: Vec::new(),
-        });
-    }
-    let local = serde_json::from_str::<serde_json::Value>(&read_local_state_or_default(&app)?)
-        .map_err(|error| format!("Local state is not valid JSON: {error}"))?;
-    let host = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(&conflict_path)
-            .map_err(|error| format!("Could not read host conflict state: {error}"))?,
-    )
-    .map_err(|error| format!("Host conflict state is not valid JSON: {error}"))?;
-    let base = serde_json::from_str::<serde_json::Value>(
-        &std::fs::read_to_string(sync_base_path(&app)?).unwrap_or_else(|_| "{}".to_string()),
-    )
-    .unwrap_or_else(|_| serde_json::json!({}));
+fn sync_conflict_items_for_values(
+    base: &serde_json::Value,
+    local: &serde_json::Value,
+    host: &serde_json::Value,
+) -> Vec<SyncConflictItem> {
     let mut items = Vec::new();
     summarize_array_conflicts(
         &mut items,
@@ -1368,6 +1353,30 @@ fn sync_conflict_summary(app: tauri::AppHandle) -> Result<SyncConflictSummary, S
             });
         }
     }
+    items
+}
+
+#[tauri::command]
+fn sync_conflict_summary(app: tauri::AppHandle) -> Result<SyncConflictSummary, String> {
+    let conflict_path = sync_conflict_path(&app)?;
+    if !conflict_path.is_file() {
+        return Ok(SyncConflictSummary {
+            has_conflict: false,
+            items: Vec::new(),
+        });
+    }
+    let local = serde_json::from_str::<serde_json::Value>(&read_local_state_or_default(&app)?)
+        .map_err(|error| format!("Local state is not valid JSON: {error}"))?;
+    let host = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(&conflict_path)
+            .map_err(|error| format!("Could not read host conflict state: {error}"))?,
+    )
+    .map_err(|error| format!("Host conflict state is not valid JSON: {error}"))?;
+    let base = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(sync_base_path(&app)?).unwrap_or_else(|_| "{}".to_string()),
+    )
+    .unwrap_or_else(|_| serde_json::json!({}));
+    let items = sync_conflict_items_for_values(&base, &local, &host);
     Ok(SyncConflictSummary {
         has_conflict: true,
         items,
@@ -1432,6 +1441,62 @@ fn apply_conflict_value(target: &mut serde_json::Value, path: &str, value: serde
             object.remove(path);
         } else {
             object.insert(path.to_string(), value);
+        }
+    }
+}
+
+fn save_non_conflicting_sync_changes(
+    app: &tauri::AppHandle,
+    config: &mut SyncConfig,
+    local_contents: &str,
+) -> Result<ClientSyncResult, String> {
+    let conflict_path = sync_conflict_path(app)?;
+    if !conflict_path.is_file() {
+        return Err("No synchronization conflict is waiting for resolution.".to_string());
+    }
+    let host_contents = std::fs::read_to_string(&conflict_path)
+        .map_err(|error| format!("Could not read host conflict state: {error}"))?;
+    let base_contents = std::fs::read_to_string(sync_base_path(app)?)
+        .map_err(|error| format!("Could not read the common sync version: {error}"))?;
+    let base = serde_json::from_str::<serde_json::Value>(&base_contents)
+        .map_err(|error| format!("Common sync version is invalid: {error}"))?;
+    let local = serde_json::from_str::<serde_json::Value>(local_contents)
+        .map_err(|error| format!("Local sync version is invalid: {error}"))?;
+    let host = serde_json::from_str::<serde_json::Value>(&host_contents)
+        .map_err(|error| format!("Host conflict state is invalid: {error}"))?;
+    let conflicts = sync_conflict_items_for_values(&base, &local, &host);
+    let mut host_safe = merge_sync_values(&base, &local, &host, "", &config.device_name);
+    for item in &conflicts {
+        apply_conflict_value(&mut host_safe, &item.path, value_at_conflict_path(&host, &item.path));
+    }
+    let host_safe_contents = serde_json::to_string_pretty(&host_safe)
+        .map_err(|error| format!("Could not encode non-conflicting sync changes: {error}"))?;
+    config.host_revision = state_revision(&host_contents)?;
+    match host_sync_write(config, &host_safe_contents, true)? {
+        HostSyncWrite::Saved(envelope) => {
+            config.host_revision = envelope.revision.clone();
+            config.pending_sync = true;
+            config.last_connected_at = now_seconds();
+            config.last_sync_error = "Resolve the remaining synchronization conflict.".to_string();
+            save_sync_config(app, config)?;
+            write_sync_snapshot(sync_conflict_path(app)?, &host_safe_contents)?;
+            Ok(ClientSyncResult {
+                contents: local_contents.to_string(),
+                status: "conflict".to_string(),
+                revision: envelope.revision,
+                pending: true,
+                message: "Non-conflicting changes were saved to the host. Resolve the remaining conflict to continue full synchronization.".to_string(),
+            })
+        }
+        HostSyncWrite::Conflict(envelope) => {
+            mark_sync_conflict(app, config, &envelope)?;
+            Ok(ClientSyncResult {
+                contents: local_contents.to_string(),
+                status: "conflict".to_string(),
+                revision: envelope.revision,
+                pending: true,
+                message: "The host changed again. Resolve the conflict before full synchronization can continue.".to_string(),
+            })
         }
     }
 }
@@ -1507,6 +1572,15 @@ fn sync_client_load(app: tauri::AppHandle) -> Result<ClientSyncResult, String> {
     }
 
     if config.pending_sync {
+        if sync_conflict_path(&app)?.is_file() {
+            return Ok(ClientSyncResult {
+                contents: local,
+                status: "conflict".to_string(),
+                revision: config.host_revision,
+                pending: true,
+                message: "Resolve the synchronization conflict before full synchronization can continue.".to_string(),
+            });
+        }
         match host_sync_write(&config, &local, false) {
             Ok(HostSyncWrite::Saved(envelope)) => {
                 mark_sync_success(&app, &mut config, envelope.revision.clone(), &local)?;
@@ -1623,6 +1697,9 @@ fn sync_client_save(app: tauri::AppHandle, contents: String) -> Result<ClientSyn
     }
     config.pending_sync = true;
     save_sync_config(&app, &config)?;
+    if sync_conflict_path(&app)?.is_file() {
+        return save_non_conflicting_sync_changes(&app, &mut config, &contents);
+    }
     match host_sync_write(&config, &contents, false) {
         Ok(HostSyncWrite::Saved(envelope)) => {
             mark_sync_success(&app, &mut config, envelope.revision.clone(), &contents)?;

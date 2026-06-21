@@ -295,6 +295,8 @@ export function normalizeState(raw, options = {}) {
         baselinePath: file.baselinePath || '',
         baselineHash: file.baselineHash || '',
         baselineSize: Number(file.baselineSize) || 0,
+        linkedOwnerDeviceId: file.linkedOwnerDeviceId || '',
+        linkedOwnerDeviceName: file.linkedOwnerDeviceName || '',
         nextRevisionCheckAt: file.nextRevisionCheckAt || '',
         folderFiles: Array.isArray(file.folderFiles) ? file.folderFiles.map((child) => ({
           ...child,

@@ -19,6 +19,7 @@ import {
   assetUrl,
   clearSyncCheckout,
   cleanupOrphanedFiles,
+  currentSyncConfig,
   deleteManagedFiles,
   discoverBuildBookHosts,
   downloadBytes,
@@ -47,6 +48,7 @@ import {
   readStoredFile,
   revokePairedDevice,
   resetManagedStorage,
+  resolveSyncConflict,
   resolveSyncConflictSelections,
   restoreStateBackup,
   scanStorage,
@@ -1768,10 +1770,10 @@ async function buildWebProjectPackage(state, project, exportOptions = {}) {
     };
     if (file.type === 'folder') {
       for (const child of file.folderFiles || []) {
-        await addManifestFile(child.path, child.relativePath || child.name, file.notes, child.createdAt || file.createdAt, file.trackerId);
+        await addManifestFile(file.storageMode === 'link' ? child.baselinePath || child.path : child.path, child.relativePath || child.name, file.notes, child.createdAt || file.createdAt, file.trackerId);
       }
     } else {
-      await addManifestFile(file.path, file.name, file.notes, file.createdAt, file.trackerId);
+      await addManifestFile(file.storageMode === 'link' ? file.baselinePath || file.path : file.path, file.name, file.notes, file.createdAt, file.trackerId);
     }
   }
 
@@ -2081,13 +2083,14 @@ async function buildProjectPackage(state, project) {
     if (file.type === 'folder') {
       const folderFiles = [];
       for (const child of file.folderFiles || []) {
-        const packagePath = await addFileEntry(entries, child.path, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}/${safeName(child.relativePath || child.name)}`);
+        const sourcePath = file.storageMode === 'link' ? child.baselinePath || child.path : child.path;
+        const packagePath = await addFileEntry(entries, sourcePath, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}/${safeName(child.relativePath || child.name)}`);
         folderFiles.push({ ...child, path: '', sourcePath: '', packagePath });
       }
       exportedProject.files.push({ ...file, path: '', sourcePath: '', folderFiles });
       continue;
     }
-    const packagePath = await addFileEntry(entries, file.path, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}`);
+    const packagePath = await addFileEntry(entries, file.storageMode === 'link' ? file.baselinePath || file.path : file.path, `${fileRoot}/${safeName(fileTrackerLabel(state.template.fileTrackers, file.trackerId))}/${safeName(file.name)}`);
     exportedProject.files.push({ ...file, path: '', sourcePath: '', packagePath });
   }
 
@@ -2608,10 +2611,16 @@ export default function App() {
     let active = true;
     readSyncConflictSummary()
       .then((summary) => {
-        if (active) setSyncConflictSummary(summary);
+        if (active) {
+          setSyncConflictSummary(summary);
+          setShowConflictReview(true);
+        }
       })
       .catch(() => {
-        if (active) setSyncConflictSummary(null);
+        if (active) {
+          setSyncConflictSummary({ hasConflict: true, items: [] });
+          setShowConflictReview(true);
+        }
       });
     return () => {
       active = false;
@@ -2656,6 +2665,14 @@ export default function App() {
           .then(() => saveAppState(next))
           .then(() => {
             if (saveSequenceRef.current === saveSequence) {
+              applyDesktopSyncStatus();
+              if (getLastSyncStatus()?.status === 'conflict') {
+                const message = 'error: Sync conflict. Resolve before host sync can continue.';
+                saveStateRef.current = message;
+                setSaveState(message);
+                setShowConflictReview(true);
+                return;
+              }
               lastPersistedStateRef.current = persistedStateText(next);
               saveStateRef.current = 'saved';
               setSaveState('saved');
@@ -2671,6 +2688,10 @@ export default function App() {
               const message = `error: ${String(error?.message || error).slice(0, 160)}`;
               saveStateRef.current = message;
               setSaveState(message);
+              applyDesktopSyncStatus();
+              if (window.__TAURI_INTERNALS__ && getLastSyncStatus()?.status === 'conflict') {
+                setShowConflictReview(true);
+              }
               if (isRemoteBuildBookClient()) {
                 setRemoteUnsaved(true);
                 setConnectionState('disconnected');
@@ -2954,6 +2975,22 @@ export default function App() {
     selectionGuardRef.current = { source: null, x: 0, y: 0, block: false, timer: 0 };
   };
 
+  const resolveDesktopConflict = async (choice) => {
+    try {
+      const result = await resolveSyncConflict(choice);
+      const loaded = normalizeState(JSON.parse(result.contents));
+      lastPersistedStateRef.current = persistedStateText(loaded);
+      setState(loaded);
+      setSaveState('saved');
+      applyDesktopSyncStatus(result);
+      setSyncConflictSummary(null);
+      setShowConflictReview(false);
+    } catch (error) {
+      setConnectionState('conflict');
+      setSaveState(`error: ${String(error?.message || error).slice(0, 160)}`);
+    }
+  };
+
   const resolveDesktopConflictSelections = async (selections) => {
     try {
       const result = await resolveSyncConflictSelections(selections);
@@ -3015,6 +3052,7 @@ export default function App() {
           <SyncConflictReviewModal
             summary={syncConflictSummary}
             onCancel={() => setShowConflictReview(false)}
+            onResolveAll={resolveDesktopConflict}
             onResolve={resolveDesktopConflictSelections}
           />
         )}
@@ -3041,7 +3079,7 @@ export default function App() {
   );
 }
 
-function SyncConflictReviewModal({ summary, onCancel, onResolve }) {
+function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve }) {
   const items = summary?.items || [];
   const [choices, setChoices] = useState(() => Object.fromEntries(items.map((item) => [item.path, 'combine'])));
   const [busy, setBusy] = useState(false);
@@ -3060,39 +3098,49 @@ function SyncConflictReviewModal({ summary, onCancel, onResolve }) {
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={onCancel}>
+    <div className="modal-backdrop" onMouseDown={(event) => event.stopPropagation()}>
       <div className="modal sync-conflict-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <h2>Review Sync Conflict</h2>
         </div>
-        <p className="settings-note">Choose which side to keep for each changed area. Combine uses the automatic merge and combines conflicting project notes where possible.</p>
-        <div className="sync-conflict-review-list">
-          {items.map((item) => (
-            <section className="sync-conflict-review-item" key={item.path}>
-              <div className="sync-conflict-review-head">
-                <strong>{item.label}</strong>
-                <select value={choices[item.path] || 'combine'} onChange={(event) => setChoice(item.path, event.target.value)}>
-                  <option value="combine">Combine</option>
-                  <option value="host">Use Host</option>
-                  <option value="local">Use This Computer</option>
-                </select>
-              </div>
-              <div className="sync-conflict-preview-grid">
-                <div>
-                  <span>Host</span>
-                  <p>{item.hostPreview || 'No preview available.'}</p>
+        <p className="settings-note">Host and this computer both changed before synchronization finished. Resolve this before additional changes can sync to the host.</p>
+        {items.length ? (
+          <div className="sync-conflict-review-list">
+            {items.map((item) => (
+              <section className="sync-conflict-review-item" key={item.path}>
+                <div className="sync-conflict-review-head">
+                  <strong>{item.label}</strong>
+                  <select value={choices[item.path] || 'combine'} onChange={(event) => setChoice(item.path, event.target.value)}>
+                    <option value="combine">Combine</option>
+                    <option value="host">Use Host</option>
+                    <option value="local">Use This Computer</option>
+                  </select>
                 </div>
-                <div>
-                  <span>This computer</span>
-                  <p>{item.localPreview || 'No preview available.'}</p>
+                <div className="sync-conflict-preview-grid">
+                  <div>
+                    <span>Host</span>
+                    <p>{item.hostPreview || 'No preview available.'}</p>
+                  </div>
+                  <div>
+                    <span>This computer</span>
+                    <p>{item.localPreview || 'No preview available.'}</p>
+                  </div>
                 </div>
-              </div>
-            </section>
-          ))}
-        </div>
+              </section>
+            ))}
+          </div>
+        ) : (
+          <div className="sync-conflict-review-item">
+            <strong>Conflict details unavailable</strong>
+            <p className="settings-note">BuildBook could not break this conflict into individual fields. Choose one full version, or try an automatic combine.</p>
+          </div>
+        )}
         <div className="modal-actions">
-          <button className="secondary" onClick={onCancel} disabled={busy}>Cancel</button>
-          <button onClick={submit} disabled={busy || !items.length}>{busy ? 'Resolving...' : 'Resolve Selected'}</button>
+          <button className="secondary" onClick={() => onResolveAll('host')} disabled={busy}>Use Host</button>
+          <button className="secondary" onClick={() => onResolveAll('combine')} disabled={busy}>Combine</button>
+          <button className="secondary" onClick={() => onResolveAll('local')} disabled={busy}>Use This Computer</button>
+          {items.length ? <button onClick={submit} disabled={busy}>{busy ? 'Resolving...' : 'Resolve Selected'}</button> : null}
+          <button className="ghost" onClick={onCancel} disabled={busy}>Later</button>
         </div>
       </div>
     </div>
@@ -3623,6 +3671,44 @@ function normalizeRichText(value) {
     .join('');
 }
 
+function sanitizePastedRichText(html, plainText = '') {
+  if (!html) {
+    return escapeHtml(plainText || '')
+      .split(/\n{2,}/)
+      .map((block) => `<p>${block.replace(/\n/g, '<br>')}</p>`)
+      .join('');
+  }
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc.body.querySelectorAll('*').forEach((node) => {
+    [...node.attributes].forEach((attribute) => {
+      const name = attribute.name.toLowerCase();
+      if (name === 'style') {
+        const kept = attribute.value
+          .split(';')
+          .map((rule) => rule.trim())
+          .filter((rule) => rule && !/^(color|background|background-color)\s*:/i.test(rule))
+          .join('; ');
+        if (kept) node.setAttribute('style', kept);
+        else node.removeAttribute('style');
+      } else if (name.startsWith('on') || name === 'class') {
+        node.removeAttribute(attribute.name);
+      } else if (node.tagName !== 'A' && name === 'href') {
+        node.removeAttribute(attribute.name);
+      }
+    });
+    if (node.tagName === 'A') {
+      const href = node.getAttribute('href') || '';
+      if (!/^(https?:|mailto:)/i.test(href)) {
+        node.removeAttribute('href');
+      } else {
+        node.setAttribute('target', '_blank');
+        node.setAttribute('rel', 'noopener noreferrer');
+      }
+    }
+  });
+  return doc.body.innerHTML;
+}
+
 function NoteImageMarkupModal({ source, onCancel, onSave }) {
   const canvasRef = useRef(null);
   const drawingRef = useRef(false);
@@ -3822,6 +3908,35 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
     emitChange();
   };
 
+  const createLink = () => {
+    editorRef.current?.focus();
+    restoreSelection();
+    const rawUrl = window.prompt('Web link URL');
+    if (!rawUrl) return;
+    const url = /^(https?:|mailto:)/i.test(rawUrl.trim()) ? rawUrl.trim() : `https://${rawUrl.trim()}`;
+    document.execCommand('createLink', false, url);
+    const selection = window.getSelection();
+    const anchor = selection?.anchorNode?.parentElement?.closest?.('a')
+      || [...(editorRef.current?.querySelectorAll('a') || [])].find((item) => item.href === url || item.getAttribute('href') === url);
+    if (anchor) {
+      anchor.target = '_blank';
+      anchor.rel = 'noopener noreferrer';
+    }
+    rememberSelection();
+    emitChange();
+  };
+
+  const insertSanitizedPaste = (html, plainText) => {
+    const sanitized = sanitizePastedRichText(html, plainText);
+    if (!sanitized) return false;
+    editorRef.current?.focus();
+    restoreSelection();
+    document.execCommand('insertHTML', false, sanitized);
+    rememberSelection();
+    emitChange();
+    return true;
+  };
+
   const insertImage = async (source) => {
     if (!source) return;
     const stored = await onUploadImage(source);
@@ -3853,6 +3968,7 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('insertUnorderedList')}>List</button>
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<h2>')}>H2</button>
         <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={() => exec('formatBlock', '<p>')}>Text</button>
+        <button type="button" className="ghost" onMouseDown={(event) => event.preventDefault()} onClick={createLink}>Link</button>
         <label className="rich-color-control" onMouseDown={rememberSelection}>
           Text color
           <input
@@ -3910,13 +4026,26 @@ function RichTextEditor({ value, onChange, onUploadImage, placeholder = 'Write n
         onPaste={async (event) => {
           const files = [...(event.clipboardData?.files || [])];
           const file = files.find(fileLooksImage);
-          const htmlImage = event.clipboardData?.getData('text/html')?.match(/src=["'](data:image\/[^"']+)["']/i)?.[1];
-          if (!file && !htmlImage) return;
+          const html = event.clipboardData?.getData('text/html') || '';
+          const htmlImage = html.match(/src=["'](data:image\/[^"']+)["']/i)?.[1];
+          const plainText = event.clipboardData?.getData('text/plain') || '';
+          if (!file && !htmlImage && !html && !plainText) return;
           event.preventDefault();
-          await insertImage(file || htmlImage);
+          if (file || htmlImage) {
+            await insertImage(file || htmlImage);
+            return;
+          }
+          insertSanitizedPaste(html, plainText);
         }}
         onClick={(event) => {
-          if (event.target?.tagName === 'IMG') selectImage(event.target);
+          if (event.target?.tagName === 'IMG') {
+            selectImage(event.target);
+            return;
+          }
+          if (event.target?.closest?.('a')) {
+            event.preventDefault();
+            openExternalUrl(event.target.closest('a').href);
+          }
         }}
         onBlur={() => {
           rememberSelection();
@@ -4772,6 +4901,31 @@ function fileHistoryPaths(file) {
   return paths.filter(Boolean);
 }
 
+function linkOwnerInfo() {
+  const config = currentSyncConfig();
+  return {
+    deviceId: config.deviceId || 'local',
+    deviceName: config.deviceName || (config.mode === 'host' ? 'Host computer' : 'This computer'),
+  };
+}
+
+function linkedOwnerIsThisComputer(file) {
+  if (file?.storageMode !== 'link') return true;
+  if (!file.linkedOwnerDeviceId) return !isHostSyncClient();
+  return file.linkedOwnerDeviceId === linkOwnerInfo().deviceId;
+}
+
+function linkedOwnerLabel(file) {
+  if (file?.storageMode !== 'link') return '';
+  return `Linked on ${file.linkedOwnerDeviceName || 'another computer'}`;
+}
+
+function fileDownloadPath(file) {
+  if (!file) return '';
+  if (file.storageMode === 'link' && !linkedOwnerIsThisComputer(file)) return file.baselinePath || file.path || '';
+  return file.path || file.baselinePath || '';
+}
+
 function pruneTrackedFiles(files, settings) {
   const normalized = normalizeRevisionSettings(settings);
   if (normalized.saveAllRevisions) return { files, deletedPaths: [] };
@@ -4825,7 +4979,7 @@ async function cloneLinkedFolderSnapshot(projectId, trackerId, trackedItemId, fo
   const snapshotFiles = await Promise.all((files || []).map(async (child) => {
     const relativePath = child.relativePath || child.name || 'file';
     const library = `project-files/${projectId}/${trackerId}/linked-baseline/${trackedItemId}/${folderName}/${relativePath.split('/').slice(0, -1).join('/')}`;
-    const bytes = await readStoredFile(child.path);
+    const bytes = await readStoredFile(child.path, child.clientLocal === true);
     const stored = await saveBytesFile(relativePath.split('/').pop() || child.name || 'file', library, bytes);
     const hash = await fileHash(stored.path).catch(() => '');
     return {
@@ -4878,16 +5032,16 @@ async function fileHash(path, clientLocal = false) {
 }
 
 async function downloadStoredProjectFile(file) {
-  if (!file?.path && file?.type !== 'folder') return;
+  if (!file || (!fileDownloadPath(file) && file.type !== 'folder')) return;
   if (file.type === 'folder') {
     const entries = await Promise.all((file.folderFiles || []).map(async (child) => ({
       name: child.relativePath || child.name,
-      data: await readStoredFile(child.path),
+      data: await readStoredFile(file.storageMode === 'link' && !linkedOwnerIsThisComputer(file) ? child.baselinePath || child.path : child.path),
     })));
     downloadBytes(`${safeName(file.name)}.zip`, createZip(entries), 'application/zip');
     return;
   }
-  const bytes = await readStoredFile(file.path);
+  const bytes = await readStoredFile(fileDownloadPath(file), file.storageMode === 'link' && linkedOwnerIsThisComputer(file));
   downloadBytes(file.name, bytes, 'application/octet-stream');
 }
 
@@ -6470,18 +6624,19 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
     setFileBusy(true);
     setFileError('');
     try {
+      const owner = linkOwnerInfo();
       const stored = pickedFile
         ? await savePickedFile(pickedFile, `project-files/${project.id}/${tracker.id}`)
         : linkedLocalFile(trimmedPath);
-      const contentHash = stored.path ? await fileHash(stored.path).catch(() => '') : '';
+      const contentHash = stored.path ? await fileHash(stored.path, !pickedFile && isHostSyncClient()).catch(() => '') : '';
       let baselinePath = '';
       let baselineHash = '';
       let baselineSize = 0;
-      if (!pickedFile && effectiveRevisionSettings.trackLinkedFiles && trimmedPath) {
+      if (!pickedFile && trimmedPath) {
         const baseline = await saveBytesFile(
           stored.name,
           `project-files/${project.id}/${tracker.id}/linked-baseline`,
-          await readStoredFile(trimmedPath),
+          await readStoredFile(trimmedPath, isHostSyncClient()),
         );
         baselinePath = baseline.path;
         baselineHash = await fileHash(baseline.path).catch(() => '');
@@ -6501,6 +6656,8 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           path: stored.path,
           sourcePath: pickedFile ? '' : trimmedPath,
           storageMode: pickedFile ? 'copy' : 'link',
+          linkedOwnerDeviceId: pickedFile ? '' : owner.deviceId,
+          linkedOwnerDeviceName: pickedFile ? '' : owner.deviceName,
           size: stored.size,
           contentHash,
           baselinePath,
@@ -6621,6 +6778,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
     setFileBusy(true);
     setFileError('');
     try {
+      const owner = linkOwnerInfo();
       const allFiles = await listLinkedFolderFiles(folderPath);
       const hasExtensionFilter = Boolean((tracker.extensions || '').split(',').map((item) => item.trim()).filter(Boolean).length);
       const files = hasExtensionFilter ? allFiles.filter((file) => extensionAllowed(file.name, tracker.extensions)) : allFiles;
@@ -6636,12 +6794,11 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         name: file.relativePath || file.name,
         relativePath: file.relativePath || file.name,
         path: file.path,
+        clientLocal: isHostSyncClient(),
         size: file.size || 0,
-        contentHash: file.path ? await fileHash(file.path).catch(() => '') : '',
+        contentHash: file.path ? await fileHash(file.path, isHostSyncClient()).catch(() => '') : '',
       })));
-      if (effectiveRevisionSettings.trackLinkedFiles) {
-        folderFiles = await cloneLinkedFolderSnapshot(project.id, tracker.id, trackedItemId, folderName, folderFiles);
-      }
+      folderFiles = await cloneLinkedFolderSnapshot(project.id, tracker.id, trackedItemId, folderName, folderFiles);
       await applyFileUpdate([
         ...(replaceTargetFile
           ? project.files.map((file) => trackedItemKey(file) === trackedItemKey(replaceTargetFile) ? { ...file, latest: false } : file)
@@ -6655,6 +6812,8 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           path: '',
           sourcePath: folderPath,
           storageMode: 'link',
+          linkedOwnerDeviceId: owner.deviceId,
+          linkedOwnerDeviceName: owner.deviceName,
           size: folderFiles.reduce((total, file) => total + (file.size || 0), 0),
           contentHash: '',
           latest: true,
@@ -6716,7 +6875,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
     onUpdate({ files: remaining });
   };
   const updateFile = (fileId, patch) => onUpdate({ files: project.files.map((file) => file.id === fileId ? { ...file, ...patch } : file) });
-  const integrityCheckable = (file) => Boolean(file.path || file.type === 'folder');
+  const integrityCheckable = (file) => Boolean(file.path || file.type === 'folder') && (file.storageMode !== 'link' || linkedOwnerIsThisComputer(file));
   const autoIntegrityCheckable = (file) => file.latest && integrityCheckable(file);
   const visibleIntegrityStatus = (file) => (file.latest && ['changed', 'missing'].includes(file.integrityStatus) ? file.integrityStatus : '');
   const comparisonHash = (item) => item.baselineHash || item.contentHash || '';
@@ -6726,7 +6885,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
       if (file.type === 'folder') {
         const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
           try {
-            const currentHash = await fileHash(child.path);
+            const currentHash = await fileHash(child.path, file.storageMode === 'link' && isHostSyncClient());
             return {
               ...child,
               contentHash: child.contentHash || currentHash,
@@ -6746,7 +6905,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         return;
       }
 
-      const currentHash = await fileHash(file.path);
+      const currentHash = await fileHash(file.path, file.storageMode === 'link' && isHostSyncClient());
       updateFile(file.id, {
         contentHash: file.contentHash || currentHash,
         integrityStatus: comparisonHash(file) && currentHash !== comparisonHash(file) ? 'changed' : 'ok',
@@ -6801,8 +6960,9 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         name: child.relativePath || child.name,
         relativePath: child.relativePath || child.name,
         path: child.path,
+        clientLocal: file.storageMode === 'link' && isHostSyncClient(),
         size: child.size || 0,
-        contentHash: child.path ? await fileHash(child.path).catch(() => '') : '',
+        contentHash: child.path ? await fileHash(child.path, isHostSyncClient()).catch(() => '') : '',
       })));
       const snapshotFiles = await cloneLinkedFolderSnapshot(project.id, file.trackerId, trackedItemKey(file), file.name, matchingFiles);
       return {
@@ -6833,7 +6993,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
       };
     }
 
-    const bytes = await readStoredFile(file.path);
+    const bytes = await readStoredFile(file.path, file.storageMode === 'link' && isHostSyncClient());
     const stored = await saveBytesFile(file.name, fileLibrary(file), bytes);
     const baseline = await saveBytesFile(file.name, `${fileLibrary(file)}/linked-baseline`, bytes);
     const currentHash = await fileHash(baseline.path).catch(() => file.contentHash || '');
@@ -6882,7 +7042,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
           if (file.type === 'folder') {
             const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
               try {
-                const currentHash = await fileHash(child.path);
+                const currentHash = await fileHash(child.path, file.storageMode === 'link' && isHostSyncClient());
                 return {
                   ...child,
                   contentHash: child.contentHash || currentHash,
@@ -6895,10 +7055,10 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
             }));
             const statuses = checkedChildren.map((child) => child.integrityStatus);
             const changed = statuses.includes('changed');
-            if (file.storageMode === 'link' && effectiveRevisionSettings.trackLinkedFiles && changed) {
+            if (file.storageMode === 'link' && changed) {
               const snapshot = await saveLinkedRevisionSnapshot({ ...file, folderFiles: checkedChildren });
               nextFiles = nextFiles.map((item) => item.id === file.id ? snapshot.latest : item);
-              appended.push(snapshot.revision);
+              if (effectiveRevisionSettings.trackLinkedFiles) appended.push(snapshot.revision);
               cleanupPaths.push(...snapshot.cleanupPaths);
             } else {
               nextFiles = nextFiles.map((item) => item.id === file.id ? {
@@ -6910,12 +7070,12 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
             }
             continue;
           }
-          const currentHash = await fileHash(file.path);
+          const currentHash = await fileHash(file.path, file.storageMode === 'link' && isHostSyncClient());
           const changed = Boolean(comparisonHash(file) && currentHash !== comparisonHash(file));
-          if (file.storageMode === 'link' && effectiveRevisionSettings.trackLinkedFiles && changed) {
+          if (file.storageMode === 'link' && changed) {
             const snapshot = await saveLinkedRevisionSnapshot({ ...file, contentHash: file.contentHash || currentHash });
             nextFiles = nextFiles.map((item) => item.id === file.id ? snapshot.latest : item);
-            appended.push(snapshot.revision);
+            if (effectiveRevisionSettings.trackLinkedFiles) appended.push(snapshot.revision);
             cleanupPaths.push(...snapshot.cleanupPaths);
           } else {
             nextFiles = nextFiles.map((item) => item.id === file.id ? {
@@ -6954,6 +7114,10 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   };
   const fileLibrary = (file) => `project-files/${project.id}/${file.trackerId}`;
   const beginEdit = async (file) => {
+    if (file.storageMode === 'link' && !linkedOwnerIsThisComputer(file)) {
+      await downloadProjectFile(file);
+      return;
+    }
     if (file.type === 'folder') {
       setSelectedFileId(file.id);
       return;
@@ -6972,7 +7136,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         if (checkout.offline) setFileNotice(checkout.message);
       }
       const editable = file.storageMode === 'link'
-        ? { name: file.name, path: file.path, size: file.size || 0 }
+        ? { name: file.name, path: file.path, size: file.size || 0, clientLocal: isHostSyncClient() }
         : await prepareEditableFile(file.path, file.name, `${fileLibrary(file)}/working/${file.id}`);
       const baseHash = editable.baseHash || await fileHash(editable.path, editable.clientLocal === true);
       if (editable.pending) {
@@ -7161,6 +7325,9 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   const allFiles = grouped.flatMap((group) => group.files);
   const viewerFiles = viewerScope === 'latest' ? latestFiles : allFiles;
   const selectedFile = viewerFiles.find((file) => file.id === selectedFileId) || viewerFiles[0] || null;
+  const previewSelectedFile = selectedFile && selectedFile.storageMode === 'link' && !linkedOwnerIsThisComputer(selectedFile)
+    ? { ...selectedFile, path: fileDownloadPath(selectedFile), sourcePath: '' }
+    : selectedFile;
   const selectedFileTracker = selectedFile ? template.fileTrackers.find((tracker) => tracker.id === selectedFile.trackerId) : null;
   const selectedExtension = fileExtension(selectedFile?.name || '');
   const fullViewerExtensions = new Set(['.pdf', '.stl', '.obj', '.dxf', ...TEXT_EXTENSIONS]);
@@ -7228,14 +7395,14 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
                 />
                 Upload Folder
               </label>
-              <button className={`upload-method ${stagedAttachment?.type === 'link-file' ? 'selected' : ''}`} onClick={selectLinkedProjectFile} disabled={fileBusy || hostSyncClient} title={hostSyncClient ? 'Linked paths must be created on the host computer.' : ''}>Link File</button>
-              <button className={`upload-method ${stagedAttachment?.type === 'link-folder' ? 'selected' : ''}`} onClick={selectLinkedProjectFolder} disabled={fileBusy || hostSyncClient} title={hostSyncClient ? 'Linked paths must be created on the host computer.' : ''}>Link Folder</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-file' ? 'selected' : ''}`} onClick={selectLinkedProjectFile} disabled={fileBusy}>Link File</button>
+              <button className={`upload-method ${stagedAttachment?.type === 'link-folder' ? 'selected' : ''}`} onClick={selectLinkedProjectFolder} disabled={fileBusy}>Link Folder</button>
             </div>
             <button className={stagedAttachment ? '' : 'secondary'} onClick={loadStagedAttachment} disabled={fileBusy || !stagedAttachment}>
               {fileBusy ? 'Loading...' : stagedAttachment?.type?.includes('folder') ? 'Load Folder' : 'Load File'}
             </button>
           </div>
-          {hostSyncClient && <p className="settings-note">Linked paths belong to the host computer. Existing linked files can be viewed or downloaded here; create new links on the host.</p>}
+          {hostSyncClient && <p className="settings-note">Linked files stay live only on the computer that linked them. Other computers receive downloadable snapshots.</p>}
           {stagedAttachment && (
             <div className="staged-attachment">
               <span title={stagedAttachmentName}>{stagedAttachmentName || 'Selected file'}</span>
@@ -7276,13 +7443,14 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
               {visibleFiles.map((file) => (
                 <div key={file.id} className="file-row">
                   <div className="file-row-left">
-                    {(file.path || file.type === 'folder') && (
-                      isRemoteBuildBookClient()
+                    {(fileDownloadPath(file) || file.type === 'folder') && (
+                      isRemoteBuildBookClient() || (file.storageMode === 'link' && !linkedOwnerIsThisComputer(file))
                         ? <button className="file-link-button" onClick={() => downloadProjectFile(file)} disabled={fileBusy}>Download</button>
                         : <button className="file-link-button" onClick={() => { setSelectedFileId(file.id); beginEdit(file); }} disabled={fileBusy}>Open</button>
                     )}
-                    {!isRemoteBuildBookClient() && (file.path || file.type === 'folder') && <button className="file-download-button" onClick={() => downloadProjectFile(file)}>Download</button>}
+                    {!isRemoteBuildBookClient() && !(file.storageMode === 'link' && !linkedOwnerIsThisComputer(file)) && (fileDownloadPath(file) || file.type === 'folder') && <button className="file-download-button" onClick={() => downloadProjectFile(file)}>Download</button>}
                     <strong>{file.type === 'folder' ? `${file.name}, ${(file.folderFiles || []).length} files` : file.name}</strong>
+                    {linkedOwnerLabel(file) && <span className="linked-owner-label">{linkedOwnerLabel(file)}</span>}
                     <div className="file-note-field">
                       <span>Note:</span>
                       <p>{file.notes || ''}</p>
@@ -7298,7 +7466,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
                   {(file.path || file.type === 'folder' || editSessions[file.id] || tracker.programPath) && (
                     <div className="file-extra-actions">
                       {file.latest && file.integrityStatus === 'changed' && <button className="ghost" onClick={() => acceptCurrentFileVersion(file)}>Update</button>}
-                      {file.path && tracker.programPath && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
+                      {file.path && tracker.programPath && linkedOwnerIsThisComputer(file) && <button className="ghost" onClick={() => openWithProgram(tracker.programPath, file.path)}>Launch</button>}
                     </div>
                   )}
                 </div>
@@ -7315,7 +7483,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
             <button className={viewerScope === 'latest' ? 'active' : ''} onClick={() => setViewerScope('latest')}>Latest Files</button>
             <button className={viewerScope === 'all' ? 'active' : ''} onClick={() => setViewerScope('all')}>All Files</button>
           </div>
-          {selectedFile?.path && selectedFileTracker?.programPath && <button className="ghost" onClick={() => openWithProgram(selectedFileTracker.programPath, selectedFile.path)}>Launch</button>}
+          {selectedFile?.path && selectedFileTracker?.programPath && linkedOwnerIsThisComputer(selectedFile) && <button className="ghost" onClick={() => openWithProgram(selectedFileTracker.programPath, selectedFile.path)}>Launch</button>}
         </div>
         {selectedFile ? (
           <>
@@ -7330,7 +7498,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
               <strong>{fileTrackerLabel(template.fileTrackers, selectedFile.trackerId)}</strong>
               <span>{selectedFile.name}</span>
             </div>
-            <FilePreview file={selectedFile} />
+            <FilePreview file={previewSelectedFile} />
           </>
         ) : <p>No files available to preview yet.</p>}
       </section>
@@ -9422,6 +9590,19 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
       setLanBusy(true);
       setLanError('');
       try {
+        if (networkControlledByHost) {
+          const token = state.lanServer?.token || '';
+          const requireToken = state.lanServer?.requireToken !== false;
+          const hostUrl = syncConfig?.hostUrl || '';
+          const accessUrl = hostUrl ? (requireToken && token ? `${hostUrl}?access=${encodeURIComponent(token)}` : hostUrl) : '';
+          const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
+          if (active) {
+            setLanNotice(hostUrl ? `LAN server running at ${hostUrl}` : '');
+            setLanAccessUrl(accessUrl);
+            setLanQr(qr);
+          }
+          return;
+        }
         if (state.lanServer?.enabled) {
           const token = state.lanServer.token;
           const requireToken = state.lanServer.requireToken !== false;
@@ -9455,6 +9636,8 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
     state.lanServer?.port,
     state.lanServer?.token,
     state.lanServer?.requireToken,
+    networkControlledByHost,
+    syncConfig?.hostUrl,
     state.webAuth?.enabled,
     state.webAuth?.scope,
     state.webAuth?.username,
@@ -9998,15 +10181,15 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
             <h2>Local Network Access</h2>
             <p>Serve BuildBook to devices on your Wi-Fi. Leave off unless actively in use.</p>
           </div>
-          <div className="settings-actions">
+          {!networkControlledByHost && <div className="settings-actions">
             <button
               className={state.lanServer?.enabled ? 'danger-fill' : 'secondary'}
               onClick={toggleLanServer}
-              disabled={lanBusy || networkControlledByHost}
+              disabled={lanBusy}
             >
               {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
             </button>
-          </div>
+          </div>}
         </div>
         <div className="lan-settings-grid">
           <label>
@@ -10033,7 +10216,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
           />
           Require access token
         </label>
-        {state.lanServer?.enabled && (
+        {(state.lanServer?.enabled || (networkControlledByHost && lanAccessUrl)) && (
           <div className="lan-access-box">
             {lanQr && <img src={lanQr} alt="BuildBook LAN access QR code" />}
             <div>
