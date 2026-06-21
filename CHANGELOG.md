@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.6 - 2026-06-21
+
+Changes since test-v0.4.0-test.5.
+
+### Changes
+
+- Host Sync server edits
+
 ## 0.4.0-test.5 - 2026-06-17
 
 Changes since test-v0.4.0-test.4.
