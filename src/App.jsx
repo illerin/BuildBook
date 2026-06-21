@@ -5056,6 +5056,11 @@ function imageMimeType(path = '') {
   return 'image/jpeg';
 }
 
+function imageMimeTypeFromBytes(bytes, path = '') {
+  const detected = detectImageExtensionFromBytes(bytes);
+  return detected ? imageMimeType(detected) : imageMimeType(path);
+}
+
 const PROJECT_THUMBNAIL_PREFIX = 'buildbook-project-thumb:';
 
 async function createImageThumbnailDataUrl(path, width = 480, height = 270) {
@@ -5132,6 +5137,7 @@ function ProjectThumbnail({ path, alt = '' }) {
 function StoredImage({ path, alt = '', className = '', style, fallback = null }) {
   const [src, setSrc] = useState(path && /^(blob:|data:|https?:)/i.test(path) ? path : '');
   const [failed, setFailed] = useState(false);
+  const directSrc = path ? assetUrl(path) : '';
 
   useEffect(() => {
     setFailed(false);
@@ -5148,30 +5154,44 @@ function StoredImage({ path, alt = '', className = '', style, fallback = null })
     let active = true;
     let objectUrl = '';
 
-    readStoredFile(path)
+    readStoredFile(path, false, isHostSyncClient())
       .then((bytes) => {
         if (!active || !bytes?.length) return;
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type: imageMimeType(path) }));
+        objectUrl = URL.createObjectURL(new Blob([bytes], { type: imageMimeTypeFromBytes(bytes, path) }));
         setSrc(objectUrl);
       })
       .catch(() => {
         if (!active) return;
         if (isHostSyncClient()) {
-          setSrc('');
-          setFailed(true);
+          setSrc(directSrc);
+          setFailed(false);
           return;
         }
-        setSrc(assetUrl(path));
+        setSrc(directSrc);
       });
 
     return () => {
       active = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [path]);
+  }, [path, directSrc]);
 
   if (!src) return failed && fallback ? fallback : null;
-  return <img src={src} alt={alt} className={className} style={style} draggable={false} loading="lazy" decoding="async" />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      className={className}
+      style={style}
+      draggable={false}
+      loading="lazy"
+      decoding="async"
+      onError={() => {
+        setSrc('');
+        setFailed(true);
+      }}
+    />
+  );
 }
 
 function ShellThumbnailPreview({ file }) {

@@ -163,7 +163,7 @@ export async function downloadUrlFile(url, library, name) {
   return invoke('download_url_to_file', { url, library, name });
 }
 
-export async function readStoredFile(path, clientLocal = false) {
+export async function readStoredFile(path, clientLocal = false, preferCache = false) {
   if (!path) return new Uint8Array();
 
   if (/^https?:\/\//i.test(path)) {
@@ -184,6 +184,13 @@ export async function readStoredFile(path, clientLocal = false) {
   }
 
   if (cachedSyncConfig().mode === 'client' && !clientLocal) {
+    if (preferCache) {
+      try {
+        return new Uint8Array(await invoke('sync_read_cached_host_file', { path }));
+      } catch {
+        // Fall through to the host so uncached files still render on demand.
+      }
+    }
     return new Uint8Array(await invoke('sync_read_host_file', { path }));
   }
 
@@ -329,7 +336,13 @@ export function assetUrl(path) {
   const syncConfig = cachedSyncConfig();
   if (isTauri() && syncConfig.mode === 'client' && syncConfig.hostUrl) {
     const base = syncConfig.hostUrl.replace(/\/+$/, '');
-    return `${base}/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(syncConfig.hostToken || '')}&deviceToken=${encodeURIComponent(syncConfig.clientAuthToken || '')}&device=${encodeURIComponent(syncConfig.deviceId || '')}`;
+    const params = new URLSearchParams({ path });
+    if (syncConfig.hostToken) params.set('access', syncConfig.hostToken);
+    if (syncConfig.clientAuthToken) {
+      params.set('deviceToken', syncConfig.clientAuthToken);
+      params.set('device', syncConfig.deviceId || '');
+    }
+    return `${base}/api/files?${params.toString()}`;
   }
   return isTauri() ? convertFileSrc(path) : path;
 }

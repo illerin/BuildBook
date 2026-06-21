@@ -153,6 +153,7 @@ pub fn run() {
             sync_client_load,
             sync_client_save,
             resolve_sync_conflict,
+            sync_read_cached_host_file,
             sync_read_host_file,
             sync_open_host_file,
             sync_prepare_host_edit_file,
@@ -1842,12 +1843,8 @@ fn host_file_bytes(config: &SyncConfig, path: &str) -> Result<Vec<u8>, String> {
     let host_url = normalized_host_url(&config.host_url)?;
     let mut endpoint = reqwest::Url::parse(&format!("{host_url}/api/files"))
         .map_err(|error| format!("Could not create host file address: {error}"))?;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("path", path)
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+    endpoint.query_pairs_mut().append_pair("path", path);
+    append_host_file_auth(&mut endpoint, config);
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
@@ -1932,6 +1929,18 @@ fn host_file_endpoint(config: &SyncConfig) -> Result<reqwest::Url, String> {
         .map_err(|error| format!("Could not create host file address: {error}"))
 }
 
+fn append_host_file_auth(endpoint: &mut reqwest::Url, config: &SyncConfig) {
+    let mut query = endpoint.query_pairs_mut();
+    if !config.host_token.trim().is_empty() {
+        query.append_pair("access", config.host_token.trim());
+    }
+    if !config.client_auth_token.trim().is_empty() {
+        query
+            .append_pair("deviceToken", config.client_auth_token.trim())
+            .append_pair("device", &config.device_id);
+    }
+}
+
 fn host_request_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
@@ -1948,6 +1957,15 @@ fn parse_host_stored_file(response: reqwest::blocking::Response) -> Result<Store
     response
         .json::<StoredFile>()
         .map_err(|error| format!("Could not read the host file response: {error}"))
+}
+
+#[tauri::command]
+fn sync_read_cached_host_file(app: tauri::AppHandle, path: String) -> Result<Vec<u8>, String> {
+    let config = load_sync_config(&app)?;
+    if config.mode != "client" {
+        return Err("This computer is not configured as a BuildBook client.".to_string());
+    }
+    read_cached_host_file(&app, &path)
 }
 
 #[tauri::command]
@@ -2103,10 +2121,8 @@ fn sync_save_host_file(
     endpoint
         .query_pairs_mut()
         .append_pair("name", &name)
-        .append_pair("library", &library)
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+        .append_pair("library", &library);
+    append_host_file_auth(&mut endpoint, &config);
     let response = host_request_client()?
         .post(endpoint)
         .header("X-BuildBook-Request", "1")
@@ -2128,12 +2144,8 @@ fn sync_overwrite_host_file(
         return Err("This computer is not configured as a BuildBook client.".to_string());
     }
     let mut endpoint = host_file_endpoint(&config)?;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("path", &path)
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+    endpoint.query_pairs_mut().append_pair("path", &path);
+    append_host_file_auth(&mut endpoint, &config);
     let response = host_request_client()?
         .put(endpoint)
         .header("X-BuildBook-Request", "1")
@@ -2162,10 +2174,8 @@ fn sync_download_url_to_host(
         .query_pairs_mut()
         .append_pair("url", &url)
         .append_pair("library", &library)
-        .append_pair("name", &name)
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+        .append_pair("name", &name);
+    append_host_file_auth(&mut endpoint, &config);
     let response = host_request_client()?
         .post(endpoint)
         .header("X-BuildBook-Request", "1")
@@ -2187,11 +2197,7 @@ fn sync_delete_host_files(
         return Err("This computer is not configured as a BuildBook client.".to_string());
     }
     let mut endpoint = host_file_endpoint(&config)?;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+    append_host_file_auth(&mut endpoint, &config);
     let response = host_request_client()?
         .delete(endpoint)
         .header("X-BuildBook-Request", "1")
@@ -2228,11 +2234,7 @@ fn sync_file_checkout(
     let host_url = normalized_host_url(&config.host_url)?;
     let mut endpoint = reqwest::Url::parse(&format!("{host_url}/api/sync/checkout"))
         .map_err(|error| format!("Could not create host checkout address: {error}"))?;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("access", config.host_token.trim())
-        .append_pair("deviceToken", config.client_auth_token.trim())
-        .append_pair("device", &config.device_id);
+    append_host_file_auth(&mut endpoint, &config);
     let response = host_request_client()?
         .post(endpoint)
         .header("X-BuildBook-Request", "1")
@@ -3164,11 +3166,8 @@ fn request_file_auth_error(
     path: &str,
     headers: &str,
 ) -> Option<&'static str> {
-    if !query_value(path, "device").trim().is_empty()
-        || !query_value(path, "deviceToken").trim().is_empty()
-        || !header_value(headers, "X-BuildBook-Device-Token")
-            .trim()
-            .is_empty()
+    if !query_value(path, "deviceToken").trim().is_empty()
+        || !header_value(headers, "X-BuildBook-Device-Token").trim().is_empty()
     {
         return paired_device_auth_error(app, path, headers);
     }
