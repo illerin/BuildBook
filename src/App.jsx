@@ -3098,7 +3098,7 @@ function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve })
   };
 
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => event.stopPropagation()}>
+    <div className="modal-overlay" onMouseDown={(event) => event.stopPropagation()}>
       <div className="modal sync-conflict-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal-header">
           <h2>Review Sync Conflict</h2>
@@ -4495,8 +4495,9 @@ async function savePartImageUrlWithThumbnail(url, partId) {
 }
 
 function PartPreviewImage({ part, className = '' }) {
-  if (!part.image && !part.imageThumbnail) return <div className={className || undefined}>{part.name.slice(0, 2).toUpperCase()}</div>;
-  return <StoredImage className={className} path={part.imageThumbnail || part.image} alt="" />;
+  const fallback = <div className={className || undefined}>{part.name.slice(0, 2).toUpperCase()}</div>;
+  if (!part.image && !part.imageThumbnail) return fallback;
+  return <StoredImage className={className} path={part.imageThumbnail || part.image} alt="" fallback={fallback} />;
 }
 
 function collectReferencedPaths(state) {
@@ -5128,10 +5129,12 @@ function ProjectThumbnail({ path, alt = '' }) {
   return <img src={src} alt={alt} draggable={false} />;
 }
 
-function StoredImage({ path, alt = '', className = '', style }) {
+function StoredImage({ path, alt = '', className = '', style, fallback = null }) {
   const [src, setSrc] = useState(path && /^(blob:|data:|https?:)/i.test(path) ? path : '');
+  const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    setFailed(false);
     if (!path) {
       setSrc('');
       return undefined;
@@ -5152,7 +5155,13 @@ function StoredImage({ path, alt = '', className = '', style }) {
         setSrc(objectUrl);
       })
       .catch(() => {
-        if (active) setSrc(isHostSyncClient() ? '' : assetUrl(path));
+        if (!active) return;
+        if (isHostSyncClient()) {
+          setSrc('');
+          setFailed(true);
+          return;
+        }
+        setSrc(assetUrl(path));
       });
 
     return () => {
@@ -5161,8 +5170,8 @@ function StoredImage({ path, alt = '', className = '', style }) {
     };
   }, [path]);
 
-  if (!src) return null;
-  return <img src={src} alt={alt} className={className} style={style} draggable={false} />;
+  if (!src) return failed && fallback ? fallback : null;
+  return <img src={src} alt={alt} className={className} style={style} draggable={false} loading="lazy" decoding="async" />;
 }
 
 function ShellThumbnailPreview({ file }) {
@@ -6414,6 +6423,7 @@ function ProjectPartsTab({
   }, [parts, selectedPart]);
 
   useEffect(() => {
+    if (isHostSyncClient()) return undefined;
     const missing = linkedParts.filter((part) => part.image && !part.imageThumbnail && !thumbnailJobsRef.current.has(part.id));
     if (!missing.length) return undefined;
     return runWhenIdle(() => {
@@ -7922,6 +7932,7 @@ function Parts({ state, updateState }) {
   };
 
   useEffect(() => {
+    if (isHostSyncClient()) return undefined;
     const missing = visible.filter((part) => part.image && !part.imageThumbnail && !thumbnailJobsRef.current.has(part.id));
     if (!missing.length) return undefined;
     return runWhenIdle(() => {
