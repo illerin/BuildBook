@@ -4962,7 +4962,7 @@ function ProjectThumbnail({ path, alt = '' }) {
         setSrc(dataUrl);
       })
       .catch(() => {
-        if (active) setSrc(assetUrl(path));
+        if (active) setSrc(isHostSyncClient() ? '' : assetUrl(path));
       });
 
     return () => {
@@ -4998,7 +4998,7 @@ function StoredImage({ path, alt = '', className = '', style }) {
         setSrc(objectUrl);
       })
       .catch(() => {
-        if (active) setSrc(assetUrl(path));
+        if (active) setSrc(isHostSyncClient() ? '' : assetUrl(path));
       });
 
     return () => {

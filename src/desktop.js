@@ -162,6 +162,12 @@ export async function downloadUrlFile(url, library, name) {
 export async function readStoredFile(path, clientLocal = false) {
   if (!path) return new Uint8Array();
 
+  if (/^https?:\/\//i.test(path)) {
+    const response = await fetch(path);
+    if (!response.ok) throw new Error(`Could not fetch remote file: ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
   if (isLanWebClient()) {
     const response = await fetch(fileApiUrl(path), { headers: apiHeaders() });
     if (!response.ok) throw new Error(await response.text());
