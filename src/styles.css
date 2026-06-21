@@ -3371,6 +3371,27 @@ article h3,
   flex-wrap: wrap;
 }
 
+.sync-client-summary {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--panel-soft);
+}
+
+.sync-client-summary strong {
+  display: block;
+  color: var(--text-soft);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.sync-client-summary span {
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .sync-pairing-code {
   display: flex;
   gap: 12px;

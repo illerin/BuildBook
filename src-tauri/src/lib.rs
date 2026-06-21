@@ -925,6 +925,34 @@ fn read_local_state_or_default(app: &tauri::AppHandle) -> Result<String, String>
     read_app_state(app.clone()).map(|contents| contents.unwrap_or_else(|| "{}".to_string()))
 }
 
+fn compact_host_error(status: reqwest::StatusCode, body: String, context: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for character in body.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(character),
+            _ => {}
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if status.as_u16() == 502 {
+        return "Host returned 502 Bad Gateway. The BuildBook host or proxy is not reachable.".to_string();
+    }
+    if status.as_u16() == 503 {
+        return "Host returned 503 Service Unavailable. The BuildBook host may be stopped.".to_string();
+    }
+    if text.trim().is_empty() {
+        format!("BuildBook host returned {status} {context}.")
+    } else {
+        text.chars().take(220).collect()
+    }
+}
+
 fn host_sync_get(config: &SyncConfig) -> Result<SyncStateEnvelope, String> {
     let host_url = normalized_host_url(&config.host_url)?;
     let client = reqwest::blocking::Client::builder()
@@ -938,7 +966,9 @@ fn host_sync_get(config: &SyncConfig) -> Result<SyncStateEnvelope, String> {
         .send()
         .map_err(|error| format!("Could not reach BuildBook host: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!("BuildBook host returned {}.", response.status()));
+        let status = response.status();
+        let message = response.text().unwrap_or_default();
+        return Err(compact_host_error(status, message, "while loading sync state"));
     }
     response
         .json::<SyncStateEnvelope>()
@@ -957,7 +987,9 @@ fn host_sync_revision(config: &SyncConfig) -> Result<String, String> {
         .send()
         .map_err(|error| format!("Could not reach BuildBook host: {error}"))?;
     if !response.status().is_success() {
-        return Err(format!("BuildBook host returned {}.", response.status()));
+        let status = response.status();
+        let message = response.text().unwrap_or_default();
+        return Err(compact_host_error(status, message, "while checking sync revision"));
     }
     response
         .text()
@@ -1003,7 +1035,8 @@ fn host_sync_write(
         return Ok(HostSyncWrite::Conflict(envelope));
     }
     if !status.is_success() {
-        return Err(format!("BuildBook host returned {status}."));
+        let message = response.text().unwrap_or_default();
+        return Err(compact_host_error(status, message, "while saving sync state"));
     }
     response
         .json::<SyncStateEnvelope>()
@@ -1833,11 +1866,7 @@ fn parse_host_stored_file(response: reqwest::blocking::Response) -> Result<Store
     let status = response.status();
     if !status.is_success() {
         let message = response.text().unwrap_or_default();
-        return Err(if message.trim().is_empty() {
-            format!("BuildBook host returned {status} for this file.")
-        } else {
-            message
-        });
+        return Err(compact_host_error(status, message, "for this file"));
     }
     response
         .json::<StoredFile>()
@@ -2096,11 +2125,7 @@ fn sync_delete_host_files(
     let status = response.status();
     if !status.is_success() {
         let message = response.text().unwrap_or_default();
-        return Err(if message.trim().is_empty() {
-            format!("BuildBook host returned {status} while deleting files.")
-        } else {
-            message
-        });
+        return Err(compact_host_error(status, message, "while deleting files"));
     }
     response
         .json::<DeleteManagedFilesResult>()
@@ -2151,11 +2176,7 @@ fn sync_file_checkout(
     let status = response.status();
     if !status.is_success() {
         let message = response.text().unwrap_or_default();
-        return Err(if message.trim().is_empty() {
-            format!("BuildBook host returned {status} for file checkout.")
-        } else {
-            message
-        });
+        return Err(compact_host_error(status, message, "for file checkout"));
     }
     response
         .json::<FileCheckoutResult>()
@@ -2281,11 +2302,7 @@ fn pair_buildbook_host(
     let status = response.status();
     if !status.is_success() {
         let message = response.text().unwrap_or_default();
-        return Err(if message.trim().is_empty() {
-            format!("BuildBook host returned {status} while pairing.")
-        } else {
-            message
-        });
+        return Err(compact_host_error(status, message, "while pairing"));
     }
     let mut paired = response
         .json::<PairDeviceResponse>()

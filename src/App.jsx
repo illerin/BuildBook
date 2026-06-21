@@ -47,7 +47,6 @@ import {
   readStoredFile,
   revokePairedDevice,
   resetManagedStorage,
-  resolveSyncConflict,
   resolveSyncConflictSelections,
   restoreStateBackup,
   scanStorage,
@@ -2478,7 +2477,6 @@ export default function App() {
   const [restoreError, setRestoreError] = useState('');
   const [saveState, setSaveState] = useState('saved');
   const [connectionState, setConnectionState] = useState(isRemoteBuildBookClient() ? 'checking' : 'local');
-  const [connectionMessage, setConnectionMessage] = useState(isRemoteBuildBookClient() ? 'Checking connection...' : 'Local app');
   const [syncConflictSummary, setSyncConflictSummary] = useState(null);
   const [showConflictReview, setShowConflictReview] = useState(false);
   const [remoteUnsaved, setRemoteUnsaved] = useState(false);
@@ -2501,15 +2499,7 @@ export default function App() {
 
   const applyDesktopSyncStatus = (status = getLastSyncStatus()) => {
     if (!window.__TAURI_INTERNALS__) return;
-    const nextStatus = status?.status || 'local';
-    setConnectionState(nextStatus);
-    setConnectionMessage(status?.message || (
-      nextStatus === 'host' ? 'Hosting BuildBook data.'
-        : nextStatus === 'connected' ? 'Connected to BuildBook host.'
-          : nextStatus === 'offline' ? 'Offline. Changes will synchronize when the host returns.'
-            : nextStatus === 'conflict' ? 'Synchronization conflict requires attention.'
-              : 'Using local BuildBook data.'
-    ));
+    setConnectionState(status?.status || 'local');
   };
 
   const refreshConnectionStatus = async () => {
@@ -2519,21 +2509,17 @@ export default function App() {
     }
     if (!isRemoteBuildBookClient()) {
       setConnectionState('local');
-      setConnectionMessage('Local app');
       return;
     }
     try {
       const status = await fetchWebAuthStatus();
       if (status.loginEnabled && status.loginRequired && !status.authenticated) {
         setConnectionState('login-required');
-        setConnectionMessage('Login required to save to the host.');
         return;
       }
       setConnectionState('connected');
-      setConnectionMessage(`Connected to host${status.username ? ` as ${status.username}` : ''}.`);
     } catch (error) {
       setConnectionState('disconnected');
-      setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
     }
   };
 
@@ -2557,7 +2543,6 @@ export default function App() {
       listStateBackups().then(setStateBackups).catch(() => setStateBackups([]));
       if (isRemoteBuildBookClient()) {
         setConnectionState('disconnected');
-        setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
       }
     } finally {
       setLoadBusy(false);
@@ -2677,7 +2662,6 @@ export default function App() {
               if (isRemoteBuildBookClient()) {
                 setRemoteUnsaved(false);
                 setConnectionState('connected');
-                setConnectionMessage('Changes saved to host.');
               }
             }
           })
@@ -2690,35 +2674,12 @@ export default function App() {
               if (isRemoteBuildBookClient()) {
                 setRemoteUnsaved(true);
                 setConnectionState('disconnected');
-                setConnectionMessage('Save failed. Browser changes are still on this screen but are not on the host yet.');
               }
             }
           });
       }, 450);
       return next;
     });
-  };
-
-  const retryRemoteSave = async () => {
-    if (!stateRef.current) return;
-    saveStateRef.current = 'saving';
-    setSaveState('saving');
-    setConnectionMessage('Retrying save to host...');
-    try {
-      const normalized = await saveAppState(stateRef.current);
-      lastPersistedStateRef.current = persistedStateText(normalized);
-      saveStateRef.current = 'saved';
-      setSaveState('saved');
-      setRemoteUnsaved(false);
-      await refreshConnectionStatus();
-    } catch (error) {
-      const message = `error: ${String(error?.message || error).slice(0, 160)}`;
-      saveStateRef.current = message;
-      setSaveState(message);
-      setRemoteUnsaved(true);
-      setConnectionState('disconnected');
-      setConnectionMessage('Save still failed. Keep this tab open or copy your changes before refreshing.');
-    }
   };
 
   useEffect(() => {
@@ -2858,7 +2819,6 @@ export default function App() {
         console.error(error);
         if (isRemoteBuildBookClient()) {
           setConnectionState('disconnected');
-          setConnectionMessage(`Disconnected: ${String(error?.message || error)}`);
         }
       }
     }, 2000);
@@ -2994,26 +2954,8 @@ export default function App() {
     selectionGuardRef.current = { source: null, x: 0, y: 0, block: false, timer: 0 };
   };
 
-  const resolveDesktopConflict = async (choice) => {
-    try {
-      setConnectionMessage('Resolving synchronization conflict...');
-      const result = await resolveSyncConflict(choice);
-      const loaded = normalizeState(JSON.parse(result.contents));
-      lastPersistedStateRef.current = persistedStateText(loaded);
-      setState(loaded);
-      setSaveState('saved');
-      applyDesktopSyncStatus(result);
-      setSyncConflictSummary(null);
-      setShowConflictReview(false);
-    } catch (error) {
-      setConnectionState('conflict');
-      setConnectionMessage(`Conflict resolution failed: ${String(error?.message || error)}`);
-    }
-  };
-
   const resolveDesktopConflictSelections = async (selections) => {
     try {
-      setConnectionMessage('Resolving selected synchronization conflicts...');
       const result = await resolveSyncConflictSelections(selections);
       const loaded = normalizeState(JSON.parse(result.contents));
       lastPersistedStateRef.current = persistedStateText(loaded);
@@ -3024,12 +2966,10 @@ export default function App() {
       setShowConflictReview(false);
     } catch (error) {
       setConnectionState('conflict');
-      setConnectionMessage(`Conflict resolution failed: ${String(error?.message || error)}`);
+      setSaveState(`error: ${String(error?.message || error).slice(0, 160)}`);
     }
   };
 
-  const showConnectionBanner = isRemoteBuildBookClient()
-    || (window.__TAURI_INTERNALS__ && connectionState !== 'local');
   const connectionLabel = connectionState === 'login-required' ? 'Login required'
     : connectionState === 'disconnected' ? 'Disconnected'
       : connectionState === 'connected' ? 'Connected'
@@ -3071,43 +3011,6 @@ export default function App() {
         </div>
       </aside>
       <main className="workspace">
-        {showConnectionBanner && (
-          <div className={`connection-banner connection-${connectionState}`}>
-            <div className="connection-banner-copy">
-              <span>{connectionMessage}</span>
-              {connectionState === 'conflict' && syncConflictSummary?.items?.length ? (
-                <div className="connection-conflict-list">
-                  {syncConflictSummary.items.slice(0, 6).map((item) => (
-                    <span key={item.path}>{item.label}</span>
-                  ))}
-                  {syncConflictSummary.items.length > 6 && <span>{syncConflictSummary.items.length - 6} more changed areas</span>}
-                </div>
-              ) : null}
-              {connectionState === 'conflict' && syncConflictSummary?.hasConflict && !syncConflictSummary.items?.length && (
-                <span className="connection-conflict-muted">Changes are broad or could not be summarized safely.</span>
-              )}
-            </div>
-            {connectionState === 'conflict' && (
-              <div className="connection-banner-actions">
-                <button className="secondary" onClick={() => resolveDesktopConflict('host')}>Use Host Version</button>
-                <button className="secondary" onClick={() => resolveDesktopConflict('combine')}>Combine Changes</button>
-                <button className="secondary" onClick={() => setShowConflictReview(true)} disabled={!syncConflictSummary?.items?.length}>Review</button>
-                <button onClick={() => resolveDesktopConflict('local')}>Use This Computer</button>
-              </div>
-            )}
-          </div>
-        )}
-        {remoteUnsaved && (
-          <div className="connection-banner connection-unsaved">
-            <div className="connection-banner-copy">
-              <strong>Unsaved browser changes</strong>
-              <span>The host did not accept the last save. Do not refresh or close this tab until Retry Save succeeds.</span>
-            </div>
-            <div className="connection-banner-actions">
-              <button onClick={retryRemoteSave} disabled={saveState === 'saving'}>{saveState === 'saving' ? 'Saving...' : 'Retry Save'}</button>
-            </div>
-          </div>
-        )}
         {showConflictReview && (
           <SyncConflictReviewModal
             summary={syncConflictSummary}
@@ -9129,6 +9032,9 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
   const [syncError, setSyncError] = useState('');
   const [syncDashboard, setSyncDashboard] = useState(null);
   const [syncPrefetchProgress, setSyncPrefetchProgress] = useState('');
+  const syncClientMode = syncConfig?.mode === 'client';
+  const networkControlledByHost = remoteClient || hostSyncClient || syncClientMode;
+  const syncClientNeedsRepair = syncClientMode && Boolean(syncDashboard?.lastSyncError);
 
   const updateTemplate = (patch) => {
     updateState((current) => ({ ...current, template: { ...current.template, ...patch } }));
@@ -9943,12 +9849,27 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               <button className="secondary" onClick={saveDeviceName} disabled={syncBusy || !syncDeviceName.trim()}>Save Name</button>
               {syncConfig?.deviceId && <span className="settings-note">Device ID: {syncConfig.deviceId}</span>}
             </div>
-            <div className="sync-mode-actions">
-              <button onClick={createHostFromThisComputer} disabled={syncBusy || !syncConfig}>Create Host from This Computer</button>
-              <button className="secondary" onClick={generatePairingCode} disabled={syncBusy || syncConfig?.mode !== 'host'}>Generate Pairing Code</button>
-              <button className="secondary" onClick={prefetchClientCache} disabled={syncBusy || syncConfig?.mode !== 'client'}>Prefetch Client Cache</button>
-              <button className="secondary" onClick={returnToLocalMode} disabled={syncBusy || !syncConfig || syncConfig.mode === 'local'}>Use Standalone Local Data</button>
-            </div>
+            {syncClientMode ? (
+              <div className="sync-client-summary">
+                <div>
+                  <strong>Connected Host</strong>
+                  <span>{syncConfig?.hostUrl || 'Host address not set'}</span>
+                </div>
+                <div className="settings-actions left-actions">
+                  <button className="secondary" onClick={prefetchClientCache} disabled={syncBusy}>Prefetch Client Cache</button>
+                  <button className="secondary" onClick={refreshSyncDashboard} disabled={syncBusy}>Refresh Status</button>
+                  <button className="danger-fill" onClick={returnToLocalMode} disabled={syncBusy}>Unlink From Host</button>
+                </div>
+                <p className="settings-note">Network access and web login settings are controlled by the host computer.</p>
+              </div>
+            ) : (
+              <div className="sync-mode-actions">
+                <button onClick={createHostFromThisComputer} disabled={syncBusy || !syncConfig}>Create Host from This Computer</button>
+                <button className="secondary" onClick={generatePairingCode} disabled={syncBusy || syncConfig?.mode !== 'host'}>Generate Pairing Code</button>
+                <button className="secondary" onClick={prefetchClientCache} disabled={syncBusy || syncConfig?.mode !== 'client'}>Prefetch Client Cache</button>
+                <button className="secondary" onClick={returnToLocalMode} disabled={syncBusy || !syncConfig || syncConfig.mode === 'local'}>Use Standalone Local Data</button>
+              </div>
+            )}
             {syncPrefetchProgress && <p className="settings-note">{syncPrefetchProgress}</p>}
             {syncConfig?.pairingCode && syncConfig?.pairingCodeExpiresAt > Math.floor(Date.now() / 1000) && (
               <div className="sync-pairing-code">
@@ -10030,7 +9951,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
                 </div>
               </div>
             )}
-            <div className="sync-connect-panel">
+            {(!syncClientMode || syncClientNeedsRepair) && <div className="sync-connect-panel">
               <div className="section-title">
                 <h3>Connect to a Host</h3>
                 <button className="secondary" onClick={discoverHosts} disabled={syncBusy}>{syncBusy ? 'Working...' : 'Find Hosts'}</button>
@@ -10065,7 +9986,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
                 </label>
                 <button onClick={connectToHost} disabled={syncBusy || !syncHostUrl.trim()}>Connect</button>
               </div>
-            </div>
+            </div>}
           </>
         )}
         {syncNotice && <p className="success-text">{syncNotice}</p>}
@@ -10081,7 +10002,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
             <button
               className={state.lanServer?.enabled ? 'danger-fill' : 'secondary'}
               onClick={toggleLanServer}
-              disabled={lanBusy || hostSyncClient}
+              disabled={lanBusy || networkControlledByHost}
             >
               {lanBusy ? 'Working...' : state.lanServer?.enabled ? 'Turn Off' : 'Turn On'}
             </button>
@@ -10096,10 +10017,10 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               max="65535"
               value={state.lanServer?.port || 8787}
               onChange={(event) => updateLanServer({ port: Number(event.target.value) || 8787 })}
-              disabled={state.lanServer?.enabled || hostSyncClient}
+              disabled={state.lanServer?.enabled || networkControlledByHost}
             />
           </label>
-          <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled || hostSyncClient}>
+          <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled || networkControlledByHost}>
             Regenerate Access Code
           </button>
         </div>
@@ -10108,7 +10029,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
             type="checkbox"
             checked={state.lanServer?.requireToken !== false}
             onChange={(event) => updateLanServer({ requireToken: event.target.checked })}
-            disabled={state.lanServer?.enabled || hostSyncClient}
+            disabled={state.lanServer?.enabled || networkControlledByHost}
           />
           Require access token
         </label>
@@ -10126,7 +10047,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
         )}
         {lanNotice && <p className="success-text">{lanNotice}</p>}
         {lanError && <p className="error-text">{lanError}</p>}
-        {hostSyncClient && <p className="settings-note">Network access is controlled by the host computer.</p>}
+        {networkControlledByHost && <p className="settings-note">Network access is controlled by the host computer.</p>}
         <p>Use the shown address from your phone while connected to the same Wi-Fi network.</p>
       </section>
       <section className="panel settings-section">
@@ -10140,7 +10061,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               type="checkbox"
               checked={Boolean(state.webAuth?.enabled)}
               onChange={(event) => setWebLoginEnabled(event.target.checked)}
-              disabled={hostSyncClient}
+              disabled={networkControlledByHost}
             />
             Require admin login
           </label>
@@ -10153,14 +10074,14 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
         <div className="web-auth-grid">
           <label>
             Apply login to
-            <select value={state.webAuth?.scope || 'domain'} onChange={(event) => updateWebAuth({ scope: event.target.value })} disabled={hostSyncClient}>
+            <select value={state.webAuth?.scope || 'domain'} onChange={(event) => updateWebAuth({ scope: event.target.value })} disabled={networkControlledByHost}>
               <option value="domain">Domain/proxy access only</option>
               <option value="all">All browser access</option>
             </select>
           </label>
           <label>
             Admin username
-            <input value={state.webAuth?.username || 'admin'} onChange={(event) => updateWebAuth({ username: event.target.value || 'admin' })} disabled={hostSyncClient} />
+            <input value={state.webAuth?.username || 'admin'} onChange={(event) => updateWebAuth({ username: event.target.value || 'admin' })} disabled={networkControlledByHost} />
           </label>
           <label>
             Remember device days
@@ -10170,7 +10091,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               max="365"
               value={state.webAuth?.rememberDays || 30}
               onChange={(event) => updateWebAuth({ rememberDays: Number(event.target.value) || 30 })}
-              disabled={hostSyncClient}
+              disabled={networkControlledByHost}
             />
           </label>
           <label>
@@ -10179,11 +10100,11 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               value={state.webAuth?.allowedHosts || ''}
               onChange={(event) => updateWebAuth({ allowedHosts: event.target.value })}
               placeholder="buildbook.example.com, *.tailnet.ts.net"
-              disabled={hostSyncClient}
+              disabled={networkControlledByHost}
             />
           </label>
         </div>
-        {remoteClient || hostSyncClient ? (
+        {networkControlledByHost ? (
           <p className="settings-note">Password changes are only available in the host desktop app. Open BuildBook on the host computer to change the admin password.</p>
         ) : (
           <div className="web-auth-password-row">

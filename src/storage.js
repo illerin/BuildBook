@@ -54,6 +54,20 @@ function apiHeaders(extra = {}) {
   };
 }
 
+async function responseErrorMessage(response, fallback) {
+  const raw = await response.text().catch(() => '');
+  const text = raw
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (response.status === 502) return 'Host returned 502 Bad Gateway. The BuildBook host or proxy is not reachable.';
+  if (response.status === 503) return 'Host returned 503 Service Unavailable. The BuildBook host may be stopped.';
+  if (response.status === 401) return text || 'BuildBook access is required.';
+  return text ? text.slice(0, 220) : fallback;
+}
+
 export async function loadAppState() {
   if (isTauri()) {
     const config = await invoke('read_sync_config');
@@ -76,11 +90,7 @@ export async function loadAppState() {
   if (isLanWebClient()) {
     const response = await fetch('/api/state', { headers: apiHeaders() });
     if (response.ok) return normalizeState(await response.json());
-    const message = await response.text();
-    if (response.status === 401) {
-      throw new Error(message || 'BuildBook access is required.');
-    }
-    throw new Error(message || 'Could not load BuildBook from this computer.');
+    throw new Error(await responseErrorMessage(response, 'Could not load BuildBook from this computer.'));
   }
 
   try {
@@ -98,7 +108,7 @@ export async function webLogin(username, password) {
     headers: apiHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ username, password }),
   });
-  if (!response.ok) throw new Error(await response.text() || 'Could not log in.');
+  if (!response.ok) throw new Error(await responseErrorMessage(response, 'Could not log in.'));
 }
 
 export async function webLogout() {
@@ -118,8 +128,7 @@ export async function fetchWebAuthStatus() {
 
   const response = await fetch('/api/auth-status', { headers: apiHeaders() });
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || 'Could not reach the BuildBook host.');
+    throw new Error(await responseErrorMessage(response, 'Could not reach the BuildBook host.'));
   }
   return response.json();
 }
@@ -155,7 +164,7 @@ export async function saveAppState(state) {
       headers: apiHeaders({ 'Content-Type': 'application/json' }),
       body: contents,
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) throw new Error(await responseErrorMessage(response, 'Could not save BuildBook to this computer.'));
     return normalized;
   }
 
