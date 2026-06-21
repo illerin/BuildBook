@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.9 - 2026-06-21
+
+Changes since test-v0.4.0-test.8.
+
+### Changes
+
+- More connected client fixes
+
 ## 0.4.0-test.8 - 2026-06-21
 
 Changes since test-v0.4.0-test.7.

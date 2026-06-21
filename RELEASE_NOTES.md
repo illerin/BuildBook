@@ -1,8 +1,8 @@
-# BuildBook 0.4.0-test.8 Test Release
+# BuildBook 0.4.0-test.9 Test Release
 
-Changes since test-v0.4.0-test.7.
+Changes since test-v0.4.0-test.8.
 
 ## Changes
 
-- Conflict dialog adjustments, Image on connected computed edits
+- More connected client fixes
 
