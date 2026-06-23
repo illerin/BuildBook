@@ -719,9 +719,18 @@ async function externalizeStateInlineDataImages(state) {
   const projects = await Promise.all((state.projects || []).map(async (project) => {
     let nextProject = project;
     const notes = await normalizeRichTextImages(project.notes, `project-note-images/${project.id}`);
+    const currentNoteSheets = projectNoteSheets(project);
+    const noteSheets = await Promise.all(currentNoteSheets.map(async (sheet) => {
+      const content = await normalizeRichTextImages(sheet.content, `project-note-images/${project.id}`);
+      if (content !== sheet.content) changed = true;
+      return content !== sheet.content ? { ...sheet, content } : sheet;
+    }));
     if (notes !== project.notes) {
       changed = true;
       nextProject = { ...nextProject, notes };
+    }
+    if (noteSheets.some((sheet, index) => sheet !== currentNoteSheets[index])) {
+      nextProject = { ...nextProject, ...notesPatchFromSheets(noteSheets) };
     }
     if (project.instructions) {
       const intro = await normalizeRichTextImages(project.instructions.intro, `project-instructions/${project.id}/intro`);
@@ -749,6 +758,7 @@ function stateHasInlineDataImages(state) {
   };
   return (state.projects || []).some((project) => (
     needsRepair(project.notes)
+    || projectNoteSheets(project).some((sheet) => needsRepair(sheet.content))
     || needsRepair(project.instructions?.intro)
     || (project.instructions?.steps || []).some((step) => needsRepair(step.body))
   ));
@@ -1168,6 +1178,10 @@ async function buildFullBackupEntries(state) {
     project.imagePackagePath = await addFileEntry(entries, project.image, `projects/${safeName(project.id)}/image/${safeName(project.name)}${await imagePackageExtension(project.image)}`);
     if (project.imagePackagePath) project.image = '';
     project.notes = await packageInlineNoteImages(entries, project.notes, project.id);
+    project.noteSheets = await Promise.all(projectNoteSheets(project).map(async (sheet) => ({
+      ...sheet,
+      content: await packageInlineNoteImages(entries, sheet.content, project.id, `note-sheets/${safeName(sheet.id)}`),
+    })));
     project.instructions = project.instructions ? {
       ...project.instructions,
       intro: await packageInlineNoteImages(entries, project.instructions.intro, project.id, 'instructions/intro-images'),
@@ -1273,6 +1287,11 @@ async function readFullBackupPackage(file) {
     project.image = await saveZipAsset(entries, project.imagePackagePath, `${project.name}-image`, `project-images/${project.id}`) || project.image || '';
     delete project.imagePackagePath;
     project.notes = await restoreInlineNoteImages(entries, project.notes, project.id);
+    project.noteSheets = await Promise.all(projectNoteSheets(project).map(async (sheet) => ({
+      ...sheet,
+      content: await restoreInlineNoteImages(entries, sheet.content, project.id),
+    })));
+    project.notes = project.noteSheets[0]?.content || project.notes || '';
     project.instructions = project.instructions ? {
       ...project.instructions,
       intro: await restoreInlineNoteImages(entries, project.instructions.intro, project.id, `project-instructions/${project.id}/intro`),
@@ -2035,6 +2054,10 @@ async function buildProjectPackage(state, project) {
   const exportedProject = {
     ...project,
     notes: await packageInlineNoteImages(entries, project.notes, project.id),
+    noteSheets: await Promise.all(projectNoteSheets(project).map(async (sheet) => ({
+      ...sheet,
+      content: await packageInlineNoteImages(entries, sheet.content, project.id, `note-sheets/${safeName(sheet.id)}`),
+    }))),
     instructions: project.instructions ? {
       ...project.instructions,
       intro: await packageInlineNoteImages(entries, project.instructions.intro, project.id, 'instructions/intro-images'),
@@ -2128,6 +2151,9 @@ async function buildProjectPackage(state, project) {
 
   entries.unshift({ name: 'buildbook-package.json', data: JSON.stringify(manifest, null, 2) });
   entries.push({ name: 'project-notes.txt', data: project.notes || '' });
+  for (const sheet of projectNoteSheets(project)) {
+    entries.push({ name: `project-note-sheets/${safeName(sheet.title)}.html`, data: sheet.content || '' });
+  }
   entries.push({ name: 'README.md', data: buildProjectReadme(project, linkedParts, state.categories, state.template.fileTrackers) });
   entries.push({ name: 'build-guide.html', data: buildGuideHtml(project, linkedParts, state.categories, state.template.fileTrackers) });
   entries.push({ name: 'parts-bom.csv', data: buildBomCsv(linkedParts, state.categories) });
@@ -2233,6 +2259,11 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
       }));
       const projectImage = await savePackagedAsset(manifest.project.imagePackagePath, `${projectName}-image`, `project-images/${projectId}`);
       const importedNoteImages = [];
+      const importedNoteSheets = await Promise.all(projectNoteSheets(manifest.project).map(async (sheet) => ({
+        ...sheet,
+        id: sheet.id || makeId('note-sheet'),
+        content: await restoreInlineNoteImages(entries, sheet.content, projectId),
+      })));
 
       for (const image of manifest.project.noteImages || []) {
         const path = await savePackagedAsset(image.packagePath, image.name, `project-note-images/${projectId}`);
@@ -2329,7 +2360,8 @@ function ProjectImportReview({ state, packageData, onCancel, onImport }) {
         partQuantities: importedPartQuantities,
         files: importedFiles,
         noteImages: importedNoteImages,
-        notes: await restoreInlineNoteImages(entries, manifest.project.notes, projectId),
+        noteSheets: importedNoteSheets,
+        notes: importedNoteSheets[0]?.content || await restoreInlineNoteImages(entries, manifest.project.notes, projectId),
         photoFolders: importedPhotoFolders,
         instructions: manifest.project.instructions ? {
           ...manifest.project.instructions,
@@ -3193,6 +3225,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
       image: '',
       activeSteps: [],
       notes: '',
+      noteSheets: [{ id: 'project-notes', title: 'Project Notes', content: '' }],
       noteImages: [],
       checklist: state.template.checklist.map((text) => ({ id: makeId('check'), text, completedAt: '' })),
       nextSteps: [],
@@ -3374,6 +3407,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
       status: 'active',
       checklist: project.checklist.map((item) => ({ ...item, id: makeId('check') })),
       files: project.files.map((file) => ({ ...file, id: makeId('file') })),
+      noteSheets: projectNoteSheets(project).map((sheet, index) => ({ ...sheet, id: index === 0 ? 'project-notes' : makeId('note-sheet') })),
       noteImages: (project.noteImages || []).map((image) => ({ ...image, id: makeId('note-img') })),
       photoFolders: (project.photoFolders || []).map((folder) => ({
         ...folder,
@@ -3567,7 +3601,13 @@ function Search({ state, setTab }) {
     if (!trimmed) return null;
     const match = (...values) => values.some((value) => String(value || '').toLowerCase().includes(trimmed));
     return {
-      projects: state.projects.filter((project) => match(project.name, project.status, project.notes, ...(project.nextSteps || []))),
+      projects: state.projects.filter((project) => match(
+        project.name,
+        project.status,
+        project.notes,
+        ...projectNoteSheets(project).flatMap((sheet) => [sheet.title, sheet.content]),
+        ...(project.nextSteps || []),
+      )),
       parts: state.parts.filter((part) => match(part.name, categoryLabel(state.categories, part.categoryId), part.storageLocation, part.specSummary, part.notes)),
       files: state.projects.flatMap((project) => project.files.map((file) => ({ ...file, projectName: project.name, projectId: project.id })))
         .filter((file) => match(file.name, file.notes, fileTrackerLabel(state.template.fileTrackers, file.trackerId), file.projectName)),
@@ -4352,13 +4392,25 @@ function ProjectTagControls({ project, steps, onToggle, className = '' }) {
 }
 
 function ProjectOverviewTab({ project, template, onUpdate }) {
+  const confirm = useAppConfirm();
   const [newChecklist, setNewChecklist] = useState('');
   const [showCompleted, setShowCompleted] = useState(false);
   const [recentlyCompleted, setRecentlyCompleted] = useState([]);
+  const [activeNoteSheetId, setActiveNoteSheetId] = useState('');
+  const [editingNoteSheetId, setEditingNoteSheetId] = useState('');
+  const [draggingNoteSheetId, setDraggingNoteSheetId] = useState('');
   const visibleChecklist = showCompleted
     ? [...project.checklist].sort((a, b) => (b.completedAt || '').localeCompare(a.completedAt || ''))
     : project.checklist.filter((item) => !item.completedAt || recentlyCompleted.includes(item.id));
   const latestFiles = project.files.filter((file) => file.latest);
+  const noteSheets = projectNoteSheets(project);
+  const activeNoteSheet = noteSheets.find((sheet) => sheet.id === activeNoteSheetId) || noteSheets[0];
+
+  useEffect(() => {
+    if (!noteSheets.some((sheet) => sheet.id === activeNoteSheetId)) {
+      setActiveNoteSheetId(noteSheets[0]?.id || '');
+    }
+  }, [activeNoteSheetId, noteSheets]);
 
   const addChecklistItem = () => {
     if (!newChecklist.trim()) return;
@@ -4383,13 +4435,102 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
     return saveRichTextImageSource(file, `project-note-images/${project.id}`);
   };
 
+  const updateNoteSheets = (sheets) => onUpdate(notesPatchFromSheets(sheets));
+
+  const addNoteSheet = () => {
+    const sheet = { id: makeId('note-sheet'), title: `Notes ${noteSheets.length + 1}`, content: '' };
+    updateNoteSheets([...noteSheets, sheet]);
+    setActiveNoteSheetId(sheet.id);
+    setEditingNoteSheetId(sheet.id);
+  };
+
+  const renameNoteSheet = (sheetId, title) => {
+    updateNoteSheets(noteSheets.map((sheet) => (
+      sheet.id === sheetId ? { ...sheet, title: title.trim() || sheet.title } : sheet
+    )));
+    setEditingNoteSheetId('');
+  };
+
+  const updateNoteSheetContent = (sheetId, content) => {
+    updateNoteSheets(noteSheets.map((sheet) => (sheet.id === sheetId ? { ...sheet, content } : sheet)));
+  };
+
+  const deleteNoteSheet = async (sheetId) => {
+    if (noteSheets.length <= 1) return;
+    const sheet = noteSheets.find((item) => item.id === sheetId);
+    const confirmed = await confirm({
+      title: 'Delete note sheet',
+      message: `Delete "${sheet?.title || 'this note sheet'}"?`,
+      confirmLabel: 'Delete',
+      danger: true,
+    });
+    if (!confirmed) return;
+    const nextSheets = noteSheets.filter((item) => item.id !== sheetId);
+    updateNoteSheets(nextSheets);
+    setActiveNoteSheetId(nextSheets[0]?.id || '');
+  };
+
+  const moveNoteSheet = (sourceId, targetId) => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const sourceIndex = noteSheets.findIndex((sheet) => sheet.id === sourceId);
+    const targetIndex = noteSheets.findIndex((sheet) => sheet.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const nextSheets = [...noteSheets];
+    const [moved] = nextSheets.splice(sourceIndex, 1);
+    nextSheets.splice(targetIndex, 0, moved);
+    updateNoteSheets(nextSheets);
+  };
+
   return (
     <div className="dashboard-grid">
       <article className="notes-card">
         <div className="section-title">
           <h3>Project Notes</h3>
+          <button className="icon-button note-sheet-add" title="Add note sheet" onClick={addNoteSheet}>+</button>
         </div>
-        <RichTextEditor value={project.notes} onChange={(notes) => onUpdate({ notes })} onUploadImage={addNoteImage} placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..." />
+        <div className="note-sheet-tabs">
+          {noteSheets.map((sheet) => (
+            <div
+              key={sheet.id}
+              className={`note-sheet-tab ${activeNoteSheet?.id === sheet.id ? 'active' : ''} ${draggingNoteSheetId === sheet.id ? 'dragging' : ''}`}
+              draggable
+              onDragStart={(event) => {
+                setDraggingNoteSheetId(sheet.id);
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', sheet.id);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                moveNoteSheet(event.dataTransfer.getData('text/plain') || draggingNoteSheetId, sheet.id);
+                setDraggingNoteSheetId('');
+              }}
+              onDragEnd={() => setDraggingNoteSheetId('')}
+            >
+              {editingNoteSheetId === sheet.id ? (
+                <input
+                  autoFocus
+                  defaultValue={sheet.title}
+                  onBlur={(event) => renameNoteSheet(sheet.id, event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur();
+                    if (event.key === 'Escape') setEditingNoteSheetId('');
+                  }}
+                />
+              ) : (
+                <button className="note-sheet-name" onClick={() => setActiveNoteSheetId(sheet.id)} onDoubleClick={() => setEditingNoteSheetId(sheet.id)}>
+                  {sheet.title}
+                </button>
+              )}
+              <button className="ghost note-sheet-rename" title="Rename note sheet" onClick={() => setEditingNoteSheetId(sheet.id)}>Rename</button>
+              {noteSheets.length > 1 && <button className="ghost note-sheet-delete" title="Delete note sheet" onClick={() => deleteNoteSheet(sheet.id)}>x</button>}
+            </div>
+          ))}
+        </div>
+        <RichTextEditor value={activeNoteSheet?.content || ''} onChange={(notes) => updateNoteSheetContent(activeNoteSheet.id, notes)} onUploadImage={addNoteImage} placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..." />
       </article>
       <div className="overview-side">
         <article>
@@ -4505,8 +4646,13 @@ function collectReferencedPaths(state) {
   const add = (path) => {
     if (path && typeof path === 'string' && !path.startsWith('blob:')) paths.add(path);
   };
+  const addRichTextImages = (html) => {
+    for (const match of String(html || '').matchAll(/data-project-image-path="([^"]+)"/g)) add(match[1]);
+  };
   state.projects.forEach((project) => {
     add(project.image);
+    addRichTextImages(project.notes);
+    projectNoteSheets(project).forEach((sheet) => addRichTextImages(sheet.content));
     (project.noteImages || []).forEach((image) => add(image.path));
     (project.photoFolders || []).forEach((folder) => (folder.photos || []).forEach((photo) => {
       add(photo.path);
@@ -4545,6 +4691,22 @@ function runWhenIdle(callback) {
   }
   const id = window.setTimeout(callback, 200);
   return () => window.clearTimeout(id);
+}
+
+function projectNoteSheets(project) {
+  const sheets = Array.isArray(project.noteSheets) && project.noteSheets.length
+    ? project.noteSheets
+    : [{ id: 'project-notes', title: 'Project Notes', content: project.notes || '' }];
+  return sheets.map((sheet, index) => ({
+    id: sheet.id || `note-sheet-${index + 1}`,
+    title: String(sheet.title || (index === 0 ? 'Project Notes' : `Notes ${index + 1}`)).trim() || (index === 0 ? 'Project Notes' : `Notes ${index + 1}`),
+    content: String(sheet.content ?? sheet.notes ?? ''),
+  }));
+}
+
+function notesPatchFromSheets(sheets) {
+  const normalized = sheets.length ? sheets : [{ id: 'project-notes', title: 'Project Notes', content: '' }];
+  return { noteSheets: normalized, notes: normalized[0]?.content || '' };
 }
 
 function PhotoMarkupButton({ photo, projectId, onSave }) {
@@ -4918,7 +5080,8 @@ function linkedOwnerIsThisComputer(file) {
 
 function linkedOwnerLabel(file) {
   if (file?.storageMode !== 'link') return '';
-  return `Linked on ${file.linkedOwnerDeviceName || 'another computer'}`;
+  const owner = linkedOwnerIsThisComputer(file) ? linkOwnerInfo().deviceName : file.linkedOwnerDeviceName;
+  return `Linked on ${owner || 'another computer'}`;
 }
 
 function fileDownloadPath(file) {
@@ -6949,9 +7112,15 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
   const acceptCurrentFileVersion = async (file) => {
     if (!integrityCheckable(file)) return;
     try {
+      if (file.storageMode === 'link') {
+        const snapshot = await saveLinkedRevisionSnapshot(file);
+        await applyFileUpdate(project.files.map((item) => item.id === file.id ? snapshot.latest : item).concat(snapshot.revision));
+        if (snapshot.cleanupPaths.length) await deleteManagedFiles(snapshot.cleanupPaths);
+        return;
+      }
       if (file.type === 'folder') {
         const checkedChildren = await Promise.all((file.folderFiles || []).map(async (child) => {
-          const currentHash = await fileHash(child.path);
+          const currentHash = await fileHash(child.path, file.storageMode === 'link' && isHostSyncClient());
           return {
             ...child,
             contentHash: currentHash,
@@ -6967,7 +7136,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
         });
         return;
       }
-      const currentHash = await fileHash(file.path);
+      const currentHash = await fileHash(file.path, file.storageMode === 'link' && isHostSyncClient());
       updateFile(file.id, {
         contentHash: currentHash,
         baselineHash: currentHash,
@@ -7207,30 +7376,6 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
 
       if (file.storageMode === 'link') {
         const now = new Date();
-        const nextRevisionCheckAt = effectiveRevisionSettings.delayEnabled
-          ? new Date(now.getTime() + effectiveRevisionSettings.delayMinutes * 60000).toISOString()
-          : '';
-        if (!effectiveRevisionSettings.trackLinkedFiles) {
-          onUpdate({
-            files: project.files.map((item) => item.id === file.id ? {
-              ...item,
-              contentHash: currentHash,
-              baselineHash: currentHash,
-              integrityStatus: 'ok',
-              integrityCheckedAt: now.toISOString(),
-              nextRevisionCheckAt,
-            } : item),
-          });
-          setEditSessions((current) => ({
-            ...current,
-            [file.id]: {
-              ...providedSession,
-              baseHash: currentHash,
-            },
-          }));
-          if (!options.quiet) setFileError(`Updated linked file status for ${file.name}.`);
-          return true;
-        }
         const snapshot = await saveLinkedRevisionSnapshot(file, now);
         await applyFileUpdate(project.files.map((item) => item.id === file.id ? snapshot.latest : item).concat(snapshot.revision));
         if (snapshot.cleanupPaths.length) await deleteManagedFiles(snapshot.cleanupPaths);

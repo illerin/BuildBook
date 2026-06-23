@@ -1577,6 +1577,65 @@ article h3,
   margin: 0;
 }
 
+.note-sheet-add {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 2px 9px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.note-sheet-tabs {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.note-sheet-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 260px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  padding: 3px;
+  cursor: grab;
+}
+
+.note-sheet-tab.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.note-sheet-tab.dragging {
+  opacity: 0.55;
+}
+
+.note-sheet-name {
+  min-height: 24px;
+  padding: 2px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+}
+
+.note-sheet-tab input {
+  width: 150px;
+  min-height: 26px;
+  padding: 3px 7px;
+}
+
+.note-sheet-rename,
+.note-sheet-delete {
+  min-height: 24px;
+  padding: 2px 7px;
+  font-size: 11px;
+}
+
 .image-note-picker {
   min-height: 28px;
   padding: 4px 8px;

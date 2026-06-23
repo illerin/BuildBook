@@ -280,8 +280,19 @@ export function normalizeState(raw, options = {}) {
         color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
       })),
     },
-    projects: (Array.isArray(state.projects) ? state.projects : DEFAULT_STATE.projects).map((project) => ({
+    projects: (Array.isArray(state.projects) ? state.projects : DEFAULT_STATE.projects).map((project) => {
+      const rawNoteSheets = Array.isArray(project.noteSheets) ? project.noteSheets : [];
+      const noteSheets = rawNoteSheets.length
+        ? rawNoteSheets.map((sheet, index) => ({
+            id: String(sheet.id || `note-sheet-${index + 1}`),
+            title: String(sheet.title || (index === 0 ? 'Project Notes' : `Notes ${index + 1}`)).trim() || (index === 0 ? 'Project Notes' : `Notes ${index + 1}`),
+            content: String(sheet.content ?? sheet.notes ?? ''),
+          }))
+        : [{ id: 'project-notes', title: 'Project Notes', content: String(project.notes || '') }];
+      return {
       ...project,
+      notes: noteSheets[0]?.content || String(project.notes || ''),
+      noteSheets,
       revisionSettingsOverride: project.revisionSettingsOverride && typeof project.revisionSettingsOverride === 'object'
         ? {
             ...DEFAULT_REVISION_SETTINGS,
@@ -315,7 +326,8 @@ export function normalizeState(raw, options = {}) {
         intro: project.instructions.intro || '',
         steps: Array.isArray(project.instructions.steps) ? project.instructions.steps : [],
       } : { intro: '', steps: [] },
-    })),
+    };
+    }),
     parts: (Array.isArray(state.parts) ? state.parts : DEFAULT_STATE.parts).map((part) => ({
       ...part,
       ...normalizePartStorage(part, storageLocations),
