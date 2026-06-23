@@ -1583,6 +1583,7 @@ article h3,
   padding: 2px 9px;
   font-size: 18px;
   line-height: 1;
+  flex: 0 0 auto;
 }
 
 .note-sheet-tabs {
@@ -1629,7 +1630,6 @@ article h3,
   padding: 3px 7px;
 }
 
-.note-sheet-rename,
 .note-sheet-delete {
   min-height: 24px;
   padding: 2px 7px;

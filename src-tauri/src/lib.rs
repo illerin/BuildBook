@@ -1180,7 +1180,7 @@ fn merge_sync_values(
             serde_json::Value::String(_),
             serde_json::Value::String(local_text),
             serde_json::Value::String(host_text),
-        ) if path.starts_with("projects[") && path.ends_with(".notes") => {
+        ) if path.starts_with("projects[") && (path.ends_with(".notes") || (path.contains(".noteSheets[") && path.ends_with(".content"))) => {
             if local_text.trim().is_empty() {
                 host.clone()
             } else if host_text.trim().is_empty() {
@@ -5126,6 +5126,19 @@ mod sync_tests {
 
         let merged = merge_sync_values(&base, &local, &host, "", "Laptop");
         let notes = merged["projects"][0]["notes"].as_str().unwrap_or_default();
+        assert!(notes.contains("Host note"));
+        assert!(notes.contains("Combined notes from Laptop"));
+        assert!(notes.contains("Local note"));
+    }
+
+    #[test]
+    fn combines_conflicting_project_note_sheet_content() {
+        let base = serde_json::json!({ "projects": [{ "id": "a", "noteSheets": [{ "id": "sheet-1", "content": "Base" }] }] });
+        let local = serde_json::json!({ "projects": [{ "id": "a", "noteSheets": [{ "id": "sheet-1", "content": "Local note" }] }] });
+        let host = serde_json::json!({ "projects": [{ "id": "a", "noteSheets": [{ "id": "sheet-1", "content": "Host note" }] }] });
+
+        let merged = merge_sync_values(&base, &local, &host, "", "Laptop");
+        let notes = merged["projects"][0]["noteSheets"][0]["content"].as_str().unwrap_or_default();
         assert!(notes.contains("Host note"));
         assert!(notes.contains("Combined notes from Laptop"));
         assert!(notes.contains("Local note"));

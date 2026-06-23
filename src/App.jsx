@@ -3020,6 +3020,7 @@ export default function App() {
     } catch (error) {
       setConnectionState('conflict');
       setSaveState(`error: ${String(error?.message || error).slice(0, 160)}`);
+      throw error;
     }
   };
 
@@ -3036,6 +3037,7 @@ export default function App() {
     } catch (error) {
       setConnectionState('conflict');
       setSaveState(`error: ${String(error?.message || error).slice(0, 160)}`);
+      throw error;
     }
   };
 
@@ -3115,6 +3117,7 @@ function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve })
   const items = summary?.items || [];
   const [choices, setChoices] = useState(() => Object.fromEntries(items.map((item) => [item.path, 'combine'])));
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
 
   const setChoice = (path, choice) => {
     setChoices((current) => ({ ...current, [path]: choice }));
@@ -3122,8 +3125,23 @@ function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve })
 
   const submit = async () => {
     setBusy(true);
+    setError('');
     try {
       await onResolve(items.map((item) => ({ path: item.path, choice: choices[item.path] || 'combine' })));
+    } catch (resolveError) {
+      setError(String(resolveError?.message || resolveError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolveAll = async (choice) => {
+    setBusy(true);
+    setError('');
+    try {
+      await onResolveAll(choice);
+    } catch (resolveError) {
+      setError(String(resolveError?.message || resolveError));
     } finally {
       setBusy(false);
     }
@@ -3136,6 +3154,7 @@ function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve })
           <h2>Review Sync Conflict</h2>
         </div>
         <p className="settings-note">Host and this computer both changed before synchronization finished. Resolve this before additional changes can sync to the host.</p>
+        {error && <div className="inline-error">{error}</div>}
         {items.length ? (
           <div className="sync-conflict-review-list">
             {items.map((item) => (
@@ -3168,9 +3187,9 @@ function SyncConflictReviewModal({ summary, onCancel, onResolveAll, onResolve })
           </div>
         )}
         <div className="modal-actions">
-          <button className="secondary" onClick={() => onResolveAll('host')} disabled={busy}>Use Host</button>
-          <button className="secondary" onClick={() => onResolveAll('combine')} disabled={busy}>Combine</button>
-          <button className="secondary" onClick={() => onResolveAll('local')} disabled={busy}>Use This Computer</button>
+          <button className="secondary" onClick={() => resolveAll('host')} disabled={busy}>Use Host</button>
+          <button className="secondary" onClick={() => resolveAll('combine')} disabled={busy}>Combine</button>
+          <button className="secondary" onClick={() => resolveAll('local')} disabled={busy}>Use This Computer</button>
           {items.length ? <button onClick={submit} disabled={busy}>{busy ? 'Resolving...' : 'Resolve Selected'}</button> : null}
           <button className="ghost" onClick={onCancel} disabled={busy}>Later</button>
         </div>
@@ -4484,12 +4503,8 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
   return (
     <div className="dashboard-grid">
       <article className="notes-card">
-        <div className="section-title">
-          <h3>Project Notes</h3>
-          <button className="icon-button note-sheet-add" title="Add note sheet" onClick={addNoteSheet}>+</button>
-        </div>
         <div className="note-sheet-tabs">
-          {noteSheets.map((sheet) => (
+          {noteSheets.map((sheet, index) => (
             <div
               key={sheet.id}
               className={`note-sheet-tab ${activeNoteSheet?.id === sheet.id ? 'active' : ''} ${draggingNoteSheetId === sheet.id ? 'dragging' : ''}`}
@@ -4525,10 +4540,10 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
                   {sheet.title}
                 </button>
               )}
-              <button className="ghost note-sheet-rename" title="Rename note sheet" onClick={() => setEditingNoteSheetId(sheet.id)}>Rename</button>
-              {noteSheets.length > 1 && <button className="ghost note-sheet-delete" title="Delete note sheet" onClick={() => deleteNoteSheet(sheet.id)}>x</button>}
+              {index > 0 && <button className="ghost note-sheet-delete" title="Delete note sheet" onClick={() => deleteNoteSheet(sheet.id)}>x</button>}
             </div>
           ))}
+          <button className="icon-button note-sheet-add" title="Add note sheet" onClick={addNoteSheet}>+</button>
         </div>
         <RichTextEditor value={activeNoteSheet?.content || ''} onChange={(notes) => updateNoteSheetContent(activeNoteSheet.id, notes)} onUploadImage={addNoteImage} placeholder="Document wiring, pin choices, firmware notes, problems, and decisions..." />
       </article>
