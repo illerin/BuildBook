@@ -1,8 +1,8 @@
-# BuildBook 0.4.0-test.9 Test Release
+# BuildBook 0.4.0-test.10 Test Release
 
-Changes since test-v0.4.0-test.8.
+Changes since test-v0.4.0-test.9.
 
 ## Changes
 
-- More connected client fixes
+- Fixing some bugs in file tracking
 
