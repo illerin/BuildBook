@@ -1,8 +1,8 @@
-# BuildBook 0.4.0-test.10 Test Release
+# BuildBook 0.4.0-test.11 Test Release
 
-Changes since test-v0.4.0-test.9.
+Changes since test-v0.4.0-test.10.
 
 ## Changes
 
-- Fixing some bugs in file tracking
+- More adjustments to sync/combine methods
 
