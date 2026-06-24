@@ -127,6 +127,18 @@ export function createZip(entries) {
 
 export async function readZip(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
+  const compressedEntries = await readZipEntries(bytes);
+  const entries = new Map();
+  for (const [name, entry] of compressedEntries) {
+    if (entry.method === 0) entries.set(name, entry.data);
+    else if (entry.method === 8) entries.set(name, await inflateRaw(entry.data));
+    else throw new Error(`ZIP compression method ${entry.method} is not supported.`);
+  }
+  return entries;
+}
+
+export async function readZipEntries(bytes) {
+  bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const entries = new Map();
   let eocd = -1;
@@ -157,15 +169,21 @@ export async function readZip(file) {
     const data = bytes.slice(dataStart, dataStart + compressedSize);
 
     if (!name.endsWith('/')) {
-      if (method === 0) entries.set(name, data);
-      else if (method === 8) entries.set(name, await inflateRaw(data));
-      else throw new Error(`ZIP compression method ${method} is not supported.`);
+      entries.set(name, { method, data });
     }
 
     centralOffset += 46 + nameLength + extraLength + commentLength;
   }
 
   return entries;
+}
+
+export async function zipEntryText(entries, name) {
+  const entry = entries.get(name);
+  if (!entry) return '';
+  if (entry.method === 0) return decoder.decode(entry.data);
+  if (entry.method === 8) return decoder.decode(await inflateRaw(entry.data));
+  throw new Error(`ZIP compression method ${entry.method} is not supported.`);
 }
 
 async function inflateRaw(data) {

@@ -40,7 +40,6 @@ import {
   pickLinkedFolderPath,
   pickLinkedFilePath,
   prepareEditableFile,
-  probeBuildBookHost,
   readSyncConflictSummary,
   readSyncConfig,
   readSyncStatusDashboard,
@@ -60,7 +59,7 @@ import {
   writeSyncConfig,
 } from './desktop';
 import { fetchWebAuthStatus, getLastSyncStatus, isRemoteBuildBookClient, loadAppState, saveAppState, webLogin, webLogout } from './storage';
-import { createZip, readZip, zipText } from './zip';
+import { createZip, readZip, readZipEntries, zipEntryText, zipText } from './zip';
 
 const TABS = [
   ['projects', 'Projects'],
@@ -89,6 +88,7 @@ const DEFAULT_PROJECT_EXPORT_OPTIONS = {
 };
 
 const SYNC_BOOTSTRAP_KEY = 'buildbook-sync-bootstrap';
+const BUILDBOOK_SYNC_PORT = 8788;
 
 const ConfirmContext = createContext(null);
 
@@ -532,6 +532,12 @@ function pickColumn(headers, names) {
   return names.map((name) => normalized.indexOf(name)).find((index) => index >= 0) ?? -1;
 }
 
+function parseImportQuantity(value) {
+  const match = String(value || '').replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+  if (!match) return 1;
+  return Math.max(1, Math.round(Number(match[0]) || 1));
+}
+
 function createImportItemsFromRows(rows, parts, categories) {
   if (!rows.length) return [];
   const headers = rows[0].map((header) => header.trim());
@@ -539,6 +545,7 @@ function createImportItemsFromRows(rows, parts, categories) {
   const urlIndex = pickColumn(headers, ['url', 'producturl', 'productpageurl', 'productpage', 'link', 'productlink', 'itemurl']);
   const imageIndex = pickColumn(headers, ['image', 'imageurl', 'productimage', 'productimageurl', 'mainimage', 'mainimageurl', 'picture', 'thumbnail', 'thumbnailurl', 'imagelink', 'photourl']);
   const skuIndex = pickColumn(headers, ['sku', 'digikeypartnumber', 'supplierpartnumber']);
+  const quantityIndex = pickColumn(headers, ['quantity', 'qty', 'orderquantity', 'orderedquantity', 'qtyordered', 'itemquantity']);
   const rowsToUse = nameIndex >= 0 ? rows.slice(1) : rows;
 
   return rowsToUse.map((row) => {
@@ -556,6 +563,7 @@ function createImportItemsFromRows(rows, parts, categories) {
       productUrl,
       imageUrl: (imageIndex >= 0 ? row[imageIndex] : '')?.trim() || '',
       sku: (skuIndex >= 0 ? row[skuIndex] : '')?.trim() || '',
+      quantity: quantityIndex >= 0 ? parseImportQuantity(row[quantityIndex]) : 1,
       categoryId: suggestCategoryId(name, categories),
       status: 'draft',
       action: exactMatch || nameMatch ? 'merge' : 'create',
@@ -788,6 +796,42 @@ function escapeHtml(value) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+const RICH_TEXT_ALLOWED_TAGS = new Set([
+  'A',
+  'B',
+  'BLOCKQUOTE',
+  'BR',
+  'CODE',
+  'DIV',
+  'EM',
+  'H1',
+  'H2',
+  'H3',
+  'H4',
+  'H5',
+  'H6',
+  'I',
+  'IMG',
+  'LI',
+  'OL',
+  'P',
+  'PRE',
+  'S',
+  'SPAN',
+  'STRIKE',
+  'STRONG',
+  'U',
+  'UL',
+]);
+
+function safeRichTextUrl(value, allowImages = false) {
+  const url = String(value || '').trim();
+  if (!url) return '';
+  if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) return url;
+  if (allowImages && (/^data:image\//i.test(url) || /^blob:/i.test(url))) return url;
+  return '';
 }
 
 function buildProjectReadme(project, parts, categories, fileTrackers) {
@@ -2514,6 +2558,7 @@ export default function App() {
   const [connectionState, setConnectionState] = useState(isRemoteBuildBookClient() ? 'checking' : 'local');
   const [syncConflictSummary, setSyncConflictSummary] = useState(null);
   const [showConflictReview, setShowConflictReview] = useState(false);
+  const [desktopNotice, setDesktopNotice] = useState('');
   const [remoteUnsaved, setRemoteUnsaved] = useState(false);
   const [bootstrapProgress, setBootstrapProgress] = useState(() => {
     if (!window.__TAURI_INTERNALS__) return null;
@@ -2636,6 +2681,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const handleDesktopNotice = (event) => setDesktopNotice(String(event.detail?.message || ''));
+    window.addEventListener('buildbook-desktop-notice', handleDesktopNotice);
+    return () => window.removeEventListener('buildbook-desktop-notice', handleDesktopNotice);
+  }, []);
+
+  useEffect(() => {
     if (!window.__TAURI_INTERNALS__ || connectionState !== 'conflict') {
       setSyncConflictSummary(null);
       return undefined;
@@ -2743,17 +2794,21 @@ export default function App() {
     }
     const lan = state.lanServer || {};
     const webAuth = state.webAuth || DEFAULT_WEB_AUTH;
+    const hostMode = syncConfig?.mode === 'host';
+    const desiredPort = hostMode ? BUILDBOOK_SYNC_PORT : (lan.port || 8787);
+    const browserEnabled = !hostMode || lan.enabled === true;
+    const requireToken = hostMode && !lan.enabled ? true : lan.requireToken !== false;
     if (webAuth.enabled && !webAuth.sessionSecret) {
       updateState((current) => ({ ...current, webAuth: { ...(current.webAuth || DEFAULT_WEB_AUTH), sessionSecret: randomSecret() } }));
       return;
     }
-    if (lan.enabled && lan.requireToken !== false && !lan.token) {
+    if ((lan.enabled || hostMode) && requireToken && !lan.token) {
       const token = crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       updateState((current) => ({ ...current, lanServer: { ...(current.lanServer || {}), token } }));
       return;
     }
-    if (lan.enabled && (lan.token || lan.requireToken === false)) {
-      startLanServer(lan.port || 8787, lan.token || '', lan.requireToken !== false, webAuth).catch((error) => console.error(error));
+    if ((lan.enabled || hostMode) && (lan.token || !requireToken)) {
+      startLanServer(desiredPort, lan.token || '', requireToken, webAuth, browserEnabled).catch((error) => console.error(error));
       return;
     }
     stopLanServer().catch(() => {});
@@ -2769,6 +2824,7 @@ export default function App() {
     state?.webAuth?.passwordHash,
     state?.webAuth?.sessionSecret,
     state?.webAuth?.rememberDays,
+    syncConfig?.mode,
   ]);
 
   useEffect(() => {
@@ -3099,6 +3155,12 @@ export default function App() {
             {bootstrapProgress.total > 0 && (
               <progress value={bootstrapProgress.current} max={bootstrapProgress.total} />
             )}
+          </div>
+        )}
+        {desktopNotice && (
+          <div className="workspace-notice">
+            <span>{desktopNotice}</span>
+            <button className="ghost" onClick={() => setDesktopNotice('')}>Dismiss</button>
           </div>
         )}
         {tab === 'projects' && <Projects state={state} updateState={updateState} />}
@@ -3739,30 +3801,41 @@ function sanitizePastedRichText(html, plainText = '') {
   }
   const doc = new DOMParser().parseFromString(html, 'text/html');
   doc.body.querySelectorAll('*').forEach((node) => {
+    if (['SCRIPT', 'STYLE', 'IFRAME', 'OBJECT', 'EMBED', 'META', 'LINK'].includes(node.tagName)) {
+      node.remove();
+      return;
+    }
+    if (!RICH_TEXT_ALLOWED_TAGS.has(node.tagName)) {
+      node.replaceWith(...node.childNodes);
+      return;
+    }
     [...node.attributes].forEach((attribute) => {
       const name = attribute.name.toLowerCase();
-      if (name === 'style') {
-        const kept = attribute.value
-          .split(';')
-          .map((rule) => rule.trim())
-          .filter((rule) => rule && !/^(color|background|background-color)\s*:/i.test(rule))
-          .join('; ');
-        if (kept) node.setAttribute('style', kept);
-        else node.removeAttribute('style');
-      } else if (name.startsWith('on') || name === 'class') {
+      if (name.startsWith('on') || name === 'class' || name === 'style') {
         node.removeAttribute(attribute.name);
       } else if (node.tagName !== 'A' && name === 'href') {
+        node.removeAttribute(attribute.name);
+      } else if (node.tagName !== 'IMG' && name === 'src') {
+        node.removeAttribute(attribute.name);
+      } else if (node.tagName !== 'IMG' && name.startsWith('data-')) {
+        node.removeAttribute(attribute.name);
+      } else if (!['href', 'src', 'alt', 'title'].includes(name) && !name.startsWith('data-project-image-')) {
         node.removeAttribute(attribute.name);
       }
     });
     if (node.tagName === 'A') {
-      const href = node.getAttribute('href') || '';
-      if (!/^(https?:|mailto:)/i.test(href)) {
+      const href = safeRichTextUrl(node.getAttribute('href'));
+      if (!href) {
         node.removeAttribute('href');
       } else {
+        node.setAttribute('href', href);
         node.setAttribute('target', '_blank');
         node.setAttribute('rel', 'noopener noreferrer');
       }
+    } else if (node.tagName === 'IMG') {
+      const src = safeRichTextUrl(node.getAttribute('src'), true);
+      if (!src) node.remove();
+      else node.setAttribute('src', src);
     }
   });
   return doc.body.innerHTML;
@@ -5583,57 +5656,6 @@ function CsvPreview({ file }) {
       </table>
     </div>
   );
-}
-
-async function inflateZipEntry(data, method) {
-  if (method === 0) return data;
-  if (method !== 8) throw new Error('Unsupported XLSX compression.');
-  if (!('DecompressionStream' in window)) throw new Error('This system cannot decompress XLSX files inline.');
-
-  const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function readZipEntries(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let eocd = -1;
-  for (let index = bytes.length - 22; index >= 0; index -= 1) {
-    if (view.getUint32(index, true) === 0x06054b50) {
-      eocd = index;
-      break;
-    }
-  }
-  if (eocd < 0) throw new Error('Invalid XLSX file.');
-
-  const entryCount = view.getUint16(eocd + 10, true);
-  let offset = view.getUint32(eocd + 16, true);
-  const entries = new Map();
-  const decoder = new TextDecoder();
-
-  for (let index = 0; index < entryCount; index += 1) {
-    if (view.getUint32(offset, true) !== 0x02014b50) break;
-    const method = view.getUint16(offset + 10, true);
-    const compressedSize = view.getUint32(offset + 20, true);
-    const nameLength = view.getUint16(offset + 28, true);
-    const extraLength = view.getUint16(offset + 30, true);
-    const commentLength = view.getUint16(offset + 32, true);
-    const localOffset = view.getUint32(offset + 42, true);
-    const name = decoder.decode(bytes.slice(offset + 46, offset + 46 + nameLength));
-    const localNameLength = view.getUint16(localOffset + 26, true);
-    const localExtraLength = view.getUint16(localOffset + 28, true);
-    const dataStart = localOffset + 30 + localNameLength + localExtraLength;
-    const compressed = bytes.slice(dataStart, dataStart + compressedSize);
-    entries.set(name, { method, data: compressed });
-    offset += 46 + nameLength + extraLength + commentLength;
-  }
-
-  return entries;
-}
-
-async function zipEntryText(entries, name) {
-  const entry = entries.get(name);
-  if (!entry) return '';
-  return new TextDecoder().decode(await inflateZipEntry(entry.data, entry.method));
 }
 
 function xmlDoc(text) {
@@ -9140,6 +9162,7 @@ function Imports({ state, updateState }) {
           ...(imagePath ? { image: imagePath } : {}),
           notes: [
             item.sku ? `Imported SKU: ${item.sku}` : '',
+            item.quantity > 1 ? `Imported quantity: ${item.quantity}` : '',
           ].filter(Boolean).join('\n'),
           updatedAt: new Date().toISOString(),
         };
@@ -9233,7 +9256,7 @@ function Imports({ state, updateState }) {
       <section className="panel upload-card">
         <div>
           <h3>Import CSV or PDF</h3>
-          <p>Upload supplier exports, invoices, or order files to create draft parts. Quantity columns are ignored.</p>
+          <p>Upload supplier exports, invoices, or order files to create draft parts. Quantity columns are preserved in import notes.</p>
         </div>
         <label className="file-picker header-picker">
           <input
@@ -9295,6 +9318,7 @@ function Imports({ state, updateState }) {
                     )}
                     <input value={item.name} onChange={(event) => updateItem(selectedBatch.id, item.id, { name: event.target.value })} disabled={item.status !== 'draft'} />
                     <span>{item.matchQuality === 'none' ? 'No suggestion' : item.matchQuality === 'exact' ? 'Exact match' : 'Recommended match'}</span>
+                    {item.quantity > 1 && <small>Quantity: {item.quantity}</small>}
                     {item.productUrl && <small>{item.productUrl}</small>}
                     {item.imageUrl && <small>{item.imagePath ? 'Image saved locally' : item.imageUrl}</small>}
                   </div>
@@ -9383,7 +9407,6 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
   const [syncConfig, setSyncConfig] = useState(null);
   const [syncDeviceName, setSyncDeviceName] = useState('');
   const [syncHostUrl, setSyncHostUrl] = useState('');
-  const [syncHostToken, setSyncHostToken] = useState('');
   const [syncPairingCode, setSyncPairingCode] = useState('');
   const [syncHosts, setSyncHosts] = useState([]);
   const [syncBusy, setSyncBusy] = useState(false);
@@ -9392,6 +9415,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
   const [syncDashboard, setSyncDashboard] = useState(null);
   const [syncPrefetchProgress, setSyncPrefetchProgress] = useState('');
   const syncClientMode = syncConfig?.mode === 'client';
+  const syncHostMode = syncConfig?.mode === 'host';
   const networkControlledByHost = remoteClient || hostSyncClient || syncClientMode;
   const syncClientNeedsRepair = syncClientMode && Boolean(syncDashboard?.lastSyncError);
 
@@ -9422,7 +9446,6 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
         setSyncConfig(config);
         setSyncDeviceName(config.deviceName || '');
         setSyncHostUrl(config.hostUrl || '');
-        setSyncHostToken(config.hostToken || '');
         setSyncPairingCode('');
       })
       .catch((error) => setSyncError(String(error)));
@@ -9490,11 +9513,11 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
       setSyncConfig(saved);
       readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       updateLanServer({
-        enabled: true,
+        port: BUILDBOOK_SYNC_PORT,
         requireToken: state.lanServer?.requireToken !== false,
         token: state.lanServer?.token || (crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`),
       });
-      setSyncNotice('This computer is now marked as the BuildBook host. LAN access is starting.');
+      setSyncNotice(`This computer is now the BuildBook host. Sync runs on port ${BUILDBOOK_SYNC_PORT}.`);
     } catch (error) {
       setSyncError(String(error));
     } finally {
@@ -9508,7 +9531,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
     setSyncNotice('');
     try {
       const primaryPort = state.lanServer?.port || 8787;
-      const ports = [...new Set([primaryPort, 8787])];
+      const ports = [...new Set([BUILDBOOK_SYNC_PORT, primaryPort, 8787])];
       const hostGroups = await Promise.all(ports.map((port) => discoverBuildBookHosts(port).catch(() => [])));
       const hosts = hostGroups
         .flat()
@@ -9596,6 +9619,10 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
 
   const connectToHost = async () => {
     if (!syncConfig || !syncHostUrl.trim()) return;
+    if (!syncPairingCode.trim()) {
+      setSyncError('Enter the pairing code from the host computer.');
+      return;
+    }
     const confirmed = await confirm({
       title: 'Connect to host',
       message: 'Use this host as the authoritative BuildBook source? This computer will keep a local cache, but its current standalone data will not be merged or uploaded.',
@@ -9606,15 +9633,9 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
     setSyncError('');
     setSyncNotice('');
     try {
-      let info = null;
-      let clientAuthToken = '';
-      if (syncPairingCode.trim()) {
-        const paired = await pairBuildBookHost(syncHostUrl, syncPairingCode.trim());
-        info = paired.host;
-        clientAuthToken = paired.deviceToken;
-      } else {
-        info = await probeBuildBookHost(syncHostUrl, syncHostToken);
-      }
+      const paired = await pairBuildBookHost(syncHostUrl, syncPairingCode.trim());
+      const info = paired.host;
+      const clientAuthToken = paired.deviceToken;
       if (!info.hostingEnabled) {
         throw new Error(`${info.deviceName || 'That computer'} is serving BuildBook, but it has not been configured as an authoritative host.`);
       }
@@ -9623,7 +9644,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
         mode: 'client',
         deviceName: syncDeviceName.trim() || syncConfig.deviceName,
         hostUrl: info.url,
-        hostToken: syncPairingCode.trim() ? '' : syncHostToken.trim(),
+        hostToken: '',
         clientAuthToken,
         hostRevision: '',
         pendingSync: false,
@@ -9634,7 +9655,6 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
       readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       setSyncHostUrl(info.url);
       setSyncPairingCode('');
-      setSyncHostToken('');
       setSyncNotice(`Connected to ${info.deviceName}. Loading host data...`);
       sessionStorage.setItem(SYNC_BOOTSTRAP_KEY, '1');
       window.setTimeout(() => window.location.reload(), 250);
@@ -9664,7 +9684,6 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
       setSyncConfig(saved);
       readSyncStatusDashboard().then(setSyncDashboard).catch(() => {});
       setSyncHostUrl('');
-      setSyncHostToken('');
       setSyncPairingCode('');
       setSyncHosts([]);
       setSyncNotice('This computer is using its standalone local data.');
@@ -9781,9 +9800,16 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
       setLanBusy(true);
       setLanError('');
       try {
+        const hostMode = syncConfig?.mode === 'host';
+        const desiredPort = hostMode ? BUILDBOOK_SYNC_PORT : (state.lanServer?.port || 8787);
+        const browserEnabled = !hostMode || state.lanServer?.enabled === true;
+        const requireToken = hostMode && !state.lanServer?.enabled ? true : state.lanServer?.requireToken !== false;
+        if ((state.lanServer?.enabled || hostMode) && requireToken && !state.lanServer?.token) {
+          updateLanServer({ token: crypto?.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}` });
+          return;
+        }
         if (networkControlledByHost) {
           const token = state.lanServer?.token || '';
-          const requireToken = state.lanServer?.requireToken !== false;
           const hostUrl = syncConfig?.hostUrl || '';
           const accessUrl = hostUrl ? (requireToken && token ? `${hostUrl}?access=${encodeURIComponent(token)}` : hostUrl) : '';
           const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
@@ -9794,14 +9820,14 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
           }
           return;
         }
-        if (state.lanServer?.enabled) {
-          const token = state.lanServer.token;
-          const requireToken = state.lanServer.requireToken !== false;
-          const info = await startLanServer(state.lanServer.port || 8787, token || '', requireToken, state.webAuth || DEFAULT_WEB_AUTH);
-          const accessUrl = info.url ? (requireToken ? `${info.url}?access=${encodeURIComponent(token)}` : info.url) : '';
+        if (state.lanServer?.enabled || hostMode) {
+          const token = state.lanServer?.token || '';
+          const info = await startLanServer(desiredPort, token || '', requireToken, state.webAuth || DEFAULT_WEB_AUTH, browserEnabled);
+          const showBrowserAccess = state.lanServer?.enabled === true;
+          const accessUrl = showBrowserAccess && info.url ? (requireToken ? `${info.url}?access=${encodeURIComponent(token)}` : info.url) : '';
           const qr = accessUrl ? await QRCode.toDataURL(accessUrl, { margin: 1, width: 180, color: { dark: '#0d1117', light: '#ffffff' } }) : '';
           if (active) {
-            setLanNotice(info.url ? `LAN server running at ${info.url}` : 'LAN server running.');
+            setLanNotice(info.url ? `${hostMode ? 'Sync host' : 'LAN server'} running at ${info.url}` : `${hostMode ? 'Sync host' : 'LAN server'} running.`);
             setLanAccessUrl(accessUrl);
             setLanQr(qr);
           }
@@ -9828,6 +9854,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
     state.lanServer?.token,
     state.lanServer?.requireToken,
     networkControlledByHost,
+    syncConfig?.mode,
     syncConfig?.hostUrl,
     state.webAuth?.enabled,
     state.webAuth?.scope,
@@ -10151,7 +10178,14 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
             <p>Find orphaned files and thumbnails no longer referenced by any project.</p>
           </div>
           <div className="settings-actions">
-            <button className="secondary" onClick={runStorageScan} disabled={storageBusy || hostSyncClient}>{storageBusy ? 'Working...' : 'Scan Storage'}</button>
+            <button
+              className="secondary"
+              onClick={runStorageScan}
+              disabled={storageBusy || hostSyncClient}
+              title={hostSyncClient ? 'This setting is only editable on the host computer.' : undefined}
+            >
+              {storageBusy ? 'Working...' : 'Scan Storage'}
+            </button>
             {storageScan && <button onClick={runStorageCleanup} disabled={storageBusy || !selectedOrphans.size}>Delete Selected</button>}
             {storageScan && <button className="danger-fill" onClick={runFullStorageCleanup} disabled={storageBusy || !storageScan.orphans?.length}>Delete All Orphaned Files</button>}
           </div>
@@ -10270,14 +10304,23 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
                   <strong>Sync Status</strong>
                   <span>{syncDashboard.pendingSync ? 'Pending local changes' : syncDashboard.mode === 'client' ? 'Connected cache' : syncDashboard.mode === 'host' ? 'Host ready' : 'Standalone'}</span>
                 </div>
-                <div>
-                  <strong>Paired Devices</strong>
-                  <span>{(syncDashboard.pairedDevices || []).filter((device) => !device.revoked).length} active, {(syncDashboard.pairedDevices || []).filter((device) => device.revoked).length} revoked</span>
-                </div>
+                {syncDashboard.mode === 'client' ? (
+                  <div>
+                    <strong>Paired Device</strong>
+                    <span>Managed by host</span>
+                  </div>
+                ) : (
+                  <div>
+                    <strong>Paired Devices</strong>
+                    <span>{(syncDashboard.pairedDevices || []).filter((device) => !device.revoked).length} active, {(syncDashboard.pairedDevices || []).filter((device) => device.revoked).length} revoked</span>
+                  </div>
+                )}
+                {syncDashboard.mode === 'client' && (
                 <div>
                   <strong>Client Cache</strong>
                   <span>{syncDashboard.cacheFileCount || 0} files, {compactBytes(syncDashboard.cacheBytes || 0)}</span>
                 </div>
+                )}
                 {syncDashboard.hostUrl && (
                   <div>
                     <strong>Host</strong>
@@ -10325,7 +10368,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
                 </div>
               </div>
             )}
-            {(!syncClientMode || syncClientNeedsRepair) && <div className="sync-connect-panel">
+            {syncConfig?.mode !== 'host' && (!syncClientMode || syncClientNeedsRepair) && <div className="sync-connect-panel">
               <div className="section-title">
                 <h3>Connect to a Host</h3>
                 <button className="secondary" onClick={discoverHosts} disabled={syncBusy}>{syncBusy ? 'Working...' : 'Find Hosts'}</button>
@@ -10348,17 +10391,13 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               <div className="sync-connect-row">
                 <label>
                   Host address
-                  <input value={syncHostUrl} onChange={(event) => setSyncHostUrl(event.target.value)} placeholder="http://192.168.1.20:8787" />
+                  <input value={syncHostUrl} onChange={(event) => setSyncHostUrl(event.target.value)} placeholder={`http://192.168.1.20:${BUILDBOOK_SYNC_PORT}`} />
                 </label>
                 <label>
                   Pairing code
                   <input value={syncPairingCode} onChange={(event) => setSyncPairingCode(event.target.value)} placeholder="8 digit code from host" />
                 </label>
-                <label>
-                  Legacy access token
-                  <input type="password" value={syncHostToken} onChange={(event) => setSyncHostToken(event.target.value)} placeholder="Optional if disabled on host" />
-                </label>
-                <button onClick={connectToHost} disabled={syncBusy || !syncHostUrl.trim()}>Connect</button>
+                <button onClick={connectToHost} disabled={syncBusy || !syncHostUrl.trim() || !syncPairingCode.trim()}>Connect</button>
               </div>
             </div>}
           </>
@@ -10391,7 +10430,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
               max="65535"
               value={state.lanServer?.port || 8787}
               onChange={(event) => updateLanServer({ port: Number(event.target.value) || 8787 })}
-              disabled={state.lanServer?.enabled || networkControlledByHost}
+              disabled={state.lanServer?.enabled || networkControlledByHost || syncHostMode}
             />
           </label>
           <button className="secondary" onClick={regenerateLanToken} disabled={lanBusy || state.lanServer?.enabled || networkControlledByHost}>
@@ -10407,6 +10446,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
           />
           Require access token
         </label>
+        {syncHostMode && <p className="settings-note">Multi-computer sync runs on port {BUILDBOOK_SYNC_PORT}. Browser access can be toggled here without disconnecting paired computers.</p>}
         {(state.lanServer?.enabled || (networkControlledByHost && lanAccessUrl)) && (
           <div className="lan-access-box">
             {lanQr && <img src={lanQr} alt="BuildBook LAN access QR code" />}
@@ -10526,7 +10566,7 @@ function Settings({ state, updateState, activeSection = 'workspace' }) {
             <p>Delete managed uploads and restore all projects, parts, categories, and settings to first-install defaults.</p>
           </div>
           <div className="settings-actions">
-            <button className="danger-fill" disabled={hostSyncClient} onClick={() => {
+            <button className="danger-fill" disabled={hostSyncClient} title={hostSyncClient ? 'This setting is only editable on the host computer.' : undefined} onClick={() => {
               setResetError('');
               setResetPhrase('');
               setShowFullReset(true);

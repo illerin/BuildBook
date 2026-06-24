@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node scripts/compatibility-smoke.mjs",
+    "test": "node scripts/check-versions.mjs && node scripts/compatibility-smoke.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

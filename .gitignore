@@ -4,4 +4,4 @@ src-tauri/target
 src-tauri/gen
 *.log
 .DS_Store
-
+DESLOPPIFY.md

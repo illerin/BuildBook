@@ -7,6 +7,8 @@
   --sidebar: #161b22;
   --surface: #161b22;
   --surface-raised: #21262d;
+  --panel-soft: #111820;
+  --panel-strong: #1f2937;
   --field: #0d1117;
   --border: #30363d;
   --border-soft: #21262d;
@@ -15,6 +17,8 @@
   --text-soft: #c9d1d9;
   --accent: #58a6ff;
   --accent-fill: #1f6feb;
+  --accent-soft: rgba(88, 166, 255, 0.14);
+  --sidebar-active: #21262d;
   --success: #238636;
   --success-hover: #2ea043;
   --danger: #da3633;
@@ -68,7 +72,7 @@ button:hover {
 }
 
 button:disabled {
-  cursor: progress;
+  cursor: not-allowed;
   opacity: 0.7;
 }
 
@@ -235,6 +239,25 @@ label {
   background: var(--field);
   color: var(--text-soft);
   font-size: 12px;
+}
+
+.workspace-notice {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+  border: 1px solid var(--warning);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text-soft);
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.workspace-notice span {
+  overflow-wrap: anywhere;
 }
 
 .busy-spinner {

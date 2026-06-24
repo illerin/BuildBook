@@ -1,20 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { DEFAULT_STATE, normalizeState } from './data';
+import { apiHeaders, cacheSyncConfig, isLanWebClient, isTauri, lanToken as runtimeLanToken } from './runtime';
 
 const STORAGE_KEY = 'buildbook-state';
-const LAN_TOKEN_KEY = 'buildbook-lan-token';
-const APP_REQUEST_HEADER = '1';
-const SYNC_CONFIG_KEY = 'buildbook-sync-config';
 let lastSyncStatus = { status: 'local', pending: false, message: 'Using local BuildBook data.' };
-
-function isTauri() {
-  return Boolean(window.__TAURI_INTERNALS__);
-}
-
-function isLanWebClient() {
-  const isViteDev = ['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port === '5173';
-  return !isTauri() && window.location.protocol.startsWith('http') && !isViteDev;
-}
 
 export function isRemoteBuildBookClient() {
   return isLanWebClient();
@@ -35,23 +24,7 @@ export function getLastSyncStatus() {
 }
 
 export function lanToken() {
-  const access = new URLSearchParams(window.location.search).get('access');
-  if (access) {
-    localStorage.setItem(LAN_TOKEN_KEY, access);
-    const clean = `${window.location.pathname}${window.location.hash || ''}`;
-    window.history.replaceState({}, '', clean || '/');
-    return access;
-  }
-  return localStorage.getItem(LAN_TOKEN_KEY) || '';
-}
-
-function apiHeaders(extra = {}) {
-  const token = lanToken();
-  return {
-    ...extra,
-    'X-BuildBook-Request': APP_REQUEST_HEADER,
-    ...(token ? { 'X-BuildBook-Token': token } : {}),
-  };
+  return runtimeLanToken({ persistAccess: true, cleanUrl: true });
 }
 
 async function responseErrorMessage(response, fallback) {
@@ -71,7 +44,7 @@ async function responseErrorMessage(response, fallback) {
 export async function loadAppState() {
   if (isTauri()) {
     const config = await invoke('read_sync_config');
-    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+    cacheSyncConfig(config);
     if (config.mode === 'client') {
       const result = await invoke('sync_client_load');
       publishSyncStatus(result);
@@ -140,7 +113,7 @@ export async function saveAppState(state) {
 
   if (isTauri()) {
     const config = await invoke('read_sync_config');
-    localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
+    cacheSyncConfig(config);
     if (config.mode === 'client') {
       const result = await invoke('sync_client_save', { contents });
       publishSyncStatus(result);

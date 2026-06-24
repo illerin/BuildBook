@@ -1,8 +1,8 @@
 use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
@@ -13,6 +13,8 @@ use tauri::{
 };
 
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
+const HOST_RETRY_COOLDOWN_SECONDS: u64 = 15;
+const LAN_REQUEST_BODY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -219,6 +221,7 @@ struct SyncConfig {
     host_revision: String,
     pending_sync: bool,
     last_connected_at: u64,
+    last_sync_attempt_at: u64,
     last_sync_error: String,
     pairing_code: String,
     pairing_code_expires_at: u64,
@@ -263,6 +266,7 @@ impl Default for SyncConfig {
             host_revision: String::new(),
             pending_sync: false,
             last_connected_at: 0,
+            last_sync_attempt_at: 0,
             last_sync_error: String::new(),
             pairing_code: String::new(),
             pairing_code_expires_at: 0,
@@ -629,6 +633,7 @@ struct LanServerHandle {
     token: String,
     require_token: bool,
     web_auth: WebAuthConfig,
+    browser_enabled: bool,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     discovery_thread: Option<JoinHandle<()>>,
@@ -906,6 +911,22 @@ fn auth_header_name(config: &SyncConfig) -> &'static str {
     }
 }
 
+fn append_sync_device_query(endpoint: &mut reqwest::Url, config: &SyncConfig) {
+    if !config.client_auth_token.trim().is_empty() {
+        endpoint
+            .query_pairs_mut()
+            .append_pair("device", &config.device_id);
+    }
+}
+
+fn sync_endpoint(config: &SyncConfig, path: &str) -> Result<reqwest::Url, String> {
+    let host_url = normalized_host_url(&config.host_url)?;
+    let mut endpoint = reqwest::Url::parse(&format!("{host_url}{path}"))
+        .map_err(|error| format!("Could not create host sync address: {error}"))?;
+    append_sync_device_query(&mut endpoint, config);
+    Ok(endpoint)
+}
+
 fn sync_base_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let path = sync_config_path(app)?;
     Ok(path.with_file_name("buildbook-sync-base.json"))
@@ -955,13 +976,14 @@ fn compact_host_error(status: reqwest::StatusCode, body: String, context: &str) 
 }
 
 fn host_sync_get(config: &SyncConfig) -> Result<SyncStateEnvelope, String> {
-    let host_url = normalized_host_url(&config.host_url)?;
+    let endpoint = sync_endpoint(config, "/api/sync/state")?;
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(12))
+        .connect_timeout(std::time::Duration::from_millis(1200))
+        .timeout(std::time::Duration::from_secs(4))
         .build()
         .map_err(|error| format!("Could not prepare host connection: {error}"))?;
     let response = client
-        .get(format!("{host_url}/api/sync/state"))
+        .get(endpoint)
         .header("X-BuildBook-Request", "1")
         .header(auth_header_name(config), client_auth_header(config))
         .send()
@@ -977,12 +999,13 @@ fn host_sync_get(config: &SyncConfig) -> Result<SyncStateEnvelope, String> {
 }
 
 fn host_sync_revision(config: &SyncConfig) -> Result<String, String> {
-    let host_url = normalized_host_url(&config.host_url)?;
+    let endpoint = sync_endpoint(config, "/api/sync/revision")?;
     let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
+        .connect_timeout(std::time::Duration::from_millis(1200))
+        .timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|error| format!("Could not prepare host connection: {error}"))?
-        .get(format!("{host_url}/api/sync/revision"))
+        .get(endpoint)
         .header("X-BuildBook-Request", "1")
         .header(auth_header_name(config), client_auth_header(config))
         .send()
@@ -1008,7 +1031,7 @@ fn host_sync_write(
     contents: &str,
     force: bool,
 ) -> Result<HostSyncWrite, String> {
-    let host_url = normalized_host_url(&config.host_url)?;
+    let endpoint = sync_endpoint(config, "/api/sync/state")?;
     let state = serde_json::from_str::<serde_json::Value>(contents)
         .map_err(|error| format!("App state is not valid JSON: {error}"))?;
     let request = SyncStateWriteRequest {
@@ -1018,11 +1041,12 @@ fn host_sync_write(
         force: Some(force),
     };
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
+        .connect_timeout(std::time::Duration::from_millis(1200))
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|error| format!("Could not prepare host connection: {error}"))?;
     let response = client
-        .post(format!("{host_url}/api/sync/state"))
+        .post(endpoint)
         .header("X-BuildBook-Request", "1")
         .header(auth_header_name(config), client_auth_header(config))
         .json(&request)
@@ -1054,6 +1078,7 @@ fn mark_sync_success(
     config.host_revision = revision;
     config.pending_sync = false;
     config.last_connected_at = now_seconds();
+    config.last_sync_attempt_at = 0;
     config.last_sync_error.clear();
     save_sync_config(app, config)?;
     write_sync_snapshot(sync_base_path(app)?, contents)?;
@@ -1076,6 +1101,12 @@ fn mark_sync_conflict(
     let contents = serde_json::to_string_pretty(&envelope.contents)
         .map_err(|error| format!("Could not encode conflict state: {error}"))?;
     write_sync_snapshot(sync_conflict_path(app)?, &contents)
+}
+
+fn host_retry_on_cooldown(config: &SyncConfig) -> bool {
+    config.pending_sync
+        && !config.last_sync_error.trim().is_empty()
+        && now_seconds().saturating_sub(config.last_sync_attempt_at) < HOST_RETRY_COOLDOWN_SECONDS
 }
 
 fn merge_sync_values(
@@ -1697,6 +1728,17 @@ fn sync_client_save(app: tauri::AppHandle, contents: String) -> Result<ClientSyn
         });
     }
     config.pending_sync = true;
+    if host_retry_on_cooldown(&config) {
+        save_sync_config(&app, &config)?;
+        return Ok(ClientSyncResult {
+            contents,
+            status: "offline".to_string(),
+            revision: config.host_revision,
+            pending: true,
+            message: format!("Saved locally. Host retry paused briefly: {}", config.last_sync_error),
+        });
+    }
+    config.last_sync_attempt_at = now_seconds();
     save_sync_config(&app, &config)?;
     if sync_conflict_path(&app)?.is_file() {
         return save_non_conflicting_sync_changes(&app, &mut config, &contents);
@@ -1846,7 +1888,8 @@ fn host_file_bytes(config: &SyncConfig, path: &str) -> Result<Vec<u8>, String> {
     endpoint.query_pairs_mut().append_pair("path", path);
     append_host_file_auth(&mut endpoint, config);
     let response = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_millis(1200))
+        .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|error| format!("Could not prepare host file connection: {error}"))?
         .get(endpoint)
@@ -1943,7 +1986,8 @@ fn append_host_file_auth(endpoint: &mut reqwest::Url, config: &SyncConfig) {
 
 fn host_request_client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_millis(1200))
+        .timeout(std::time::Duration::from_secs(45))
         .build()
         .map_err(|error| format!("Could not prepare host file connection: {error}"))
 }
@@ -3201,46 +3245,60 @@ fn request_token_error(path: &str, headers: &str) -> Option<&'static str> {
     None
 }
 
+fn blocked_public_fetch_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(value) => {
+            value.is_private()
+                || value.is_loopback()
+                || value.is_link_local()
+                || value.is_broadcast()
+                || value.is_multicast()
+                || value.is_unspecified()
+        }
+        IpAddr::V6(value) => {
+            value.is_loopback()
+                || value.is_multicast()
+                || value.is_unspecified()
+                || value.is_unique_local()
+                || value.is_unicast_link_local()
+        }
+    }
+}
+
 fn validate_public_web_url(url: &str) -> Result<String, String> {
-    let trimmed = url.trim().to_string();
-    let lower = trimmed.to_lowercase();
-    let remainder = lower
-        .strip_prefix("https://")
-        .or_else(|| lower.strip_prefix("http://"))
+    let trimmed = url.trim();
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|_| "Paste a public http or https product link.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.cannot_be_a_base() {
+        return Err("Paste a public http or https product link.".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Product links with embedded credentials are not allowed.".to_string());
+    }
+    let host = parsed
+        .host_str()
         .ok_or_else(|| "Paste a public http or https product link.".to_string())?;
-    let host_port = remainder
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .rsplit('@')
-        .next()
-        .unwrap_or("");
-    let host = host_port.split(':').next().unwrap_or("");
-    let blocked = host.is_empty()
-        || host == "localhost"
-        || host.starts_with("127.")
-        || host.starts_with("10.")
-        || host.starts_with("192.168.")
-        || host == "0.0.0.0"
-        || host.starts_with('[')
-        || host
-            .split('.')
-            .take(2)
-            .collect::<Vec<&str>>()
-            .as_slice()
-            .get(0)
-            .and_then(|value| value.parse::<u8>().ok())
-            .filter(|first| *first == 172)
-            .is_some_and(|_| {
-                host.split('.')
-                    .nth(1)
-                    .and_then(|value| value.parse::<u8>().ok())
-                    .is_some_and(|second| (16..=31).contains(&second))
-            });
-    if blocked {
+    if host.eq_ignore_ascii_case("localhost") {
         return Err("Only public product web links can be read.".to_string());
     }
-    Ok(trimmed)
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if blocked_public_fetch_ip(ip) {
+            return Err("Only public product web links can be read.".to_string());
+        }
+        return Ok(trimmed.to_string());
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "Paste a public http or https product link.".to_string())?;
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| "Could not resolve that product link.".to_string())?
+        .collect::<Vec<_>>();
+    if addresses.is_empty() || addresses.iter().any(|address| blocked_public_fetch_ip(address.ip())) {
+        return Err("Only public product web links can be read.".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 fn content_type(path: &str) -> &'static str {
@@ -3261,6 +3319,66 @@ fn content_type(path: &str) -> &'static str {
     } else {
         "application/octet-stream"
     }
+}
+
+fn collect_state_file_paths(value: &serde_json::Value, paths: &mut HashSet<String>) {
+    const PATH_KEYS: &[&str] = &[
+        "baselinePath",
+        "image",
+        "imageThumbnail",
+        "markupPath",
+        "markupThumbnailPath",
+        "path",
+        "sourcePath",
+        "thumbnailPath",
+    ];
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map {
+                if PATH_KEYS.contains(&key.as_str()) {
+                    if let Some(path) = child.as_str().map(str::trim).filter(|path| !path.is_empty()) {
+                        if let Ok(canonical) = std::fs::canonicalize(path.trim_matches('"')) {
+                            paths.insert(canonical.to_string_lossy().to_lowercase());
+                        }
+                    }
+                }
+                collect_state_file_paths(child, paths);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                collect_state_file_paths(child, paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn file_api_path_allowed(app: &tauri::AppHandle, path: &str) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(path.trim_matches('"')) else {
+        return false;
+    };
+    if storage_roots(app)
+        .ok()
+        .and_then(|roots| canonical_under_roots(path, &roots))
+        .is_some()
+    {
+        return true;
+    }
+
+    let Ok(state_path) = state_file_path(app) else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(state_path) else {
+        return false;
+    };
+    let Ok(state) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    let mut referenced = HashSet::new();
+    collect_state_file_paths(&state, &mut referenced);
+    referenced.contains(&canonical.to_string_lossy().to_lowercase())
 }
 
 fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
@@ -3370,6 +3488,9 @@ fn body_from_request(
         .unwrap_or_else(|| Ok(length_header))?
         .parse::<usize>()
         .map_err(|_| "Request has an invalid Content-Length.".to_string())?;
+    if length > LAN_REQUEST_BODY_LIMIT_BYTES {
+        return Err("Request body is too large.".to_string());
+    }
     let header_end = initial
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -3448,6 +3569,9 @@ fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result
         loop {
             if parse_chunked_body(&bytes).is_ok() {
                 break;
+            }
+            if bytes.len() > LAN_REQUEST_BODY_LIMIT_BYTES {
+                return Err("Request body is too large.".to_string());
             }
             match stream.read(&mut buffer) {
                 Ok(0) => break,
@@ -4197,6 +4321,15 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
         if method == "GET" {
             let file_path = query_value(path, "path");
+            if !file_api_path_allowed(&app, &file_path) {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain; charset=utf-8",
+                    b"File access is not allowed for this path.",
+                );
+                return;
+            }
             match read_file_bytes(file_path.clone()) {
                 Ok(bytes) => send_response(&mut stream, "200 OK", content_type(&file_path), &bytes),
                 Err(error) => send_response(
@@ -4255,6 +4388,15 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
                 }
             };
             let file_path = query_value(path, "path");
+            if !file_api_path_allowed(&app, &file_path) {
+                send_response(
+                    &mut stream,
+                    "403 Forbidden",
+                    "text/plain; charset=utf-8",
+                    b"File access is not allowed for this path.",
+                );
+                return;
+            }
             match overwrite_file_bytes(app, file_path, body) {
                 Ok(stored) => send_response(
                     &mut stream,
@@ -4434,6 +4576,21 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         }
     }
 
+    let browser_enabled = lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| server.browser_enabled))
+        .unwrap_or(false);
+    if !browser_enabled {
+        send_response(
+            &mut stream,
+            "403 Forbidden",
+            "text/plain; charset=utf-8",
+            b"BuildBook browser access is disabled on this host.",
+        );
+        return;
+    }
+
     let Some(dist) = dist_dir(&app) else {
         send_response(
             &mut stream,
@@ -4482,6 +4639,7 @@ fn start_lan_server(
     token: String,
     require_token: bool,
     web_auth: Option<WebAuthConfig>,
+    browser_enabled: bool,
 ) -> Result<LanServerInfo, String> {
     if require_token && token.trim().is_empty() {
         return Err("LAN access code is missing.".to_string());
@@ -4502,6 +4660,7 @@ fn start_lan_server(
             && server.token == token
             && server.require_token == require_token
             && server.web_auth == web_auth
+            && server.browser_enabled == browser_enabled
         {
             return Ok(LanServerInfo {
                 running: true,
@@ -4582,6 +4741,7 @@ fn start_lan_server(
         token,
         require_token,
         web_auth,
+        browser_enabled,
         stop,
         thread: Some(thread),
         discovery_thread,

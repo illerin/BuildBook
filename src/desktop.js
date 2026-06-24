@@ -1,41 +1,8 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
-
-const LAN_TOKEN_KEY = 'buildbook-lan-token';
-const APP_REQUEST_HEADER = '1';
-const SYNC_CONFIG_KEY = 'buildbook-sync-config';
-
-function isTauri() {
-  return Boolean(window.__TAURI_INTERNALS__);
-}
-
-function isLanWebClient() {
-  const isViteDev = ['localhost', '127.0.0.1'].includes(window.location.hostname) && window.location.port === '5173';
-  return !isTauri() && window.location.protocol.startsWith('http') && !isViteDev;
-}
+import { apiHeaders, cachedSyncConfig, cacheSyncConfig, isLanWebClient, isTauri, lanToken } from './runtime';
 
 function fileApiUrl(path) {
   return `/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(lanToken())}`;
-}
-
-function lanToken() {
-  return localStorage.getItem(LAN_TOKEN_KEY) || new URLSearchParams(window.location.search).get('access') || '';
-}
-
-function apiHeaders(extra = {}) {
-  const token = lanToken();
-  return {
-    ...extra,
-    'X-BuildBook-Request': APP_REQUEST_HEADER,
-    ...(token ? { 'X-BuildBook-Token': token } : {}),
-  };
-}
-
-function cachedSyncConfig() {
-  try {
-    return JSON.parse(localStorage.getItem(SYNC_CONFIG_KEY) || '{}');
-  } catch {
-    return {};
-  }
 }
 
 export function currentSyncConfig() {
@@ -274,6 +241,10 @@ export function acceptFromExtensions(extensions) {
     .join(',');
 }
 
+function desktopNotice(message) {
+  window.dispatchEvent(new CustomEvent('buildbook-desktop-notice', { detail: { message } }));
+}
+
 export async function openStoredFile(path, clientLocal = false) {
   if (!path) return;
 
@@ -283,7 +254,7 @@ export async function openStoredFile(path, clientLocal = false) {
   }
 
   if (!isTauri()) {
-    window.alert(`Desktop open is only available in the Tauri app.\n\n${path}`);
+    desktopNotice(`Desktop open is only available in the Tauri app. ${path}`);
     return;
   }
 
@@ -300,7 +271,7 @@ export async function openWithProgram(programPath, filePath) {
   if (!programPath || !filePath) return;
 
   if (!isTauri()) {
-    window.alert(`Program launch is only available in the Tauri app.\n\n${programPath}\n${filePath}`);
+    desktopNotice(`Program launch is only available in the Tauri app. ${programPath}`);
     return;
   }
 
@@ -347,9 +318,9 @@ export function assetUrl(path) {
   return isTauri() ? convertFileSrc(path) : path;
 }
 
-export async function startLanServer(port, token, requireToken = true, webAuth = {}) {
+export async function startLanServer(port, token, requireToken = true, webAuth = {}, browserEnabled = true) {
   if (!isTauri()) return { running: false, url: '' };
-  return invoke('start_lan_server', { port: Number(port) || 8787, token, requireToken, webAuth });
+  return invoke('start_lan_server', { port: Number(port) || 8787, token, requireToken, webAuth, browserEnabled });
 }
 
 export async function stopLanServer() {
@@ -367,15 +338,13 @@ export async function readSyncConfig() {
     return { mode: 'local', deviceId: 'browser', deviceName: 'Browser', hostUrl: '', hostToken: '' };
   }
   const config = await invoke('read_sync_config');
-  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
-  return config;
+  return cacheSyncConfig(config);
 }
 
 export async function writeSyncConfig(config) {
   if (!isTauri()) return config;
   const saved = await invoke('write_sync_config', { config });
-  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(saved));
-  return saved;
+  return cacheSyncConfig(saved);
 }
 
 export async function discoverBuildBookHosts(port = 8787) {
@@ -396,15 +365,13 @@ export async function pairBuildBookHost(url, pairingCode = '') {
 export async function generateSyncPairingCode() {
   if (!isTauri()) throw new Error('Pairing codes are only available in the desktop app.');
   const config = await invoke('generate_sync_pairing_code');
-  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
-  return config;
+  return cacheSyncConfig(config);
 }
 
 export async function revokePairedDevice(deviceId) {
   if (!isTauri()) throw new Error('Paired devices are only managed in the desktop app.');
   const config = await invoke('revoke_paired_device', { deviceId });
-  localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
-  return config;
+  return cacheSyncConfig(config);
 }
 
 export async function clearSyncCheckout(path) {
