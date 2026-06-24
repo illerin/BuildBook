@@ -1,8 +1,8 @@
-# BuildBook 0.4.0-test.11 Test Release
+# BuildBook 0.4.0-test.12 Test Release
 
-Changes since test-v0.4.0-test.10.
+Changes since test-v0.4.0-test.11.
 
 ## Changes
 
-- More adjustments to sync/combine methods
+- Add runtime, version checks and LAN/sync improvements
 
