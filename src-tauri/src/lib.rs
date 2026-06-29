@@ -12,61 +12,35 @@ use tauri::{
     Manager, WindowEvent,
 };
 
+mod file_access;
+mod lan;
+mod state;
+mod storage;
+mod thumbnails;
+
+use file_access::{
+    normalized_existing_path, open_file_path_inner, open_file_with_program_inner,
+    readable_user_file_path, safe_file_name,
+};
+use lan::{
+    content_type, cookie_value, header_value, query_value, request_body, send_response,
+    send_response_with_headers,
+};
+use state::{
+    list_state_backups, read_app_state, restore_state_backup, state_file_path, state_write_lock,
+    validate_state_contents, write_app_state, write_app_state_inner,
+};
+use storage::{
+    canonical_under_roots, cleanup_orphaned_files, delete_managed_files, list_folder_files,
+    reset_managed_storage, scan_storage, scan_storage_inner, storage_roots,
+    DeleteManagedFilesResult, StorageScanRequest,
+};
+use thumbnails::shell_thumbnail_bytes;
+
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(false);
 const HOST_RETRY_COOLDOWN_SECONDS: u64 = 15;
-const LAN_REQUEST_BODY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
-
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-#[cfg(target_os = "windows")]
-fn windows_shell_execute(
-    target: &std::path::Path,
-    parameters: Option<&std::path::Path>,
-) -> Result<(), String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::ShellExecuteW;
-    use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
-
-    let operation: Vec<u16> = OsStr::new("open")
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let file: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let parameters = parameters.map(|value| {
-        value
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect::<Vec<u16>>()
-    });
-
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            PCWSTR(operation.as_ptr()),
-            PCWSTR(file.as_ptr()),
-            parameters
-                .as_ref()
-                .map(|value| PCWSTR(value.as_ptr()))
-                .unwrap_or(PCWSTR::null()),
-            PCWSTR::null(),
-            SHOW_WINDOW_CMD(1),
-        )
-    };
-
-    if result.0 as usize <= 32 {
-        return Err("Could not open file.".to_string());
-    }
-
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -186,19 +160,7 @@ fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) {
     }
 }
 
-fn state_file_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Could not resolve app data folder: {error}"))?;
-
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("Could not create app data folder: {error}"))?;
-
-    Ok(dir.join("buildbook-state.json"))
-}
-
-fn sync_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn sync_config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let dir = app
         .path()
         .app_data_dir()
@@ -348,195 +310,6 @@ fn write_sync_config(app: tauri::AppHandle, config: SyncConfig) -> Result<SyncCo
     Ok(config)
 }
 
-fn backup_existing_state(path: &std::path::Path) {
-    if !path.is_file() {
-        return;
-    }
-    let Some(dir) = path.parent() else { return };
-    let backup_dir = dir.join("state-backups");
-    if std::fs::create_dir_all(&backup_dir).is_err() {
-        return;
-    }
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-    let recent_path = backup_dir.join(format!("buildbook-state-recent-{stamp}.json"));
-    let _ = std::fs::copy(path, recent_path);
-
-    let week = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() / 604_800)
-        .unwrap_or(0);
-    let weekly_path = backup_dir.join(format!("buildbook-state-week-{week}.json"));
-    let _ = std::fs::copy(path, weekly_path);
-
-    prune_state_backups(&backup_dir, "buildbook-state-recent-", 3);
-    prune_state_backups(&backup_dir, "buildbook-state-week-", 52);
-}
-
-fn prune_state_backups(backup_dir: &std::path::Path, prefix: &str, keep: usize) {
-    let mut backups = std::fs::read_dir(backup_dir)
-        .ok()
-        .into_iter()
-        .flat_map(|entries| entries.flatten())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_string_lossy();
-            if !name.starts_with(prefix) || !name.ends_with(".json") {
-                return None;
-            }
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .ok()?;
-            Some((modified, path))
-        })
-        .collect::<Vec<_>>();
-    backups.sort_by_key(|(modified, _)| *modified);
-    let excess = backups.len().saturating_sub(keep);
-    for (_, old_path) in backups.into_iter().take(excess) {
-        let _ = std::fs::remove_file(old_path);
-    }
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StateBackupInfo {
-    file_name: String,
-    kind: String,
-    modified_ms: u128,
-    size: u64,
-}
-
-#[tauri::command]
-fn list_state_backups(app: tauri::AppHandle) -> Result<Vec<StateBackupInfo>, String> {
-    let path = state_file_path(&app)?;
-    let Some(dir) = path.parent() else {
-        return Ok(vec![]);
-    };
-    let backup_dir = dir.join("state-backups");
-    if !backup_dir.is_dir() {
-        return Ok(vec![]);
-    }
-    let mut backups = std::fs::read_dir(&backup_dir)
-        .map_err(|error| format!("Could not read state backups: {error}"))?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let file_name = path.file_name()?.to_string_lossy().to_string();
-            if !file_name.ends_with(".json") {
-                return None;
-            }
-            let kind = if file_name.starts_with("buildbook-state-recent-") {
-                "recent"
-            } else if file_name.starts_with("buildbook-state-week-") {
-                "weekly"
-            } else {
-                return None;
-            };
-            let metadata = entry.metadata().ok()?;
-            let modified_ms = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis())
-                .unwrap_or(0);
-            Some(StateBackupInfo {
-                file_name,
-                kind: kind.to_string(),
-                modified_ms,
-                size: metadata.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    backups.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
-    Ok(backups)
-}
-
-#[tauri::command]
-fn restore_state_backup(app: tauri::AppHandle, file_name: String) -> Result<(), String> {
-    if file_name.contains('/') || file_name.contains('\\') || !file_name.ends_with(".json") {
-        return Err("Invalid state backup name.".to_string());
-    }
-    if !file_name.starts_with("buildbook-state-recent-")
-        && !file_name.starts_with("buildbook-state-week-")
-    {
-        return Err("Invalid state backup name.".to_string());
-    }
-    let path = state_file_path(&app)?;
-    let Some(dir) = path.parent() else {
-        return Err("Could not resolve app data folder.".to_string());
-    };
-    let backup_path = dir.join("state-backups").join(file_name);
-    if !backup_path.is_file() {
-        return Err("State backup was not found.".to_string());
-    }
-    let contents = std::fs::read_to_string(&backup_path)
-        .map_err(|error| format!("Could not read state backup: {error}"))?;
-    serde_json::from_str::<serde_json::Value>(&contents)
-        .map_err(|error| format!("State backup is not valid JSON: {error}"))?;
-    backup_existing_state(&path);
-    write_app_state(app, contents)
-}
-
-#[tauri::command]
-fn read_app_state(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let path = state_file_path(&app)?;
-
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    std::fs::read_to_string(path)
-        .map(Some)
-        .map_err(|error| format!("Could not read app state: {error}"))
-}
-
-fn validate_state_contents(contents: &str) -> Result<(), String> {
-    let value = serde_json::from_str::<serde_json::Value>(contents)
-        .map_err(|error| format!("App state is not valid JSON: {error}"))?;
-    if !value.is_object() {
-        return Err("App state must be a JSON object.".to_string());
-    }
-    Ok(())
-}
-
-static STATE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-fn state_write_lock() -> &'static Mutex<()> {
-    STATE_WRITE_LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn write_app_state_inner(app: &tauri::AppHandle, contents: &str) -> Result<(), String> {
-    validate_state_contents(contents)?;
-    let path = state_file_path(app)?;
-    backup_existing_state(&path);
-    let temp_path = path.with_extension("json.tmp");
-    {
-        let mut file = std::fs::File::create(&temp_path)
-            .map_err(|error| format!("Could not create temporary app state: {error}"))?;
-        file.write_all(contents.as_bytes())
-            .map_err(|error| format!("Could not write temporary app state: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("Could not flush temporary app state: {error}"))?;
-    }
-    std::fs::rename(&temp_path, &path)
-        .or_else(|_| {
-            let _ = std::fs::remove_file(&path);
-            std::fs::rename(&temp_path, &path)
-        })
-        .map_err(|error| format!("Could not replace app state: {error}"))
-}
-
-#[tauri::command]
-fn write_app_state(app: tauri::AppHandle, contents: String) -> Result<(), String> {
-    let _guard = state_write_lock()
-        .lock()
-        .map_err(|_| "Could not lock BuildBook state.".to_string())?;
-    write_app_state_inner(&app, &contents)
-}
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredFile {
     name: String,
@@ -552,57 +325,6 @@ struct PreparedEditFile {
     size: u64,
     base_hash: String,
     pending: bool,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LinkedFolderFile {
-    name: String,
-    relative_path: String,
-    path: String,
-    size: u64,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OrphanFile {
-    name: String,
-    path: String,
-    relative_path: String,
-    size: u64,
-    modified_at: String,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StorageScan {
-    file_count: usize,
-    total_bytes: u64,
-    orphan_count: usize,
-    orphan_bytes: u64,
-    deleted_count: usize,
-    deleted_bytes: u64,
-    orphans: Vec<OrphanFile>,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StorageScanRequest {
-    referenced_paths: Vec<String>,
-    delete_paths: Option<Vec<String>>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResetStorageResult {
-    retained_files: Vec<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeleteManagedFilesResult {
-    deleted_paths: Vec<String>,
-    failed_paths: Vec<String>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -927,12 +649,12 @@ fn sync_endpoint(config: &SyncConfig, path: &str) -> Result<reqwest::Url, String
     Ok(endpoint)
 }
 
-fn sync_base_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn sync_base_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let path = sync_config_path(app)?;
     Ok(path.with_file_name("buildbook-sync-base.json"))
 }
 
-fn sync_conflict_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub(crate) fn sync_conflict_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let path = sync_config_path(app)?;
     Ok(path.with_file_name("buildbook-sync-conflict.json"))
 }
@@ -963,10 +685,12 @@ fn compact_host_error(status: reqwest::StatusCode, body: String, context: &str) 
     }
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if status.as_u16() == 502 {
-        return "Host returned 502 Bad Gateway. The BuildBook host or proxy is not reachable.".to_string();
+        return "Host returned 502 Bad Gateway. The BuildBook host or proxy is not reachable."
+            .to_string();
     }
     if status.as_u16() == 503 {
-        return "Host returned 503 Service Unavailable. The BuildBook host may be stopped.".to_string();
+        return "Host returned 503 Service Unavailable. The BuildBook host may be stopped."
+            .to_string();
     }
     if text.trim().is_empty() {
         format!("BuildBook host returned {status} {context}.")
@@ -991,7 +715,11 @@ fn host_sync_get(config: &SyncConfig) -> Result<SyncStateEnvelope, String> {
     if !response.status().is_success() {
         let status = response.status();
         let message = response.text().unwrap_or_default();
-        return Err(compact_host_error(status, message, "while loading sync state"));
+        return Err(compact_host_error(
+            status,
+            message,
+            "while loading sync state",
+        ));
     }
     response
         .json::<SyncStateEnvelope>()
@@ -1013,7 +741,11 @@ fn host_sync_revision(config: &SyncConfig) -> Result<String, String> {
     if !response.status().is_success() {
         let status = response.status();
         let message = response.text().unwrap_or_default();
-        return Err(compact_host_error(status, message, "while checking sync revision"));
+        return Err(compact_host_error(
+            status,
+            message,
+            "while checking sync revision",
+        ));
     }
     response
         .text()
@@ -1061,7 +793,11 @@ fn host_sync_write(
     }
     if !status.is_success() {
         let message = response.text().unwrap_or_default();
-        return Err(compact_host_error(status, message, "while saving sync state"));
+        return Err(compact_host_error(
+            status,
+            message,
+            "while saving sync state",
+        ));
     }
     response
         .json::<SyncStateEnvelope>()
@@ -1211,7 +947,10 @@ fn merge_sync_values(
             serde_json::Value::String(_),
             serde_json::Value::String(local_text),
             serde_json::Value::String(host_text),
-        ) if path.starts_with("projects[") && (path.ends_with(".notes") || (path.contains(".noteSheets[") && path.ends_with(".content"))) => {
+        ) if path.starts_with("projects[")
+            && (path.ends_with(".notes")
+                || (path.contains(".noteSheets[") && path.ends_with(".content"))) =>
+        {
             if local_text.trim().is_empty() {
                 host.clone()
             } else if host_text.trim().is_empty() {
@@ -1253,10 +992,34 @@ fn conflict_preview(value: &serde_json::Value) -> String {
         .and_then(|text| text.as_str())
         .unwrap_or("");
     let counts = [
-        ("projects", value.get("projects").and_then(|items| items.as_array()).map(|items| items.len())),
-        ("parts", value.get("parts").and_then(|items| items.as_array()).map(|items| items.len())),
-        ("files", value.get("files").and_then(|items| items.as_array()).map(|items| items.len())),
-        ("photos", value.get("photoFolders").and_then(|items| items.as_array()).map(|items| items.len())),
+        (
+            "projects",
+            value
+                .get("projects")
+                .and_then(|items| items.as_array())
+                .map(|items| items.len()),
+        ),
+        (
+            "parts",
+            value
+                .get("parts")
+                .and_then(|items| items.as_array())
+                .map(|items| items.len()),
+        ),
+        (
+            "files",
+            value
+                .get("files")
+                .and_then(|items| items.as_array())
+                .map(|items| items.len()),
+        ),
+        (
+            "photos",
+            value
+                .get("photoFolders")
+                .and_then(|items| items.as_array())
+                .map(|items| items.len()),
+        ),
     ]
     .into_iter()
     .filter_map(|(label, count)| count.map(|count| format!("{count} {label}")))
@@ -1499,7 +1262,11 @@ fn save_non_conflicting_sync_changes(
     let conflicts = sync_conflict_items_for_values(&base, &local, &host);
     let mut host_safe = merge_sync_values(&base, &local, &host, "", &config.device_name);
     for item in &conflicts {
-        apply_conflict_value(&mut host_safe, &item.path, value_at_conflict_path(&host, &item.path));
+        apply_conflict_value(
+            &mut host_safe,
+            &item.path,
+            value_at_conflict_path(&host, &item.path),
+        );
     }
     let host_safe_contents = serde_json::to_string_pretty(&host_safe)
         .map_err(|error| format!("Could not encode non-conflicting sync changes: {error}"))?;
@@ -1545,7 +1312,8 @@ fn resolve_sync_conflict_selections(
     let local_contents = read_local_state_or_default(&app)?;
     let host_contents = std::fs::read_to_string(sync_conflict_path(&app)?)
         .map_err(|error| format!("Could not read host conflict state: {error}"))?;
-    let base_contents = std::fs::read_to_string(sync_base_path(&app)?).unwrap_or_else(|_| "{}".to_string());
+    let base_contents =
+        std::fs::read_to_string(sync_base_path(&app)?).unwrap_or_else(|_| "{}".to_string());
     let local = serde_json::from_str::<serde_json::Value>(&local_contents)
         .map_err(|error| format!("Local state is not valid JSON: {error}"))?;
     let host = serde_json::from_str::<serde_json::Value>(&host_contents)
@@ -1585,7 +1353,9 @@ fn resolve_sync_conflict_selections(
                 message: "Conflict selections were saved to the host.".to_string(),
             })
         }
-        HostSyncWrite::Conflict(_) => Err("The host changed again while resolving the conflict. Try again.".to_string()),
+        HostSyncWrite::Conflict(_) => {
+            Err("The host changed again while resolving the conflict. Try again.".to_string())
+        }
     }
 }
 
@@ -1610,7 +1380,9 @@ fn sync_client_load(app: tauri::AppHandle) -> Result<ClientSyncResult, String> {
                 status: "conflict".to_string(),
                 revision: config.host_revision,
                 pending: true,
-                message: "Resolve the synchronization conflict before full synchronization can continue.".to_string(),
+                message:
+                    "Resolve the synchronization conflict before full synchronization can continue."
+                        .to_string(),
             });
         }
         match host_sync_write(&config, &local, false) {
@@ -1735,7 +1507,10 @@ fn sync_client_save(app: tauri::AppHandle, contents: String) -> Result<ClientSyn
             status: "offline".to_string(),
             revision: config.host_revision,
             pending: true,
-            message: format!("Saved locally. Host retry paused briefly: {}", config.last_sync_error),
+            message: format!(
+                "Saved locally. Host retry paused briefly: {}",
+                config.last_sync_error
+            ),
         });
     }
     config.last_sync_attempt_at = now_seconds();
@@ -2060,7 +1835,7 @@ fn sync_open_host_file(
     }));
     std::fs::write(&target, bytes)
         .map_err(|error| format!("Could not cache host file: {error}"))?;
-    open_file_path(target.to_string_lossy().to_string())?;
+    open_file_path_inner(&target)?;
     Ok(target.to_string_lossy().to_string())
 }
 
@@ -2504,7 +2279,10 @@ fn scan_local_subnet_for_hosts(port: u16) -> Vec<BuildBookHostInfo> {
 }
 
 #[tauri::command]
-fn discover_buildbook_hosts(app: tauri::AppHandle, port: u16) -> Result<Vec<BuildBookHostInfo>, String> {
+fn discover_buildbook_hosts(
+    app: tauri::AppHandle,
+    port: u16,
+) -> Result<Vec<BuildBookHostInfo>, String> {
     let local_device_id = load_sync_config(&app)
         .map(|config| config.device_id)
         .unwrap_or_default();
@@ -2559,160 +2337,6 @@ fn discover_buildbook_hosts(app: tauri::AppHandle, port: u16) -> Result<Vec<Buil
         }
     }
     Ok(results)
-}
-
-fn safe_file_name(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|character| match character {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            value if value.is_control() => '_',
-            value => value,
-        })
-        .collect();
-
-    if cleaned.trim().is_empty() {
-        "attached-file".to_string()
-    } else {
-        cleaned
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn bitmap_to_bmp_bytes(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Result<Vec<u8>, String> {
-    use std::mem::{size_of, zeroed};
-    use windows::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    };
-
-    unsafe {
-        let mut bitmap_info: BITMAP = zeroed();
-        let object_size = GetObjectW(
-            bitmap.into(),
-            size_of::<BITMAP>() as i32,
-            Some(&mut bitmap_info as *mut _ as *mut _),
-        );
-        if object_size == 0 {
-            let _ = DeleteObject(bitmap.into());
-            return Err("Could not read shell thumbnail bitmap.".to_string());
-        }
-
-        let width = bitmap_info.bmWidth;
-        let height = bitmap_info.bmHeight.abs();
-        let stride = (((width * 32 + 31) / 32) * 4) as usize;
-        let image_size = stride * height as usize;
-        let mut pixels = vec![0u8; image_size];
-        let mut dib = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width,
-                biHeight: -height,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                biSizeImage: image_size as u32,
-                ..zeroed()
-            },
-            ..zeroed()
-        };
-
-        let hdc = CreateCompatibleDC(None);
-        if hdc.is_invalid() {
-            let _ = DeleteObject(bitmap.into());
-            return Err("Could not create a bitmap extraction context.".to_string());
-        }
-
-        let scan_lines = GetDIBits(
-            hdc,
-            bitmap,
-            0,
-            height as u32,
-            Some(pixels.as_mut_ptr() as *mut _),
-            &mut dib,
-            DIB_RGB_COLORS,
-        );
-        let _ = DeleteDC(hdc);
-        let _ = DeleteObject(bitmap.into());
-        if scan_lines == 0 {
-            return Err("Could not extract shell thumbnail pixels.".to_string());
-        }
-
-        let file_header_size = 14usize;
-        let info_header_size = 40usize;
-        let pixel_offset = file_header_size + info_header_size;
-        let file_size = pixel_offset + pixels.len();
-        let mut bytes = Vec::with_capacity(file_size);
-        bytes.extend_from_slice(b"BM");
-        bytes.extend_from_slice(&(file_size as u32).to_le_bytes());
-        bytes.extend_from_slice(&[0, 0, 0, 0]);
-        bytes.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
-        bytes.extend_from_slice(&(info_header_size as u32).to_le_bytes());
-        bytes.extend_from_slice(&width.to_le_bytes());
-        bytes.extend_from_slice(&(-height).to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&32u16.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&(pixels.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&0i32.to_le_bytes());
-        bytes.extend_from_slice(&0i32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&pixels);
-        Ok(bytes)
-    }
-}
-
-#[cfg(target_os = "windows")]
-#[tauri::command]
-fn shell_thumbnail_bytes(path: String, size: u32) -> Result<Vec<u8>, String> {
-    let target = std::path::PathBuf::from(path.trim_matches('"'));
-    if !target.is_file() {
-        return Err("That file path does not point to a readable file.".to_string());
-    }
-
-    std::thread::spawn(move || shell_thumbnail_bytes_sta(target, size))
-        .join()
-        .map_err(|_| "Windows thumbnail worker failed.".to_string())?
-}
-
-#[cfg(target_os = "windows")]
-fn shell_thumbnail_bytes_sta(target: std::path::PathBuf, size: u32) -> Result<Vec<u8>, String> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::SIZE;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-    use windows::Win32::UI::Shell::{
-        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
-    };
-
-    let wide: Vec<u16> = OsStr::new(&target)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let size = size.clamp(64, 1024) as i32;
-
-    unsafe {
-        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
-            .ok()
-            .map_err(|error| format!("Windows thumbnail COM setup failed: {error}"))?;
-        let factory: IShellItemImageFactory =
-            SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None)
-                .map_err(|error| format!("Windows could not load a shell thumbnail: {error}"))?;
-        let bitmap = factory
-            .GetImage(SIZE { cx: size, cy: size }, SIIGBF_BIGGERSIZEOK)
-            .map_err(|error| format!("Windows could not create a shell thumbnail: {error}"))?;
-        let result = bitmap_to_bmp_bytes(bitmap);
-        CoUninitialize();
-        result
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-#[tauri::command]
-fn shell_thumbnail_bytes(_path: String, _size: u32) -> Result<Vec<u8>, String> {
-    Err("Shell thumbnails are only available on Windows.".to_string())
 }
 
 fn safe_library_path(library: &str) -> std::path::PathBuf {
@@ -2894,64 +2518,6 @@ fn local_lan_ip() -> String {
         })
         .map(|addr| addr.ip().to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string())
-}
-
-fn decode_url_value(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(hex) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                output.push(hex);
-                index += 3;
-                continue;
-            }
-        }
-        output.push(if bytes[index] == b'+' {
-            b' '
-        } else {
-            bytes[index]
-        });
-        index += 1;
-    }
-    String::from_utf8_lossy(&output).to_string()
-}
-
-fn query_value(path: &str, key: &str) -> String {
-    path.split_once('?')
-        .map(|(_, query)| query)
-        .unwrap_or("")
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .find(|(name, _)| *name == key)
-        .map(|(_, value)| decode_url_value(value))
-        .unwrap_or_default()
-}
-
-fn header_value(headers: &str, key: &str) -> String {
-    let prefix = format!("{}:", key.to_lowercase());
-    headers
-        .lines()
-        .find_map(|line| {
-            let lower = line.to_lowercase();
-            if lower.starts_with(&prefix) {
-                line.split_once(':')
-                    .map(|(_, value)| value.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
-}
-
-fn cookie_value(headers: &str, key: &str) -> String {
-    header_value(headers, "cookie")
-        .split(';')
-        .filter_map(|part| part.trim().split_once('='))
-        .find(|(name, _)| *name == key)
-        .map(|(_, value)| value.trim().to_string())
-        .unwrap_or_default()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -3211,7 +2777,9 @@ fn request_file_auth_error(
     headers: &str,
 ) -> Option<&'static str> {
     if !query_value(path, "deviceToken").trim().is_empty()
-        || !header_value(headers, "X-BuildBook-Device-Token").trim().is_empty()
+        || !header_value(headers, "X-BuildBook-Device-Token")
+            .trim()
+            .is_empty()
     {
         return paired_device_auth_error(app, path, headers);
     }
@@ -3295,30 +2863,14 @@ fn validate_public_web_url(url: &str) -> Result<String, String> {
         .to_socket_addrs()
         .map_err(|_| "Could not resolve that product link.".to_string())?
         .collect::<Vec<_>>();
-    if addresses.is_empty() || addresses.iter().any(|address| blocked_public_fetch_ip(address.ip())) {
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|address| blocked_public_fetch_ip(address.ip()))
+    {
         return Err("Only public product web links can be read.".to_string());
     }
     Ok(trimmed.to_string())
-}
-
-fn content_type(path: &str) -> &'static str {
-    if path.ends_with(".js") {
-        "text/javascript; charset=utf-8"
-    } else if path.ends_with(".css") {
-        "text/css; charset=utf-8"
-    } else if path.ends_with(".html") {
-        "text/html; charset=utf-8"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".ico") {
-        "image/x-icon"
-    } else if path.ends_with(".pdf") {
-        "application/pdf"
-    } else {
-        "application/octet-stream"
-    }
 }
 
 fn collect_state_file_paths(value: &serde_json::Value, paths: &mut HashSet<String>) {
@@ -3337,7 +2889,11 @@ fn collect_state_file_paths(value: &serde_json::Value, paths: &mut HashSet<Strin
         serde_json::Value::Object(map) => {
             for (key, child) in map {
                 if PATH_KEYS.contains(&key.as_str()) {
-                    if let Some(path) = child.as_str().map(str::trim).filter(|path| !path.is_empty()) {
+                    if let Some(path) = child
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|path| !path.is_empty())
+                    {
                         if let Ok(canonical) = std::fs::canonicalize(path.trim_matches('"')) {
                             paths.insert(canonical.to_string_lossy().to_lowercase());
                         }
@@ -3379,36 +2935,6 @@ fn file_api_path_allowed(app: &tauri::AppHandle, path: &str) -> bool {
     let mut referenced = HashSet::new();
     collect_state_file_paths(&state, &mut referenced);
     referenced.contains(&canonical.to_string_lossy().to_lowercase())
-}
-
-fn send_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
-    send_response_with_headers(stream, status, content_type, body, &[]);
-}
-
-fn send_response_with_headers(
-    stream: &mut TcpStream,
-    status: &str,
-    content_type: &str,
-    body: &[u8],
-    headers: &[String],
-) {
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    let _ = write!(stream, "X-Content-Type-Options: nosniff\r\n");
-    let _ = write!(stream, "X-Frame-Options: DENY\r\n");
-    let _ = write!(stream, "Referrer-Policy: no-referrer\r\n");
-    let _ = write!(
-        stream,
-        "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"
-    );
-    for header in headers {
-        let _ = write!(stream, "{header}\r\n");
-    }
-    let _ = write!(stream, "\r\n");
-    let _ = stream.write_all(body);
 }
 
 #[derive(serde::Deserialize)]
@@ -3474,123 +3000,6 @@ fn dist_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
     .into_iter()
     .flatten()
     .find(|path| path.join("index.html").is_file())
-}
-
-fn body_from_request(
-    stream: &mut TcpStream,
-    initial: &[u8],
-    headers: &str,
-) -> Result<Vec<u8>, String> {
-    let length_header = header_value(headers, "content-length");
-    let length = length_header
-        .is_empty()
-        .then(|| Err("Request is missing Content-Length.".to_string()))
-        .unwrap_or_else(|| Ok(length_header))?
-        .parse::<usize>()
-        .map_err(|_| "Request has an invalid Content-Length.".to_string())?;
-    if length > LAN_REQUEST_BODY_LIMIT_BYTES {
-        return Err("Request body is too large.".to_string());
-    }
-    let header_end = initial
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| index + 4)
-        .unwrap_or(initial.len());
-    let mut body = initial.get(header_end..).unwrap_or(&[]).to_vec();
-    while body.len() < length {
-        let mut buffer = vec![0; (length - body.len()).min(64 * 1024)];
-        match stream.read(&mut buffer) {
-            Ok(0) => {
-                return Err(format!(
-                    "Request body ended early: received {} of {length} bytes.",
-                    body.len()
-                ))
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-                continue;
-            }
-            Err(error) => return Err(format!("Could not read request body: {error}")),
-            Ok(count) => body.extend_from_slice(&buffer[..count]),
-        }
-    }
-    body.truncate(length);
-    Ok(body)
-}
-
-fn parse_chunked_body(bytes: &[u8]) -> Result<Vec<u8>, String> {
-    let mut body = Vec::new();
-    let mut index = 0;
-    loop {
-        let Some(line_end) = bytes[index..]
-            .windows(2)
-            .position(|window| window == b"\r\n")
-            .map(|offset| index + offset)
-        else {
-            return Err("Chunked request body is incomplete.".to_string());
-        };
-        let size_text = String::from_utf8_lossy(&bytes[index..line_end]);
-        let size_hex = size_text.split(';').next().unwrap_or("").trim();
-        let size = usize::from_str_radix(size_hex, 16)
-            .map_err(|_| "Chunked request body has an invalid chunk size.".to_string())?;
-        index = line_end + 2;
-        if size == 0 {
-            return Ok(body);
-        }
-        if index + size + 2 > bytes.len() {
-            return Err("Chunked request body is truncated.".to_string());
-        }
-        body.extend_from_slice(&bytes[index..index + size]);
-        index += size;
-        if bytes.get(index..index + 2) != Some(b"\r\n") {
-            return Err("Chunked request body has an invalid separator.".to_string());
-        }
-        index += 2;
-    }
-}
-
-fn request_body(stream: &mut TcpStream, initial: &[u8], headers: &str) -> Result<Vec<u8>, String> {
-    if header_value(headers, "transfer-encoding")
-        .to_ascii_lowercase()
-        .contains("chunked")
-    {
-        let header_end = initial
-            .windows(4)
-            .position(|window| window == b"\r\n\r\n")
-            .map(|index| index + 4)
-            .unwrap_or(initial.len());
-        let mut bytes = initial.get(header_end..).unwrap_or(&[]).to_vec();
-        let mut buffer = vec![0; 16 * 1024];
-        loop {
-            if parse_chunked_body(&bytes).is_ok() {
-                break;
-            }
-            if bytes.len() > LAN_REQUEST_BODY_LIMIT_BYTES {
-                return Err("Request body is too large.".to_string());
-            }
-            match stream.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-                    ) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                    continue;
-                }
-                Err(error) => return Err(format!("Could not read request body: {error}")),
-            }
-        }
-        return parse_chunked_body(&bytes);
-    }
-    body_from_request(stream, initial, headers)
 }
 
 fn current_web_auth() -> WebAuthConfig {
@@ -3702,6 +3111,915 @@ fn handle_web_logout(stream: &mut TcpStream) {
     );
 }
 
+fn current_lan_url() -> String {
+    lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| server.url.clone()))
+        .unwrap_or_default()
+}
+
+fn request_body_or_bad_request(
+    stream: &mut TcpStream,
+    initial: &[u8],
+    headers: &str,
+) -> Option<Vec<u8>> {
+    match request_body(stream, initial, headers) {
+        Ok(body) => Some(body),
+        Err(error) => {
+            send_response(
+                stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            None
+        }
+    }
+}
+
+fn handle_lan_info_routes(
+    app: &tauri::AppHandle,
+    path: &str,
+    headers: &str,
+    stream: &mut TcpStream,
+) -> bool {
+    if path.starts_with("/api/discovery") {
+        let host_config = load_sync_config(app).unwrap_or_default();
+        if host_config.mode != "host" {
+            send_response(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                b"BuildBook host mode is not enabled.",
+            );
+            return true;
+        }
+        let body = serde_json::to_vec(&host_info(app, current_lan_url()))
+            .unwrap_or_else(|_| b"{}".to_vec());
+        send_response(stream, "200 OK", "application/json; charset=utf-8", &body);
+        return true;
+    }
+
+    if path.starts_with("/api/host-info") {
+        if let Some(error) = request_token_error(path, headers) {
+            send_response(
+                stream,
+                "401 Unauthorized",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return true;
+        }
+        let body = serde_json::to_vec(&host_info(app, current_lan_url()))
+            .unwrap_or_else(|_| b"{}".to_vec());
+        send_response(stream, "200 OK", "application/json; charset=utf-8", &body);
+        return true;
+    }
+
+    if path.starts_with("/api/auth-status") {
+        send_web_auth_status(stream, headers);
+        return true;
+    }
+
+    false
+}
+
+fn handle_web_session_routes(
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if path.starts_with("/api/login") {
+        if method == "POST" {
+            if !request_has_app_header(headers) {
+                send_response(
+                    stream,
+                    "401 Unauthorized",
+                    "text/plain; charset=utf-8",
+                    b"BuildBook request header is required.",
+                );
+                return true;
+            }
+            let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+                return true;
+            };
+            handle_web_login(stream, &body, headers);
+            return true;
+        }
+        return false;
+    }
+
+    if path.starts_with("/api/logout") {
+        if method == "POST" {
+            if !request_has_app_header(headers) {
+                send_response(
+                    stream,
+                    "401 Unauthorized",
+                    "text/plain; charset=utf-8",
+                    b"BuildBook request header is required.",
+                );
+                return true;
+            }
+            handle_web_logout(stream);
+            return true;
+        }
+    }
+
+    false
+}
+
+fn handle_lan_sync_pair_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/sync/pair") {
+        return false;
+    }
+    let mut host_config = load_sync_config(app).unwrap_or_default();
+    if host_config.mode != "host" {
+        send_response(
+            stream,
+            "409 Conflict",
+            "text/plain; charset=utf-8",
+            b"This BuildBook installation is not configured as the authoritative host.",
+        );
+        return true;
+    }
+    if method != "POST" {
+        return true;
+    }
+    let now = now_seconds();
+    if host_config.pairing_locked_until > now {
+        send_response(stream, "429 Too Many Requests", "text/plain; charset=utf-8", b"Pairing is temporarily locked after too many failed attempts. Generate a new code or wait 5 minutes.");
+        return true;
+    }
+    let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+        return true;
+    };
+    let request = match serde_json::from_slice::<PairDeviceRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            send_response(
+                stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                format!("Invalid pairing request: {error}").as_bytes(),
+            );
+            return true;
+        }
+    };
+    if host_config.pairing_code.trim().is_empty()
+        || host_config.pairing_code_expires_at < now_seconds()
+        || request.pairing_code.trim() != host_config.pairing_code
+    {
+        host_config.pairing_failed_attempts = host_config.pairing_failed_attempts.saturating_add(1);
+        if host_config.pairing_failed_attempts >= 5 {
+            host_config.pairing_locked_until = now_seconds() + 5 * 60;
+            host_config.pairing_code.clear();
+            host_config.pairing_code_expires_at = 0;
+            host_config.pairing_failed_attempts = 0;
+        }
+        let _ = save_sync_config(app, &host_config);
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            b"Pairing code is invalid or expired.",
+        );
+        return true;
+    }
+    if request.device_id.trim().is_empty() {
+        send_response(
+            stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            b"Pairing request is missing a device id.",
+        );
+        return true;
+    }
+    let device_token = generated_secret("device-token");
+    let now = now_seconds();
+    host_config.pairing_code.clear();
+    host_config.pairing_code_expires_at = 0;
+    host_config.pairing_failed_attempts = 0;
+    host_config.pairing_locked_until = 0;
+    host_config
+        .paired_devices
+        .retain(|device| device.device_id != request.device_id);
+    host_config.paired_devices.push(PairedDevice {
+        device_id: request.device_id,
+        device_name: if request.device_name.trim().is_empty() {
+            "BuildBook Computer".to_string()
+        } else {
+            request.device_name
+        },
+        token_hash: sha256_hex(&device_token),
+        paired_at: now,
+        last_seen_at: now,
+        revoked: false,
+    });
+    if let Err(error) = save_sync_config(app, &host_config) {
+        send_response(
+            stream,
+            "500 Internal Server Error",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return true;
+    }
+    let response = PairDeviceResponse {
+        host: host_info(app, current_lan_url()),
+        device_token,
+    };
+    send_response(
+        stream,
+        "200 OK",
+        "application/json; charset=utf-8",
+        serde_json::to_string(&response)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
+    true
+}
+
+fn handle_lan_sync_checkout_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/sync/checkout") {
+        return false;
+    }
+    if let Some(error) = request_sync_auth_error(app, path, headers) {
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return true;
+    }
+    let host_config = load_sync_config(app).unwrap_or_default();
+    if host_config.mode != "host" {
+        send_response(
+            stream,
+            "409 Conflict",
+            "text/plain; charset=utf-8",
+            b"This BuildBook installation is not configured as the authoritative host.",
+        );
+        return true;
+    }
+    if method != "POST" {
+        return true;
+    }
+    let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+        return true;
+    };
+    match serde_json::from_slice::<FileCheckoutRequest>(&body)
+        .map_err(|error| format!("Invalid checkout request: {error}"))
+        .and_then(apply_file_checkout)
+    {
+        Ok(result) => send_response(
+            stream,
+            "200 OK",
+            "application/json; charset=utf-8",
+            serde_json::to_string(&result)
+                .unwrap_or_default()
+                .as_bytes(),
+        ),
+        Err(error) => send_response(
+            stream,
+            "400 Bad Request",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        ),
+    }
+    true
+}
+
+fn ensure_host_sync_route(
+    app: &tauri::AppHandle,
+    path: &str,
+    headers: &str,
+    stream: &mut TcpStream,
+) -> bool {
+    if let Some(error) = request_sync_auth_error(app, path, headers) {
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return false;
+    }
+    let host_config = load_sync_config(app).unwrap_or_default();
+    if host_config.mode != "host" {
+        send_response(
+            stream,
+            "409 Conflict",
+            "text/plain; charset=utf-8",
+            b"This BuildBook installation is not configured as the authoritative host.",
+        );
+        return false;
+    }
+    true
+}
+
+fn handle_lan_sync_revision_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/sync/revision") {
+        return false;
+    }
+    if !ensure_host_sync_route(app, path, headers, stream) {
+        return true;
+    }
+    if method == "GET" {
+        match read_app_state(app.clone()) {
+            Ok(contents) => {
+                let contents = contents.unwrap_or_else(|| "{}".to_string());
+                match state_revision(&contents) {
+                    Ok(revision) => send_response(
+                        stream,
+                        "200 OK",
+                        "text/plain; charset=utf-8",
+                        revision.as_bytes(),
+                    ),
+                    Err(error) => send_response(
+                        stream,
+                        "500 Internal Server Error",
+                        "text/plain; charset=utf-8",
+                        error.as_bytes(),
+                    ),
+                }
+            }
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+    }
+    true
+}
+
+fn handle_lan_sync_state_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/sync/state") {
+        return false;
+    }
+    if !ensure_host_sync_route(app, path, headers, stream) {
+        return true;
+    }
+    if method == "GET" {
+        let contents = match read_app_state(app.clone()) {
+            Ok(value) => value.unwrap_or_else(|| "{}".to_string()),
+            Err(error) => {
+                send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                );
+                return true;
+            }
+        };
+        let state = match serde_json::from_str::<serde_json::Value>(&contents) {
+            Ok(state) => state,
+            Err(error) => {
+                send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    format!("Host state is invalid: {error}").as_bytes(),
+                );
+                return true;
+            }
+        };
+        let envelope = SyncStateEnvelope {
+            revision: state_revision(&contents).unwrap_or_default(),
+            contents: state,
+        };
+        let body = serde_json::to_vec(&envelope).unwrap_or_default();
+        send_response(stream, "200 OK", "application/json; charset=utf-8", &body);
+        return true;
+    }
+    if method == "POST" {
+        let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+            return true;
+        };
+        let request = match serde_json::from_slice::<SyncStateWriteRequest>(&body) {
+            Ok(request) => request,
+            Err(error) => {
+                send_response(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("Invalid sync request: {error}").as_bytes(),
+                );
+                return true;
+            }
+        };
+        if request.device_id.trim().is_empty() {
+            send_response(
+                stream,
+                "400 Bad Request",
+                "text/plain; charset=utf-8",
+                b"Sync request is missing a device id.",
+            );
+            return true;
+        }
+        let _guard = match state_write_lock().lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    b"Could not lock BuildBook state.",
+                );
+                return true;
+            }
+        };
+        let current_contents = match read_app_state(app.clone()) {
+            Ok(value) => value.unwrap_or_else(|| "{}".to_string()),
+            Err(error) => {
+                send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                );
+                return true;
+            }
+        };
+        let current_revision = state_revision(&current_contents).unwrap_or_default();
+        if request.force != Some(true) && request.base_revision != current_revision {
+            let current_state = serde_json::from_str::<serde_json::Value>(&current_contents)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let envelope = SyncStateEnvelope {
+                revision: current_revision,
+                contents: current_state,
+            };
+            let response = serde_json::to_vec(&envelope).unwrap_or_default();
+            send_response(
+                stream,
+                "409 Conflict",
+                "application/json; charset=utf-8",
+                &response,
+            );
+            return true;
+        }
+        let next_contents = match serde_json::to_string_pretty(&request.contents) {
+            Ok(contents) => contents,
+            Err(error) => {
+                send_response(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("Could not encode sync state: {error}").as_bytes(),
+                );
+                return true;
+            }
+        };
+        if let Err(error) = write_app_state_inner(app, &next_contents) {
+            send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return true;
+        }
+        let envelope = SyncStateEnvelope {
+            revision: state_revision(&next_contents).unwrap_or_default(),
+            contents: request.contents,
+        };
+        let response = serde_json::to_vec(&envelope).unwrap_or_default();
+        send_response(
+            stream,
+            "200 OK",
+            "application/json; charset=utf-8",
+            &response,
+        );
+    }
+    true
+}
+
+fn handle_lan_state_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/state") {
+        return false;
+    }
+    if let Some(error) = request_auth_error(method, path, headers) {
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return true;
+    }
+    if method == "GET" {
+        match read_app_state(app.clone()).map(|value| value.unwrap_or_else(|| "{}".to_string())) {
+            Ok(contents) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                contents.as_bytes(),
+            ),
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    if method == "POST" {
+        let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+            return true;
+        };
+        let contents = match String::from_utf8(body) {
+            Ok(contents) => contents,
+            Err(error) => {
+                let message = format!("App state request was not valid UTF-8: {error}");
+                send_response(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    message.as_bytes(),
+                );
+                return true;
+            }
+        };
+        match write_app_state(app.clone(), contents) {
+            Ok(()) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                b"{\"ok\":true}",
+            ),
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_lan_file_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/files") {
+        return false;
+    }
+    if let Some(error) = request_file_auth_error(app, method, path, headers) {
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return true;
+    }
+    if method == "GET" {
+        let file_path = query_value(path, "path");
+        if !file_api_path_allowed(app, &file_path) {
+            send_response(
+                stream,
+                "403 Forbidden",
+                "text/plain; charset=utf-8",
+                b"File access is not allowed for this path.",
+            );
+            return true;
+        }
+        match read_file_bytes(app.clone(), file_path.clone()) {
+            Ok(bytes) => send_response(stream, "200 OK", content_type(&file_path), &bytes),
+            Err(error) => send_response(
+                stream,
+                "404 Not Found",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    if method == "POST" {
+        let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+            return true;
+        };
+        let name = query_value(path, "name");
+        let library = query_value(path, "library");
+        match save_uploaded_file(app.clone(), name, library, body) {
+            Ok(stored) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_string(&stored)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            ),
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    if method == "PUT" {
+        let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+            return true;
+        };
+        let file_path = query_value(path, "path");
+        if !file_api_path_allowed(app, &file_path) {
+            send_response(
+                stream,
+                "403 Forbidden",
+                "text/plain; charset=utf-8",
+                b"File access is not allowed for this path.",
+            );
+            return true;
+        }
+        match overwrite_file_bytes(app.clone(), file_path, body) {
+            Ok(stored) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_string(&stored)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            ),
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    if method == "DELETE" {
+        let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+            return true;
+        };
+        let paths = match serde_json::from_slice::<Vec<String>>(&body) {
+            Ok(paths) => paths,
+            Err(error) => {
+                send_response(
+                    stream,
+                    "400 Bad Request",
+                    "text/plain; charset=utf-8",
+                    format!("Invalid file delete request: {error}").as_bytes(),
+                );
+                return true;
+            }
+        };
+        match delete_managed_files(app.clone(), paths) {
+            Ok(result) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_string(&result)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            ),
+            Err(error) => send_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_lan_download_url_route(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    stream: &mut TcpStream,
+) -> bool {
+    if !path.starts_with("/api/download-url") {
+        return false;
+    }
+    if let Some(error) = request_file_auth_error(app, method, path, headers) {
+        send_response(
+            stream,
+            "401 Unauthorized",
+            "text/plain; charset=utf-8",
+            error.as_bytes(),
+        );
+        return true;
+    }
+    if method == "POST" {
+        match download_url_to_file(
+            app.clone(),
+            query_value(path, "url"),
+            query_value(path, "library"),
+            query_value(path, "name"),
+        ) {
+            Ok(stored) => send_response(
+                stream,
+                "200 OK",
+                "application/json; charset=utf-8",
+                serde_json::to_string(&stored)
+                    .unwrap_or_default()
+                    .as_bytes(),
+            ),
+            Err(error) => send_response(
+                stream,
+                "502 Bad Gateway",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            ),
+        }
+        return true;
+    }
+    false
+}
+
+fn handle_lan_storage_routes(
+    app: &tauri::AppHandle,
+    method: &str,
+    path: &str,
+    headers: &str,
+    initial: &[u8],
+    stream: &mut TcpStream,
+) -> bool {
+    if path.starts_with("/api/storage-scan") {
+        if let Some(error) = request_auth_error(method, path, headers) {
+            send_response(
+                stream,
+                "401 Unauthorized",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return true;
+        }
+        if method == "POST" {
+            let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
+                return true;
+            };
+            match serde_json::from_slice::<StorageScanRequest>(&body)
+                .map_err(|error| format!("Invalid storage scan request: {error}"))
+                .and_then(|request| {
+                    scan_storage_inner(
+                        app.clone(),
+                        request.referenced_paths,
+                        request.delete_paths.unwrap_or_default(),
+                    )
+                }) {
+                Ok(scan) => send_response(
+                    stream,
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    serde_json::to_string(&scan).unwrap_or_default().as_bytes(),
+                ),
+                Err(error) => send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                ),
+            }
+            return true;
+        }
+    }
+
+    if path.starts_with("/api/reset-storage") {
+        if let Some(error) = request_auth_error(method, path, headers) {
+            send_response(
+                stream,
+                "401 Unauthorized",
+                "text/plain; charset=utf-8",
+                error.as_bytes(),
+            );
+            return true;
+        }
+        if method == "POST" {
+            match reset_managed_storage(app.clone()) {
+                Ok(result) => send_response(
+                    stream,
+                    "200 OK",
+                    "application/json; charset=utf-8",
+                    serde_json::to_string(&result)
+                        .unwrap_or_default()
+                        .as_bytes(),
+                ),
+                Err(error) => send_response(
+                    stream,
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.as_bytes(),
+                ),
+            }
+            return true;
+        }
+    }
+
+    false
+}
+
+fn serve_lan_static_request(app: &tauri::AppHandle, path: &str, stream: &mut TcpStream) {
+    let browser_enabled = lan_mutex()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().map(|server| server.browser_enabled))
+        .unwrap_or(false);
+    if !browser_enabled {
+        send_response(
+            stream,
+            "403 Forbidden",
+            "text/plain; charset=utf-8",
+            b"BuildBook browser access is disabled on this host.",
+        );
+        return;
+    }
+
+    let Some(dist) = dist_dir(app) else {
+        send_response(
+            stream,
+            "503 Service Unavailable",
+            "text/plain; charset=utf-8",
+            b"BuildBook web files are not available. Run a production build first.",
+        );
+        return;
+    };
+    let relative = path
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .trim_start_matches('/');
+    let safe_relative = if relative.is_empty() {
+        "index.html"
+    } else {
+        relative
+    };
+    let target = dist.join(safe_library_path(safe_relative));
+    let file_path = if target.is_file() {
+        target
+    } else {
+        dist.join("index.html")
+    };
+    match std::fs::read(&file_path) {
+        Ok(bytes) => send_response(
+            stream,
+            "200 OK",
+            content_type(file_path.to_string_lossy().as_ref()),
+            &bytes,
+        ),
+        Err(_) => send_response(
+            stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            b"Not found",
+        ),
+    }
+}
+
 fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
     let mut buffer = vec![0; 64 * 1024];
     let count = match stream.read(&mut buffer) {
@@ -3739,897 +4057,47 @@ fn serve_lan_request(app: tauri::AppHandle, mut stream: TcpStream) {
         return;
     }
 
-    if path.starts_with("/api/discovery") {
-        let host_config = load_sync_config(&app).unwrap_or_default();
-        if host_config.mode != "host" {
-            send_response(
-                &mut stream,
-                "404 Not Found",
-                "text/plain; charset=utf-8",
-                b"BuildBook host mode is not enabled.",
-            );
-            return;
-        }
-        let url = lan_mutex()
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|server| server.url.clone()))
-            .unwrap_or_default();
-        let body = serde_json::to_vec(&host_info(&app, url)).unwrap_or_else(|_| b"{}".to_vec());
-        send_response(
-            &mut stream,
-            "200 OK",
-            "application/json; charset=utf-8",
-            &body,
-        );
+    if handle_lan_info_routes(&app, path, headers, &mut stream) {
         return;
     }
 
-    if path.starts_with("/api/host-info") {
-        if let Some(error) = request_token_error(path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        let url = lan_mutex()
-            .lock()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(|server| server.url.clone()))
-            .unwrap_or_default();
-        let body = serde_json::to_vec(&host_info(&app, url)).unwrap_or_else(|_| b"{}".to_vec());
-        send_response(
-            &mut stream,
-            "200 OK",
-            "application/json; charset=utf-8",
-            &body,
-        );
+    if handle_lan_sync_pair_route(&app, method, path, headers, &buffer, &mut stream) {
         return;
     }
 
-    if path.starts_with("/api/auth-status") {
-        send_web_auth_status(&mut stream, headers);
+    if handle_lan_sync_checkout_route(&app, method, path, headers, &buffer, &mut stream) {
         return;
     }
 
-    if path.starts_with("/api/sync/pair") {
-        let mut host_config = load_sync_config(&app).unwrap_or_default();
-        if host_config.mode != "host" {
-            send_response(
-                &mut stream,
-                "409 Conflict",
-                "text/plain; charset=utf-8",
-                b"This BuildBook installation is not configured as the authoritative host.",
-            );
-            return;
-        }
-        if method == "POST" {
-            let now = now_seconds();
-            if host_config.pairing_locked_until > now {
-                send_response(&mut stream, "429 Too Many Requests", "text/plain; charset=utf-8", b"Pairing is temporarily locked after too many failed attempts. Generate a new code or wait 5 minutes.");
-                return;
-            }
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let request = match serde_json::from_slice::<PairDeviceRequest>(&body) {
-                Ok(request) => request,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        format!("Invalid pairing request: {error}").as_bytes(),
-                    );
-                    return;
-                }
-            };
-            if host_config.pairing_code.trim().is_empty()
-                || host_config.pairing_code_expires_at < now_seconds()
-                || request.pairing_code.trim() != host_config.pairing_code
-            {
-                host_config.pairing_failed_attempts =
-                    host_config.pairing_failed_attempts.saturating_add(1);
-                if host_config.pairing_failed_attempts >= 5 {
-                    host_config.pairing_locked_until = now_seconds() + 5 * 60;
-                    host_config.pairing_code.clear();
-                    host_config.pairing_code_expires_at = 0;
-                    host_config.pairing_failed_attempts = 0;
-                }
-                let _ = save_sync_config(&app, &host_config);
-                send_response(
-                    &mut stream,
-                    "401 Unauthorized",
-                    "text/plain; charset=utf-8",
-                    b"Pairing code is invalid or expired.",
-                );
-                return;
-            }
-            if request.device_id.trim().is_empty() {
-                send_response(
-                    &mut stream,
-                    "400 Bad Request",
-                    "text/plain; charset=utf-8",
-                    b"Pairing request is missing a device id.",
-                );
-                return;
-            }
-            let device_token = generated_secret("device-token");
-            let now = now_seconds();
-            host_config.pairing_code.clear();
-            host_config.pairing_code_expires_at = 0;
-            host_config.pairing_failed_attempts = 0;
-            host_config.pairing_locked_until = 0;
-            host_config
-                .paired_devices
-                .retain(|device| device.device_id != request.device_id);
-            host_config.paired_devices.push(PairedDevice {
-                device_id: request.device_id,
-                device_name: if request.device_name.trim().is_empty() {
-                    "BuildBook Computer".to_string()
-                } else {
-                    request.device_name
-                },
-                token_hash: sha256_hex(&device_token),
-                paired_at: now,
-                last_seen_at: now,
-                revoked: false,
-            });
-            if let Err(error) = save_sync_config(&app, &host_config) {
-                send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                );
-                return;
-            }
-            let url = lan_mutex()
-                .lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().map(|server| server.url.clone()))
-                .unwrap_or_default();
-            let response = PairDeviceResponse {
-                host: host_info(&app, url),
-                device_token,
-            };
-            send_response(
-                &mut stream,
-                "200 OK",
-                "application/json; charset=utf-8",
-                serde_json::to_string(&response)
-                    .unwrap_or_default()
-                    .as_bytes(),
-            );
-            return;
-        }
-    }
-
-    if path.starts_with("/api/sync/checkout") {
-        if let Some(error) = request_sync_auth_error(&app, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        let host_config = load_sync_config(&app).unwrap_or_default();
-        if host_config.mode != "host" {
-            send_response(
-                &mut stream,
-                "409 Conflict",
-                "text/plain; charset=utf-8",
-                b"This BuildBook installation is not configured as the authoritative host.",
-            );
-            return;
-        }
-        if method == "POST" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            match serde_json::from_slice::<FileCheckoutRequest>(&body)
-                .map_err(|error| format!("Invalid checkout request: {error}"))
-                .and_then(apply_file_checkout)
-            {
-                Ok(result) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&result)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "400 Bad Request",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/sync/revision") {
-        if let Some(error) = request_sync_auth_error(&app, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        let host_config = load_sync_config(&app).unwrap_or_default();
-        if host_config.mode != "host" {
-            send_response(
-                &mut stream,
-                "409 Conflict",
-                "text/plain; charset=utf-8",
-                b"This BuildBook installation is not configured as the authoritative host.",
-            );
-            return;
-        }
-        if method == "GET" {
-            match read_app_state(app.clone()) {
-                Ok(contents) => {
-                    let contents = contents.unwrap_or_else(|| "{}".to_string());
-                    match state_revision(&contents) {
-                        Ok(revision) => send_response(
-                            &mut stream,
-                            "200 OK",
-                            "text/plain; charset=utf-8",
-                            revision.as_bytes(),
-                        ),
-                        Err(error) => send_response(
-                            &mut stream,
-                            "500 Internal Server Error",
-                            "text/plain; charset=utf-8",
-                            error.as_bytes(),
-                        ),
-                    }
-                }
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/sync/state") {
-        if let Some(error) = request_sync_auth_error(&app, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        let host_config = load_sync_config(&app).unwrap_or_default();
-        if host_config.mode != "host" {
-            send_response(
-                &mut stream,
-                "409 Conflict",
-                "text/plain; charset=utf-8",
-                b"This BuildBook installation is not configured as the authoritative host.",
-            );
-            return;
-        }
-        if method == "GET" {
-            let contents = match read_app_state(app.clone()) {
-                Ok(value) => value.unwrap_or_else(|| "{}".to_string()),
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let state = match serde_json::from_str::<serde_json::Value>(&contents) {
-                Ok(state) => state,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        "text/plain; charset=utf-8",
-                        format!("Host state is invalid: {error}").as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let envelope = SyncStateEnvelope {
-                revision: state_revision(&contents).unwrap_or_default(),
-                contents: state,
-            };
-            let body = serde_json::to_vec(&envelope).unwrap_or_default();
-            send_response(
-                &mut stream,
-                "200 OK",
-                "application/json; charset=utf-8",
-                &body,
-            );
-            return;
-        }
-        if method == "POST" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let request = match serde_json::from_slice::<SyncStateWriteRequest>(&body) {
-                Ok(request) => request,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        format!("Invalid sync request: {error}").as_bytes(),
-                    );
-                    return;
-                }
-            };
-            if request.device_id.trim().is_empty() {
-                send_response(
-                    &mut stream,
-                    "400 Bad Request",
-                    "text/plain; charset=utf-8",
-                    b"Sync request is missing a device id.",
-                );
-                return;
-            }
-            let _guard = match state_write_lock().lock() {
-                Ok(guard) => guard,
-                Err(_) => {
-                    send_response(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        "text/plain; charset=utf-8",
-                        b"Could not lock BuildBook state.",
-                    );
-                    return;
-                }
-            };
-            let current_contents = match read_app_state(app.clone()) {
-                Ok(value) => value.unwrap_or_else(|| "{}".to_string()),
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "500 Internal Server Error",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let current_revision = state_revision(&current_contents).unwrap_or_default();
-            if request.force != Some(true) && request.base_revision != current_revision {
-                let current_state = serde_json::from_str::<serde_json::Value>(&current_contents)
-                    .unwrap_or_else(|_| serde_json::json!({}));
-                let envelope = SyncStateEnvelope {
-                    revision: current_revision,
-                    contents: current_state,
-                };
-                let response = serde_json::to_vec(&envelope).unwrap_or_default();
-                send_response(
-                    &mut stream,
-                    "409 Conflict",
-                    "application/json; charset=utf-8",
-                    &response,
-                );
-                return;
-            }
-            let next_contents = match serde_json::to_string_pretty(&request.contents) {
-                Ok(contents) => contents,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        format!("Could not encode sync state: {error}").as_bytes(),
-                    );
-                    return;
-                }
-            };
-            if let Err(error) = write_app_state_inner(&app, &next_contents) {
-                send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                );
-                return;
-            }
-            let envelope = SyncStateEnvelope {
-                revision: state_revision(&next_contents).unwrap_or_default(),
-                contents: request.contents,
-            };
-            let response = serde_json::to_vec(&envelope).unwrap_or_default();
-            send_response(
-                &mut stream,
-                "200 OK",
-                "application/json; charset=utf-8",
-                &response,
-            );
-            return;
-        }
-    }
-
-    if path.starts_with("/api/login") {
-        if method == "POST" {
-            if !request_has_app_header(headers) {
-                send_response(
-                    &mut stream,
-                    "401 Unauthorized",
-                    "text/plain; charset=utf-8",
-                    b"BuildBook request header is required.",
-                );
-                return;
-            }
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            handle_web_login(&mut stream, &body, headers);
-            return;
-        }
-    }
-
-    if path.starts_with("/api/logout") {
-        if method == "POST" {
-            if !request_has_app_header(headers) {
-                send_response(
-                    &mut stream,
-                    "401 Unauthorized",
-                    "text/plain; charset=utf-8",
-                    b"BuildBook request header is required.",
-                );
-                return;
-            }
-            handle_web_logout(&mut stream);
-            return;
-        }
-    }
-
-    if path.starts_with("/api/state") {
-        if let Some(error) = request_auth_error(method, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        if method == "GET" {
-            match read_app_state(app)
-                .and_then(|value| Ok(value.unwrap_or_else(|| "{}".to_string())))
-            {
-                Ok(contents) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    contents.as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-        if method == "POST" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let contents = match String::from_utf8(body) {
-                Ok(contents) => contents,
-                Err(error) => {
-                    let message = format!("App state request was not valid UTF-8: {error}");
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        message.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            match write_app_state(app, contents) {
-                Ok(()) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    b"{\"ok\":true}",
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/files") {
-        if let Some(error) = request_file_auth_error(&app, method, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        if method == "GET" {
-            let file_path = query_value(path, "path");
-            if !file_api_path_allowed(&app, &file_path) {
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "text/plain; charset=utf-8",
-                    b"File access is not allowed for this path.",
-                );
-                return;
-            }
-            match read_file_bytes(file_path.clone()) {
-                Ok(bytes) => send_response(&mut stream, "200 OK", content_type(&file_path), &bytes),
-                Err(error) => send_response(
-                    &mut stream,
-                    "404 Not Found",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-        if method == "POST" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let name = query_value(path, "name");
-            let library = query_value(path, "library");
-            match save_uploaded_file(app, name, library, body) {
-                Ok(stored) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&stored)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-        if method == "PUT" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let file_path = query_value(path, "path");
-            if !file_api_path_allowed(&app, &file_path) {
-                send_response(
-                    &mut stream,
-                    "403 Forbidden",
-                    "text/plain; charset=utf-8",
-                    b"File access is not allowed for this path.",
-                );
-                return;
-            }
-            match overwrite_file_bytes(app, file_path, body) {
-                Ok(stored) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&stored)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-        if method == "DELETE" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            let paths = match serde_json::from_slice::<Vec<String>>(&body) {
-                Ok(paths) => paths,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        format!("Invalid file delete request: {error}").as_bytes(),
-                    );
-                    return;
-                }
-            };
-            match delete_managed_files(app, paths) {
-                Ok(result) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&result)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/download-url") {
-        if let Some(error) = request_file_auth_error(&app, method, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        if method == "POST" {
-            match download_url_to_file(
-                app,
-                query_value(path, "url"),
-                query_value(path, "library"),
-                query_value(path, "name"),
-            ) {
-                Ok(stored) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&stored)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "502 Bad Gateway",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/storage-scan") {
-        if let Some(error) = request_auth_error(method, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        if method == "POST" {
-            let body = match request_body(&mut stream, &buffer, headers) {
-                Ok(body) => body,
-                Err(error) => {
-                    send_response(
-                        &mut stream,
-                        "400 Bad Request",
-                        "text/plain; charset=utf-8",
-                        error.as_bytes(),
-                    );
-                    return;
-                }
-            };
-            match serde_json::from_slice::<StorageScanRequest>(&body)
-                .map_err(|error| format!("Invalid storage scan request: {error}"))
-                .and_then(|request| {
-                    scan_storage_inner(
-                        app,
-                        request.referenced_paths,
-                        request.delete_paths.unwrap_or_default(),
-                    )
-                }) {
-                Ok(scan) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&scan).unwrap_or_default().as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    if path.starts_with("/api/reset-storage") {
-        if let Some(error) = request_auth_error(method, path, headers) {
-            send_response(
-                &mut stream,
-                "401 Unauthorized",
-                "text/plain; charset=utf-8",
-                error.as_bytes(),
-            );
-            return;
-        }
-        if method == "POST" {
-            match reset_managed_storage(app) {
-                Ok(result) => send_response(
-                    &mut stream,
-                    "200 OK",
-                    "application/json; charset=utf-8",
-                    serde_json::to_string(&result)
-                        .unwrap_or_default()
-                        .as_bytes(),
-                ),
-                Err(error) => send_response(
-                    &mut stream,
-                    "500 Internal Server Error",
-                    "text/plain; charset=utf-8",
-                    error.as_bytes(),
-                ),
-            }
-            return;
-        }
-    }
-
-    let browser_enabled = lan_mutex()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.as_ref().map(|server| server.browser_enabled))
-        .unwrap_or(false);
-    if !browser_enabled {
-        send_response(
-            &mut stream,
-            "403 Forbidden",
-            "text/plain; charset=utf-8",
-            b"BuildBook browser access is disabled on this host.",
-        );
+    if handle_lan_sync_revision_route(&app, method, path, headers, &mut stream) {
         return;
     }
 
-    let Some(dist) = dist_dir(&app) else {
-        send_response(
-            &mut stream,
-            "503 Service Unavailable",
-            "text/plain; charset=utf-8",
-            b"BuildBook web files are not available. Run a production build first.",
-        );
+    if handle_lan_sync_state_route(&app, method, path, headers, &buffer, &mut stream) {
         return;
-    };
-    let relative = path
-        .split('?')
-        .next()
-        .unwrap_or("/")
-        .trim_start_matches('/');
-    let safe_relative = if relative.is_empty() {
-        "index.html"
-    } else {
-        relative
-    };
-    let target = dist.join(safe_library_path(safe_relative));
-    let file_path = if target.is_file() {
-        target
-    } else {
-        dist.join("index.html")
-    };
-    match std::fs::read(&file_path) {
-        Ok(bytes) => send_response(
-            &mut stream,
-            "200 OK",
-            content_type(file_path.to_string_lossy().as_ref()),
-            &bytes,
-        ),
-        Err(_) => send_response(
-            &mut stream,
-            "404 Not Found",
-            "text/plain; charset=utf-8",
-            b"Not found",
-        ),
     }
+
+    if handle_web_session_routes(method, path, headers, &buffer, &mut stream) {
+        return;
+    }
+
+    if handle_lan_state_route(&app, method, path, headers, &buffer, &mut stream) {
+        return;
+    }
+
+    if handle_lan_file_route(&app, method, path, headers, &buffer, &mut stream) {
+        return;
+    }
+
+    if handle_lan_download_url_route(&app, method, path, headers, &mut stream) {
+        return;
+    }
+
+    if handle_lan_storage_routes(&app, method, path, headers, &buffer, &mut stream) {
+        return;
+    }
+
+    serve_lan_static_request(&app, path, &mut stream);
 }
 
 #[tauri::command]
@@ -4926,13 +4394,8 @@ fn download_url_to_file(
 }
 
 #[tauri::command]
-fn read_file_bytes(path: String) -> Result<Vec<u8>, String> {
-    let target = std::path::PathBuf::from(path.trim_matches('"'));
-
-    if !target.is_file() {
-        return Err("The saved file could not be found.".to_string());
-    }
-
+fn read_file_bytes(app: tauri::AppHandle, path: String) -> Result<Vec<u8>, String> {
+    let target = readable_user_file_path(&app, &path)?;
     std::fs::read(target).map_err(|error| format!("Could not read file: {error}"))
 }
 
@@ -5001,253 +4464,6 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
 }
 
-fn collect_folder_files(
-    root: &std::path::Path,
-    current: &std::path::Path,
-    files: &mut Vec<LinkedFolderFile>,
-) -> Result<(), String> {
-    for entry in
-        std::fs::read_dir(current).map_err(|error| format!("Could not read folder: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("Could not read folder entry: {error}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_folder_files(root, &path, files)?;
-        } else if path.is_file() {
-            let relative_path = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            files.push(LinkedFolderFile {
-                name: path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_else(|| relative_path.clone()),
-                relative_path,
-                path: path.to_string_lossy().to_string(),
-                size: path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
-            });
-        }
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn list_folder_files(path: String) -> Result<Vec<LinkedFolderFile>, String> {
-    let root = std::path::PathBuf::from(path.trim_matches('"'));
-    if !root.is_dir() {
-        return Err("The selected folder could not be found.".to_string());
-    }
-    let mut files = Vec::new();
-    collect_folder_files(&root, &root, &mut files)?;
-    Ok(files)
-}
-
-fn collect_storage_files(
-    current: &std::path::Path,
-    files: &mut Vec<std::path::PathBuf>,
-) -> Result<(), String> {
-    if !current.exists() {
-        return Ok(());
-    }
-    for entry in
-        std::fs::read_dir(current).map_err(|error| format!("Could not scan storage: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("Could not read storage entry: {error}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            collect_storage_files(&path, files)?;
-        } else if path.is_file() {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn storage_roots(app: &tauri::AppHandle) -> Result<Vec<std::path::PathBuf>, String> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Could not resolve app data folder: {error}"))?;
-    Ok(vec![app_dir.join("uploads"), app_dir.join("working")])
-}
-
-fn storage_relative_path(roots: &[std::path::PathBuf], path: &std::path::Path) -> String {
-    roots
-        .iter()
-        .find_map(|root| {
-            path.strip_prefix(root)
-                .ok()
-                .map(|value| value.to_string_lossy().replace('\\', "/"))
-        })
-        .unwrap_or_else(|| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default()
-        })
-}
-
-fn canonical_under_roots(path: &str, roots: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
-    let canonical = std::fs::canonicalize(path.trim_matches('"')).ok()?;
-    let lower = canonical.to_string_lossy().to_lowercase();
-    let allowed = roots
-        .iter()
-        .filter_map(|root| std::fs::canonicalize(root).ok())
-        .any(|root| {
-            let prefix = root.to_string_lossy().to_lowercase();
-            lower == prefix || lower.starts_with(&(prefix + "\\"))
-        });
-    allowed.then_some(canonical)
-}
-
-fn modified_millis(path: &std::path::Path) -> String {
-    path.metadata()
-        .and_then(|metadata| metadata.modified())
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis().to_string())
-        .unwrap_or_default()
-}
-
-fn scan_storage_inner(
-    app: tauri::AppHandle,
-    referenced_paths: Vec<String>,
-    delete_paths: Vec<String>,
-) -> Result<StorageScan, String> {
-    let roots = storage_roots(&app)?;
-    let referenced: std::collections::HashSet<String> = referenced_paths
-        .into_iter()
-        .filter_map(|path| std::fs::canonicalize(path.trim_matches('"')).ok())
-        .map(|path| path.to_string_lossy().to_lowercase())
-        .collect();
-    let delete_set: std::collections::HashSet<String> = delete_paths
-        .into_iter()
-        .filter_map(|path| std::fs::canonicalize(path.trim_matches('"')).ok())
-        .map(|path| path.to_string_lossy().to_lowercase())
-        .collect();
-    let mut files = Vec::new();
-    for root in &roots {
-        collect_storage_files(root, &mut files)?;
-    }
-
-    let mut result = StorageScan {
-        file_count: 0,
-        total_bytes: 0,
-        orphan_count: 0,
-        orphan_bytes: 0,
-        deleted_count: 0,
-        deleted_bytes: 0,
-        orphans: Vec::new(),
-    };
-
-    for file in files {
-        let size = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-        result.file_count += 1;
-        result.total_bytes += size;
-        let canonical = std::fs::canonicalize(&file)
-            .unwrap_or(file.clone())
-            .to_string_lossy()
-            .to_lowercase();
-        if referenced.contains(&canonical) {
-            continue;
-        }
-        if delete_set.contains(&canonical) && std::fs::remove_file(&file).is_ok() {
-            result.deleted_count += 1;
-            result.deleted_bytes += size;
-            continue;
-        }
-        result.orphan_count += 1;
-        result.orphan_bytes += size;
-        result.orphans.push(OrphanFile {
-            name: file
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            path: file.to_string_lossy().to_string(),
-            relative_path: storage_relative_path(&roots, &file),
-            size,
-            modified_at: modified_millis(&file),
-        });
-    }
-    Ok(result)
-}
-
-#[tauri::command]
-fn scan_storage(
-    app: tauri::AppHandle,
-    referenced_paths: Vec<String>,
-) -> Result<StorageScan, String> {
-    scan_storage_inner(app, referenced_paths, Vec::new())
-}
-
-#[tauri::command]
-fn cleanup_orphaned_files(
-    app: tauri::AppHandle,
-    referenced_paths: Vec<String>,
-    delete_paths: Vec<String>,
-) -> Result<StorageScan, String> {
-    scan_storage_inner(app, referenced_paths, delete_paths)
-}
-
-#[tauri::command]
-fn delete_managed_files(
-    app: tauri::AppHandle,
-    paths: Vec<String>,
-) -> Result<DeleteManagedFilesResult, String> {
-    let roots = storage_roots(&app)?;
-    let mut deleted_paths = Vec::new();
-    let mut failed_paths = Vec::new();
-    for path in paths {
-        let Some(target) = canonical_under_roots(&path, &roots) else {
-            failed_paths.push(path);
-            continue;
-        };
-        let result = if target.is_dir() {
-            std::fs::remove_dir_all(&target)
-        } else {
-            std::fs::remove_file(&target)
-        };
-        if result.is_ok() {
-            deleted_paths.push(target.to_string_lossy().to_string());
-        } else {
-            failed_paths.push(target.to_string_lossy().to_string());
-        }
-    }
-    Ok(DeleteManagedFilesResult {
-        deleted_paths,
-        failed_paths,
-    })
-}
-
-#[tauri::command]
-fn reset_managed_storage(app: tauri::AppHandle) -> Result<ResetStorageResult, String> {
-    let mut retained_files = Vec::new();
-    for root in storage_roots(&app)? {
-        if root.exists() {
-            remove_managed_contents(&root, &mut retained_files);
-            let _ = std::fs::remove_dir(&root);
-        }
-    }
-    Ok(ResetStorageResult { retained_files })
-}
-
-fn remove_managed_contents(path: &std::path::Path, retained_files: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        retained_files.push(path.to_string_lossy().to_string());
-        return;
-    };
-    for entry in entries.flatten() {
-        let child = entry.path();
-        if child.is_dir() {
-            remove_managed_contents(&child, retained_files);
-            let _ = std::fs::remove_dir(&child);
-        } else if child.is_file() && std::fs::remove_file(&child).is_err() {
-            retained_files.push(child.to_string_lossy().to_string());
-        }
-    }
-}
-
 #[cfg(test)]
 mod sync_tests {
     use super::{apply_file_checkout, merge_sync_values, FileCheckoutRequest};
@@ -5298,7 +4514,9 @@ mod sync_tests {
         let host = serde_json::json!({ "projects": [{ "id": "a", "noteSheets": [{ "id": "sheet-1", "content": "Host note" }] }] });
 
         let merged = merge_sync_values(&base, &local, &host, "", "Laptop");
-        let notes = merged["projects"][0]["noteSheets"][0]["content"].as_str().unwrap_or_default();
+        let notes = merged["projects"][0]["noteSheets"][0]["content"]
+            .as_str()
+            .unwrap_or_default();
         assert!(notes.contains("Host note"));
         assert!(notes.contains("Combined notes from Laptop"));
         assert!(notes.contains("Local note"));
@@ -5345,63 +4563,23 @@ mod sync_tests {
 }
 
 #[tauri::command]
-fn open_file_path(path: String) -> Result<(), String> {
-    let target = std::path::PathBuf::from(path.trim_matches('"'));
-
-    if !target.exists() {
-        return Err("The saved file could not be found.".to_string());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows_shell_execute(&target, None)?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(&target)
-            .spawn()
-            .map_err(|error| format!("Could not open file: {error}"))?;
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&target)
-            .spawn()
-            .map_err(|error| format!("Could not open file: {error}"))?;
-    }
-
-    Ok(())
+fn open_file_path(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    let target = readable_user_file_path(&app, &path)?;
+    open_file_path_inner(&target)
 }
 
 #[tauri::command]
-fn open_file_with_program(program_path: String, file_path: String) -> Result<(), String> {
-    let program = std::path::PathBuf::from(program_path.trim_matches('"'));
-    let file = std::path::PathBuf::from(file_path.trim_matches('"'));
+fn open_file_with_program(
+    app: tauri::AppHandle,
+    program_path: String,
+    file_path: String,
+) -> Result<(), String> {
+    let program = normalized_existing_path(&program_path)?;
+    let file = readable_user_file_path(&app, &file_path)?;
 
-    if !program.exists() {
+    if !program.is_file() {
         return Err("The configured program could not be found.".to_string());
     }
 
-    if !file.exists() {
-        return Err("The saved file could not be found.".to_string());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        windows_shell_execute(&program, Some(&file))
-            .map_err(|error| format!("Could not launch program: {error}"))?;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        std::process::Command::new(program)
-            .arg(file)
-            .spawn()
-            .map_err(|error| format!("Could not launch program: {error}"))?;
-    }
-
-    Ok(())
+    open_file_with_program_inner(&program, &file)
 }

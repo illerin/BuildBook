@@ -1,9 +1,18 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const root = process.cwd();
-const app = readFileSync(join(root, 'src', 'App.jsx'), 'utf8');
+function readSources(dir) {
+  return readdirSync(dir, { withFileTypes: true }).map((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return readSources(path);
+    if (!/\.(js|jsx|mjs)$/.test(entry.name)) return '';
+    return readFileSync(path, 'utf8');
+  }).join('\n');
+}
+
+const source = readSources(join(root, 'src'));
 const standardsRoot = resolve(root, '..', 'BuildBook_Compatibility_Standards');
 
 const requiredMarkers = [
@@ -19,7 +28,7 @@ const requiredMarkers = [
   'fileTrackers',
 ];
 
-const missing = requiredMarkers.filter((marker) => !app.includes(marker));
+const missing = requiredMarkers.filter((marker) => !source.includes(marker));
 
 if (missing.length) {
   console.error(`Compatibility smoke check failed. Missing markers: ${missing.join(', ')}`);
