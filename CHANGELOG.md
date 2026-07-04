@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0-test.13 - 2026-07-03
+
+Changes since test-v0.4.0-test.12.
+
+### Changes
+
+- Add in a optional AI chat area
+- Add smoke tests and refactor Tauri backend
+
 ## 0.4.0-test.12 - 2026-06-23
 
 Changes since test-v0.4.0-test.11.
