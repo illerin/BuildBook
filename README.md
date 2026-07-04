@@ -12,6 +12,13 @@ BuildBook is a Windows desktop app for tracking electronics builds, parts, proje
 
 For the Docker version, see [BuildBook_Web](https://github.com/illerin/BuildBook_Web).
 
+## Documentation
+
+- [User Guide](docs/USER_GUIDE.md)
+- [Architecture and Contributor Guide](docs/ARCHITECTURE.md)
+- [Security Notes](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+
 ## Screenshots
 
 ![Project overview](sample%20images/Project%20overview.PNG)

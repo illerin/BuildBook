@@ -104,6 +104,43 @@ export const DEFAULT_REVISION_SETTINGS = {
   trackLinkedFiles: false,
 };
 
+export const PROJECT_TABS = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'instructions', label: 'Instructions' },
+  { id: 'photos', label: 'Photos' },
+  { id: 'parts', label: 'Parts' },
+  { id: 'files', label: 'Files' },
+  { id: 'ai', label: 'AI Chat' },
+];
+
+export const DEFAULT_PROJECT_TABS = PROJECT_TABS
+  .filter((tab) => tab.id !== 'ai')
+  .map((tab) => tab.id);
+
+export const DEFAULT_PROJECT_AI_PERMISSIONS = {
+  overview: 'none',
+  instructions: 'none',
+  photos: 'none',
+  parts: 'none',
+  files: 'none',
+  libraryParts: 'read',
+  webResearch: 'none',
+};
+
+export function normalizeProjectTabs(value, fallback = DEFAULT_PROJECT_TABS) {
+  const validIds = new Set(PROJECT_TABS.map((tab) => tab.id));
+  const tabs = Array.isArray(value) ? [...new Set(value.filter((id) => validIds.has(id)))] : [];
+  return tabs.length ? tabs : [...fallback];
+}
+
+export function normalizeProjectAiPermissions(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  return Object.fromEntries(Object.keys(DEFAULT_PROJECT_AI_PERMISSIONS).map((key) => {
+    const mode = source[key] ?? DEFAULT_PROJECT_AI_PERMISSIONS[key];
+    return [key, mode === 'write' ? 'write' : mode === 'read' ? 'read' : 'none'];
+  }));
+}
+
 export const DEFAULT_WEB_AUTH = {
   enabled: false,
   scope: 'domain',
@@ -135,7 +172,10 @@ export const DEFAULT_STATE = {
     steps: DEFAULT_PROJECT_STEPS,
     checklist: ['Add project notes', 'Link parts', 'Attach latest schematic', 'Export build package'],
     fileTrackers: DEFAULT_FILE_TRACKERS,
+    tabs: DEFAULT_PROJECT_TABS,
   },
+  projectTabSettings: {},
+  projectAiSettings: {},
   revisionSettings: DEFAULT_REVISION_SETTINGS,
   storageLocations: [],
   projects: [],
@@ -275,11 +315,18 @@ export function normalizeState(raw, options = {}) {
       ...template,
       steps: rawSteps.length ? rawSteps : DEFAULT_STATE.template.steps,
       checklist: Array.isArray(template.checklist) ? template.checklist : DEFAULT_STATE.template.checklist,
+      tabs: normalizeProjectTabs(template.tabs),
       fileTrackers: (Array.isArray(template.fileTrackers) ? template.fileTrackers : DEFAULT_FILE_TRACKERS).map((tracker, index) => ({
         ...tracker,
         color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
       })),
     },
+    projectTabSettings: Object.fromEntries(Object.entries(
+      state.projectTabSettings && typeof state.projectTabSettings === 'object' ? state.projectTabSettings : {},
+    ).map(([projectId, tabs]) => [projectId, normalizeProjectTabs(tabs)])),
+    projectAiSettings: Object.fromEntries(Object.entries(
+      state.projectAiSettings && typeof state.projectAiSettings === 'object' ? state.projectAiSettings : {},
+    ).map(([projectId, permissions]) => [projectId, normalizeProjectAiPermissions(permissions)])),
     projects: (Array.isArray(state.projects) ? state.projects : DEFAULT_STATE.projects).map((project) => {
       const rawNoteSheets = Array.isArray(project.noteSheets) ? project.noteSheets : [];
       const noteSheets = rawNoteSheets.length

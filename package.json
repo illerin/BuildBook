@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node scripts/check-versions.mjs && node scripts/compatibility-smoke.mjs && node scripts/compatibility-helpers-smoke.mjs && node scripts/richtext-smoke.mjs && node scripts/richtext-browser-smoke.mjs && node scripts/supplier-import-smoke.mjs && node scripts/theme-smoke.mjs && node scripts/file-preview-parsers-smoke.mjs",
+    "test": "node scripts/check-versions.mjs && node scripts/compatibility-smoke.mjs && node scripts/compatibility-helpers-smoke.mjs && node scripts/richtext-smoke.mjs && node scripts/richtext-browser-smoke.mjs && node scripts/supplier-import-smoke.mjs && node scripts/theme-smoke.mjs && node scripts/file-preview-parsers-smoke.mjs && node scripts/project-ai-smoke.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

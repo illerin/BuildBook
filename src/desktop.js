@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
-import { apiHeaders, cachedSyncConfig, cacheSyncConfig, isLanWebClient, isTauri, lanToken } from './runtime';
+import { apiHeaders, cachedSyncConfig, cacheSyncConfig, isLanWebClient, isTauri, lanToken } from './runtime.js';
 
 function fileApiUrl(path) {
   return `/api/files?path=${encodeURIComponent(path)}&access=${encodeURIComponent(lanToken())}`;

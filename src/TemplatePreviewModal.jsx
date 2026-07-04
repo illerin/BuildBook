@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
+import { PROJECT_TABS, normalizeProjectTabs } from './data';
 
 export default function TemplatePreviewModal({ template, onClose, onUpdate }) {
   const [newStep, setNewStep] = useState('');
   const [newChecklist, setNewChecklist] = useState('');
   const [selectedSteps, setSelectedSteps] = useState([]);
+  const templateTabs = normalizeProjectTabs(template.tabs);
 
   const addStep = () => {
     if (!newStep.trim()) return;
@@ -27,6 +29,13 @@ export default function TemplatePreviewModal({ template, onClose, onUpdate }) {
     if (!newChecklist.trim()) return;
     onUpdate({ checklist: [...template.checklist, newChecklist.trim()] });
     setNewChecklist('');
+  };
+
+  const toggleTab = (tabId) => {
+    const next = templateTabs.includes(tabId)
+      ? (templateTabs.length > 1 ? templateTabs.filter((id) => id !== tabId) : templateTabs)
+      : [...templateTabs, tabId];
+    onUpdate({ tabs: next });
   };
 
   return (
@@ -86,6 +95,18 @@ export default function TemplatePreviewModal({ template, onClose, onUpdate }) {
                   <button className="ghost" onClick={() => onUpdate({ checklist: template.checklist.filter((text) => text !== item) })}>Delete</button>
                 </div>
               ))}
+            </article>
+            <article>
+              <h3>Default Project Tabs</h3>
+              <p>New projects copy these tabs. AI Chat is off by default.</p>
+              <div className="project-tab-options">
+                {PROJECT_TABS.map((tab) => (
+                  <label key={tab.id} className="check-row">
+                    <input type="checkbox" checked={templateTabs.includes(tab.id)} onChange={() => toggleTab(tab.id)} />
+                    {tab.label}
+                  </label>
+                ))}
+              </div>
             </article>
           </div>
         </section>

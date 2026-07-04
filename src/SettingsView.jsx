@@ -785,7 +785,7 @@ export default function Settings({ state, updateState, activeSection = 'workspac
         <div className="settings-section-row">
           <div className="settings-copy">
             <h2>Project Template</h2>
-            <p>Configure default step tags and checklist starters for new projects.</p>
+            <p>Configure default tabs, step tags, and checklist starters for new projects.</p>
           </div>
           <div className="settings-actions">
             <button className="secondary" onClick={() => setShowTemplatePreview(true)}>Edit Template</button>

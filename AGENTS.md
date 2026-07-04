@@ -1,5 +1,16 @@
 ﻿# BuildBook Desktop Repo Instructions
 
+BuildBook is a Windows desktop application for tracking hardware projects,
+parts, project files, photos, instructions, backups, and optional host/client
+synchronization.
+
+Before changing code:
+- Read `docs/ARCHITECTURE.md` for product purpose, runtime modes, module
+  ownership, persistence, security invariants, and validation commands.
+- Read `docs/USER_GUIDE.md` when changing user-facing workflows or terminology.
+- Keep this file authoritative for compatibility gates and repository-specific
+  agent rules.
+
 This repo is one of three coordinated repos:
 - Desktop app: C:\Users\Work\Documents\GitHub\BuildBook
 - Web app: C:\Users\Work\Documents\GitHub\BuildBook_Web
