@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.14 - 2026-07-05
+
+Changes since test-v0.4.0-test.13.
+
+### Changes
+
+- Revamp theme, and settings UI
+
 ## 0.4.0-test.13 - 2026-07-03
 
 Changes since test-v0.4.0-test.12.

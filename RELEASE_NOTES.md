@@ -1,9 +1,8 @@
-# BuildBook 0.4.0-test.13 Test Release
+# BuildBook 0.4.0-test.14 Test Release
 
-Changes since test-v0.4.0-test.12.
+Changes since test-v0.4.0-test.13.
 
 ## Changes
 
-- Add in a optional AI chat area
-- Add smoke tests and refactor Tauri backend
+- Revamp theme, and settings UI
 
