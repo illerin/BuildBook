@@ -10,7 +10,7 @@ export async function savePhotoThumbnail(blob, name, library) {
   canvas.width = size;
   canvas.height = size;
   const context = canvas.getContext('2d');
-  context.fillStyle = cssColor('--field', '#0d1117');
+  context.fillStyle = cssColor('--field', '#151a20');
   context.fillRect(0, 0, size, size);
   const scale = Math.min(size / bitmap.width, size / bitmap.height);
   const width = bitmap.width * scale;

@@ -12,6 +12,7 @@ function Imports({ state, updateState }) {
   const [imageBusy, setImageBusy] = useState('');
   const [importBusy, setImportBusy] = useState('');
   const [selectedBatchId, setSelectedBatchId] = useState('');
+  const [reviewBatchOpen, setReviewBatchOpen] = useState(false);
   const [deleteBatchId, setDeleteBatchId] = useState('');
   const selectedBatch = state.importBatches.find((batch) => batch.id === selectedBatchId) || null;
   const deleteBatch = state.importBatches.find((batch) => batch.id === deleteBatchId) || null;
@@ -37,6 +38,7 @@ function Imports({ state, updateState }) {
       };
       updateState((current) => ({ ...current, importBatches: [batch, ...current.importBatches] }));
       setSelectedBatchId(batch.id);
+      setReviewBatchOpen(true);
     } catch (error) {
       setImportError(String(error));
     } finally {
@@ -134,6 +136,7 @@ function Imports({ state, updateState }) {
       })) : current.projects,
     }));
     if (selectedBatchId === deleteBatch.id) setSelectedBatchId('');
+    if (selectedBatchId === deleteBatch.id) setReviewBatchOpen(false);
     setDeleteBatchId('');
     setImportNotice(removeCreatedParts && removedPartIds.size
       ? `Deleted import record and ${removedPartIds.size} imported part${removedPartIds.size === 1 ? '' : 's'}.`
@@ -146,6 +149,8 @@ function Imports({ state, updateState }) {
     return (rank[a.matchQuality] ?? 0) - (rank[b.matchQuality] ?? 0) || a.name.localeCompare(b.name);
   });
   const draftCount = selectedBatch?.items.filter((item) => item.status === 'draft').length || 0;
+  const totalDraftCount = state.importBatches.reduce((sum, batch) => sum + batch.items.filter((item) => item.status === 'draft').length, 0);
+  const totalImportedCount = state.importBatches.reduce((sum, batch) => sum + batch.items.filter((item) => item.status === 'imported').length, 0);
 
   const applyBatch = async () => {
     if (!selectedBatch) return;
@@ -161,6 +166,7 @@ function Imports({ state, updateState }) {
       }
       setImportNotice(`Applied ${pendingItems.length} item${pendingItems.length === 1 ? '' : 's'} from ${selectedBatch.name}.`);
       setSelectedBatchId('');
+      setReviewBatchOpen(false);
     } catch (error) {
       setImportError(`Could not finish import batch: ${String(error)}`);
     } finally {
@@ -174,7 +180,7 @@ function Imports({ state, updateState }) {
       {importError && <section className="alert alert-error">{importError}</section>}
       {importNotice && <section className="alert alert-success">{importNotice}</section>}
       <BusyNotice label={importBusy} />
-      <section className="panel upload-card">
+      <section className="upload-card imports-upload">
         <div>
           <h3>Import CSV or PDF</h3>
           <p>Upload supplier exports, invoices, or order files to create draft parts. Quantity columns are preserved in import notes.</p>
@@ -193,13 +199,13 @@ function Imports({ state, updateState }) {
         </label>
       </section>
       <div className="imports-layout">
-        <aside className="library-sidebar">
+        <aside className="import-batches">
           <h3>Batches</h3>
           {state.importBatches.length === 0 ? <p>No imports yet.</p> : state.importBatches.map((batch) => (
             <div key={batch.id} className="import-row-wrap">
               <button
                 className={`import-row ${selectedBatch?.id === batch.id ? 'active' : ''}`}
-                onClick={() => setSelectedBatchId((current) => current === batch.id ? '' : batch.id)}
+                onClick={() => setSelectedBatchId(batch.id)}
               >
                 <strong>{batch.name}</strong>
                 <span>{new Date(batch.createdAt).toLocaleDateString()}</span>
@@ -209,17 +215,30 @@ function Imports({ state, updateState }) {
             </div>
           ))}
         </aside>
-        <section className="panel empty-panel">Select an import batch to review or apply it.</section>
+        <section className="import-summary">
+          <div>
+            <h2>{selectedBatch ? selectedBatch.name : 'Import Review'}</h2>
+            <p>{selectedBatch
+              ? 'Review categories, suggested matches, and actions before applying this batch.'
+              : 'Select a batch to review categories, matches, and actions before applying it.'}</p>
+          </div>
+          <div className="import-summary-stats">
+            <div><strong>{state.importBatches.length}</strong><span>Import batches</span></div>
+            <div><strong>{totalDraftCount}</strong><span>Draft parts</span></div>
+            <div><strong>{totalImportedCount}</strong><span>Imported parts</span></div>
+          </div>
+          {selectedBatch && <button onClick={() => setReviewBatchOpen(true)}>Review Selected Batch</button>}
+        </section>
       </div>
-      {selectedBatch && (
-        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && !importBusy && setSelectedBatchId('')}>
+      {selectedBatch && reviewBatchOpen && (
+        <div className="modal-overlay" onClick={(event) => event.target === event.currentTarget && !importBusy && setReviewBatchOpen(false)}>
           <section className="modal import-review-modal import-batch">
             <div className="section-title">
               <div>
                 <h2>{selectedBatch.name}</h2>
                 <span>{selectedBatch.source} - {new Date(selectedBatch.createdAt).toLocaleDateString()}</span>
               </div>
-              <button className="secondary" disabled={!!importBusy} onClick={() => setSelectedBatchId('')}>Close</button>
+              <button className="secondary" disabled={!!importBusy} onClick={() => setReviewBatchOpen(false)}>Close</button>
             </div>
             <BusyNotice label={importBusy} />
             <div className="import-review-list">
@@ -263,7 +282,7 @@ function Imports({ state, updateState }) {
               ))}
             </div>
             <div className="modal-actions import-batch-actions">
-              <button className="secondary" disabled={!!importBusy} onClick={() => setSelectedBatchId('')}>Close</button>
+              <button className="secondary" disabled={!!importBusy} onClick={() => setReviewBatchOpen(false)}>Close</button>
               <button disabled={!draftCount || !!importBusy} onClick={applyBatch}>{importBusy ? 'Applying...' : `Apply Batch (${draftCount})`}</button>
             </div>
           </section>

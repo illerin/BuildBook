@@ -13,7 +13,7 @@ export default function Search({ state, setTab }) {
   const total = results ? Object.values(results).reduce((sum, rows) => sum + rows.length, 0) : 0;
 
   const ResultSection = ({ title, rows, children }) => (
-    <section className="panel search-section">
+    <section className="search-result-section">
       <div className="section-title">
         <h3>{title}</h3>
         <span className="muted-count">{rows.length}</span>
@@ -23,7 +23,7 @@ export default function Search({ state, setTab }) {
   );
 
   return (
-    <div>
+    <div className="search-page">
       <Header title="Search" subtitle="Find projects, parts, datasheets, project files, and import drafts." />
       <div className="search-hero">
         <input
@@ -34,10 +34,10 @@ export default function Search({ state, setTab }) {
         />
         {query && <button className="secondary" onClick={() => setQuery('')}>Clear</button>}
       </div>
-      {!trimmed && <section className="panel empty-panel">Start typing to search across the app.</section>}
+      {!trimmed && <section className="empty-panel search-empty-state">Start typing to search across the app.</section>}
       {trimmed && results && <p className="muted-count">{total} result(s) for "{query.trim()}"</p>}
       {results && (
-        <div className="search-grid">
+        <div className="search-results-grid">
           <ResultSection title="Projects" rows={results.projects}>
             <div className="search-list">
               {results.projects.map((project) => (

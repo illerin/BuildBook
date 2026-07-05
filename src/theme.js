@@ -1,26 +1,26 @@
 import { APP_VERSION, DEFAULT_THEME } from './data.js';
 
 export const THEME_FIELDS = [
-  ['bg', 'App background'],
-  ['sidebar', 'Sidebar background'],
-  ['surface', 'Panel background'],
-  ['field', 'Input background'],
-  ['border', 'Border'],
-  ['text', 'Main text'],
-  ['textMuted', 'Muted text'],
-  ['accent', 'Accent'],
-  ['success', 'Success'],
-  ['danger', 'Danger'],
-  ['warning', 'Warning'],
+  ['bg', 'Canvas'],
+  ['surface', 'Surface'],
+  ['text', 'Text & dividers'],
+  ['accent', 'Actions & links'],
+  ['success', 'Active & success'],
 ];
 
 export const THEME_DERIVED_FIELDS = [
+  ['sidebar', 'Sidebar'],
   ['surfaceRaised', 'Raised controls'],
+  ['field', 'Input background'],
+  ['border', 'Border'],
   ['borderSoft', 'Soft border'],
+  ['textMuted', 'Muted text'],
   ['textSoft', 'Soft text'],
   ['accentFill', 'Active accent'],
   ['successHover', 'Success hover'],
+  ['danger', 'Destructive action'],
   ['dangerHover', 'Danger hover'],
+  ['warning', 'Warning'],
   ['projectTagBg', 'Project tag background'],
   ['projectTagText', 'Project tag text'],
   ['statusActiveBg', 'Active status background'],
@@ -36,27 +36,11 @@ export const THEME_DERIVED_FIELDS = [
 ];
 
 export const THEME_DERIVED_GROUPS = {
-  bg: [
-    'accentFill',
-    'projectTagBg',
-    'statusActiveBg',
-    'statusPausedBg',
-    'statusWaitingBg',
-    'statusCompletedBg',
-    'statusArchivedBg',
-  ],
-  surface: ['surfaceRaised', 'borderSoft'],
-  text: [
-    'textSoft',
-    'successHover',
-    'dangerHover',
-    'projectTagText',
-    'statusActiveText',
-    'statusPausedText',
-    'statusWaitingText',
-    'statusCompletedText',
-    'statusArchivedText',
-  ],
+  bg: ['field'],
+  surface: ['sidebar', 'surfaceRaised'],
+  text: ['textMuted', 'border'],
+  accent: ['accentFill', 'projectTagBg'],
+  success: ['successHover', 'statusActiveBg'],
 };
 
 export const THEME_FIELD_LABELS = Object.fromEntries([...THEME_FIELDS, ...THEME_DERIVED_FIELDS]);
@@ -107,26 +91,39 @@ const mixHex = (from, to, amount = 0.5) => {
 
 export function normalizeTheme(theme) {
   const source = theme && typeof theme === 'object' ? theme : {};
-  const base = { ...DEFAULT_THEME, ...source };
+  const base = {
+    ...source,
+    bg: source.bg || DEFAULT_THEME.bg,
+    surface: source.surface || source.sidebar || DEFAULT_THEME.surface,
+    text: source.text || DEFAULT_THEME.text,
+    accent: source.accent || DEFAULT_THEME.accent,
+    success: source.success || DEFAULT_THEME.success,
+  };
   const derived = {
-    surfaceRaised: mixHex(base.surface, base.text, 0.88),
-    borderSoft: mixHex(base.border, base.surface, 0.55),
-    textSoft: mixHex(base.text, base.textMuted, 0.72),
-    accentFill: mixHex(base.accent, base.bg, 0.72),
+    sidebar: base.surface,
+    surfaceRaised: mixHex(base.surface, base.text, 0.9),
+    field: mixHex(base.bg, base.surface, 0.82),
+    border: mixHex(base.text, base.bg, 0.22),
+    borderSoft: mixHex(base.text, base.bg, 0.12),
+    textMuted: mixHex(base.text, base.bg, 0.64),
+    textSoft: mixHex(base.text, base.bg, 0.86),
+    accentFill: mixHex(base.accent, base.bg, 0.2),
     successHover: mixHex(base.success, base.text, 0.82),
-    dangerHover: mixHex(base.danger, base.text, 0.82),
+    danger: mixHex(base.text, base.bg, 0.72),
+    dangerHover: base.text,
+    warning: base.accent,
     projectTagBg: mixHex(base.accent, base.bg, 0.24),
     projectTagText: mixHex(base.accent, base.text, 0.74),
     statusActiveBg: mixHex(base.success, base.bg, 0.34),
     statusActiveText: mixHex(base.success, base.text, 0.62),
-    statusPausedBg: mixHex(base.textMuted, base.bg, 0.28),
-    statusPausedText: mixHex(base.textMuted, base.text, 0.7),
-    statusWaitingBg: mixHex(base.warning, base.bg, 0.32),
-    statusWaitingText: mixHex(base.warning, base.text, 0.68),
+    statusPausedBg: mixHex(base.text, base.bg, 0.14),
+    statusPausedText: mixHex(base.text, base.bg, 0.68),
+    statusWaitingBg: mixHex(base.accent, base.bg, 0.18),
+    statusWaitingText: mixHex(base.accent, base.text, 0.66),
     statusCompletedBg: mixHex(base.accent, base.bg, 0.26),
     statusCompletedText: mixHex(base.accent, base.text, 0.72),
-    statusArchivedBg: mixHex(base.danger, base.bg, 0.22),
-    statusArchivedText: mixHex(base.danger, base.text, 0.48),
+    statusArchivedBg: mixHex(base.text, base.bg, 0.12),
+    statusArchivedText: mixHex(base.text, base.bg, 0.58),
   };
   return { ...base, ...derived };
 }

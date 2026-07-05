@@ -43,11 +43,11 @@ export const DEFAULT_CATEGORIES = [
 ];
 
 export const DEFAULT_FILE_TRACKERS = [
-  { id: 'tracker-datasheets', name: 'Datasheets', extensions: '.pdf', viewer: 'pdf', programPath: '', color: '#58a6ff' },
-  { id: 'tracker-firmware', name: 'Firmware', extensions: '.ino,.cpp,.h', viewer: 'text', programPath: '', color: '#56d364' },
-  { id: 'tracker-drawings', name: 'Drawings', extensions: '.dxf,.dwg', viewer: 'cad', programPath: '', color: '#d29922' },
-  { id: 'tracker-models', name: '3D Models', extensions: '.stl,.step,.obj', viewer: 'model', programPath: '', color: '#f778ba' },
-  { id: 'tracker-bom', name: 'PCB BOM', extensions: '.xlsx,.xls,.csv', viewer: 'spreadsheet', programPath: '', color: '#bc8cff' },
+  { id: 'tracker-datasheets', name: 'Datasheets', extensions: '.pdf', viewer: 'pdf', programPath: '', color: '#4da3ff' },
+  { id: 'tracker-firmware', name: 'Firmware', extensions: '.ino,.cpp,.h', viewer: 'text', programPath: '', color: '#4da3ff' },
+  { id: 'tracker-drawings', name: 'Drawings', extensions: '.dxf,.dwg', viewer: 'cad', programPath: '', color: '#4da3ff' },
+  { id: 'tracker-models', name: '3D Models', extensions: '.stl,.step,.obj', viewer: 'model', programPath: '', color: '#4da3ff' },
+  { id: 'tracker-bom', name: 'PCB BOM', extensions: '.xlsx,.xls,.csv', viewer: 'spreadsheet', programPath: '', color: '#4da3ff' },
 ];
 
 export const DEFAULT_PROJECT_STEPS = [
@@ -64,35 +64,11 @@ export const DEFAULT_PROJECT_STEPS = [
 ];
 
 export const DEFAULT_THEME = {
-  bg: '#0f1117',
-  sidebar: '#161b22',
-  surface: '#161b22',
-  surfaceRaised: '#21262d',
-  field: '#0d1117',
-  border: '#30363d',
-  borderSoft: '#21262d',
-  text: '#e1e4e8',
-  textMuted: '#8b949e',
-  textSoft: '#c9d1d9',
-  accent: '#58a6ff',
-  accentFill: '#1f6feb',
-  success: '#238636',
-  successHover: '#2ea043',
-  danger: '#da3633',
-  dangerHover: '#f85149',
-  warning: '#d29922',
-  projectTagBg: '#1b3a5a',
-  projectTagText: '#79c0ff',
-  statusActiveBg: '#1f6231',
-  statusActiveText: '#7ee787',
-  statusPausedBg: '#2d333b',
-  statusPausedText: '#adbac7',
-  statusWaitingBg: '#5a3e1b',
-  statusWaitingText: '#d29922',
-  statusCompletedBg: '#1b3a5a',
-  statusCompletedText: '#79c0ff',
-  statusArchivedBg: '#3d2a6b',
-  statusArchivedText: '#d2a8ff',
+  bg: '#101418',
+  surface: '#1c232b',
+  text: '#e8edf2',
+  accent: '#4da3ff',
+  success: '#62c08a',
 };
 
 export const DEFAULT_REVISION_SETTINGS = {
@@ -318,7 +294,7 @@ export function normalizeState(raw, options = {}) {
       tabs: normalizeProjectTabs(template.tabs),
       fileTrackers: (Array.isArray(template.fileTrackers) ? template.fileTrackers : DEFAULT_FILE_TRACKERS).map((tracker, index) => ({
         ...tracker,
-        color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || '#58a6ff',
+        color: tracker.color || DEFAULT_FILE_TRACKERS[index % DEFAULT_FILE_TRACKERS.length]?.color || DEFAULT_THEME.accent,
       })),
     },
     projectTabSettings: Object.fromEntries(Object.entries(

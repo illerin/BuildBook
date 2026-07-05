@@ -65,38 +65,16 @@ export default function ThemeEditorModal({ theme, onClose, onSave }) {
               <span className="status-active">Active</span>
               <span className="status-paused">Paused</span>
               <span className="status-waiting">Waiting</span>
-              <span className="status-completed">Completed</span>
-              <span className="status-archived">Archived</span>
             </div>
             <div className="theme-preview-grid">
               <article>
                 <strong>Nema Motor</strong>
                 <span>Motors & Motion</span>
-                <input readOnly value="Drawer 1, Bin 1" />
               </article>
               <article>
                 <strong>Earthquake PCB</strong>
                 <span>Prototyping & Tools</span>
-                <button className="danger-fill">Delete</button>
               </article>
-            </div>
-            <div className="theme-token-preview">
-              {THEME_FIELDS.map(([key, label]) => (
-                <div key={key} className="theme-token-row">
-                  <div className="theme-token-main">
-                    <i style={{ background: draft[key] }} title={draft[key]} />
-                    <span>{label}</span>
-                  </div>
-                  <div className="theme-token-derived">
-                    {(THEME_DERIVED_GROUPS[key] || []).map((derivedKey) => (
-                      <div key={derivedKey}>
-                        <i style={{ background: draft[derivedKey] }} title={draft[derivedKey]} />
-                        <span>{THEME_FIELD_LABELS[derivedKey]}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
             </div>
           </main>
         </section>
@@ -117,19 +95,33 @@ export default function ThemeEditorModal({ theme, onClose, onSave }) {
           </label>
         </div>
         {error && <p className="error-text">{error}</p>}
-        <div className="theme-color-grid">
+        <section className="theme-token-editor">
+          <div className="theme-editor-heading">
+            <div>
+              <h3>Theme Colors</h3>
+              <p>Editable colors are on the left. Representative colors derived from each value are aligned to the right.</p>
+            </div>
+          </div>
           {THEME_FIELDS.map(([key, label]) => (
-            <div key={key} className="theme-color-row">
-              <span>{label}</span>
-              <div className="theme-swatch-pair">
-                <i style={{ background: DEFAULT_THEME[key] }} title={DEFAULT_THEME[key]} />
-                <i style={{ background: draft[key] }} title={draft[key]} />
+            <div key={key} className="theme-editor-token-row">
+              <div className="theme-editor-token-main">
+                <input type="color" value={validHexColor(draft[key]) ? draft[key] : DEFAULT_THEME[key]} onChange={(event) => updateDraft(key, event.target.value)} />
+                <label>
+                  <span>{label}</span>
+                  <input value={draft[key]} onChange={(event) => updateDraft(key, event.target.value)} />
+                </label>
               </div>
-              <input type="color" value={validHexColor(draft[key]) ? draft[key] : DEFAULT_THEME[key]} onChange={(event) => updateDraft(key, event.target.value)} />
-              <input value={draft[key]} onChange={(event) => updateDraft(key, event.target.value)} />
+              <div className="theme-editor-token-derived">
+                {(THEME_DERIVED_GROUPS[key] || []).map((derivedKey) => (
+                  <div key={derivedKey}>
+                    <i style={{ background: draft[derivedKey] }} title={draft[derivedKey]} />
+                    <span>{THEME_FIELD_LABELS[derivedKey]}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           ))}
-        </div>
+        </section>
       </div>
     </div>
   );

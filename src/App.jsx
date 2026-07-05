@@ -700,20 +700,22 @@ export default function App() {
           <strong>BuildBook</strong>
           <span>v{APP_VERSION}</span>
         </div>
-        {TABS.map(([key, label, type]) => (
-          <button key={key} className={`${tab === key ? 'active' : ''} ${type === 'child' ? 'sub-nav' : ''}`} onClick={() => setTab(key)}>
-            {label}
-          </button>
-        ))}
-        {tab === 'settings' && SETTINGS_SECTIONS.map(([key, label]) => (
-          <button
-            key={key}
-            className={`settings-sub-nav ${settingsSection === key ? 'active' : ''}`}
-            onClick={() => setSettingsSection(key)}
-          >
-            {label}
-          </button>
-        ))}
+        <nav className="sidebar-nav">
+          {TABS.map(([key, label, type]) => (
+            <button key={key} className={`${tab === key ? 'active' : ''} ${type === 'child' ? 'sub-nav' : ''}`} onClick={() => setTab(key)}>
+              {label}
+            </button>
+          ))}
+          {tab === 'settings' && SETTINGS_SECTIONS.map(([key, label]) => (
+            <button
+              key={key}
+              className={`settings-sub-nav ${settingsSection === key ? 'active' : ''}`}
+              onClick={() => setSettingsSection(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
         <div className={`sidebar-status ${connectionState === 'local' ? 'local-status' : ''}`}>
           {connectionState !== 'local' && <span className={`connection-state connection-${connectionState}`}>{connectionLabel}</span>}
           <span className={`save-state ${saveState.startsWith('error') ? 'error' : saveState}`}>

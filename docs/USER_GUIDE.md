@@ -10,7 +10,7 @@ to replace the specialist programs used to create those files.
 - A **project** is one build and its complete working record.
 - A **part** is a reusable library item that can be linked to many projects.
 - A **tracked file type** groups project files such as firmware, drawings, or
-  3D models and controls their display color and accepted extensions.
+  3D models and controls their accepted extensions and preview behavior.
 - A **latest file** is the preferred version within a tracked file group.
 - A **managed file** is copied into BuildBook storage.
 - A **linked file** remains at its original path and belongs to the computer
@@ -140,7 +140,11 @@ Each tracked file type defines:
 - Accepted file extensions
 - A preview category
 - An optional external program
-- A text color
+
+Tracked file names use the theme's **Actions & links** color. Existing
+per-tracker color metadata is preserved for package compatibility but is not an
+editable display setting. New tracked file types use that same accent color in
+their optional compatibility metadata.
 
 ### Managed files
 
@@ -227,9 +231,10 @@ top-level area.
 
 Open **Settings > Workspace Setup > Color Theme**.
 
-The editor exposes the main editable colors on the left and shows colors derived
-from each main color on the right. The preview demonstrates application
-surfaces, text, accents, statuses, and project tags.
+The editor exposes five editable colors: Canvas, Surface, Text & dividers,
+Actions & links, and Active & success. Representative colors derived from each
+main color are shown beside it. The preview demonstrates application surfaces,
+text, accents, statuses, and project tags.
 
 Themes can be exported to JSON and imported on another BuildBook installation.
 Derived colors are recalculated from the editable colors.

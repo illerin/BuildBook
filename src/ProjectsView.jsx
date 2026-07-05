@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   DEFAULT_PROJECT_AI_PERMISSIONS,
   DEFAULT_PROJECT_TABS,
@@ -75,7 +75,7 @@ import ProjectAiChat from './ProjectAiChat';
 import { clearProjectAiDeviceData } from './projectAi';
 import ProjectImportReview from './ProjectImportReview';
 import LinkPartModal from './LinkPartModal';
-import { Header, StoredImage } from './sharedUi';
+import { BusyNotice, Header, StoredImage } from './sharedUi';
 import { PartEditor, PartInfoModal, PartPreviewImage } from './PartsView';
 import {
   savePhotoThumbnail,
@@ -97,10 +97,6 @@ import {
   pruneTrackedFiles,
   withLatestVersionNote,
 } from './revisionHelpers';
-
-function trackerColor(trackers, trackerId) {
-  return trackers.find((tracker) => tracker.id === trackerId)?.color || '#58a6ff';
-}
 
 async function storedImageDataUri(path, name = '') {
   if (!path) return '';
@@ -132,6 +128,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProjectName, setNewProjectName] = useState('');
   const [newProjectError, setNewProjectError] = useState('');
+  const [viewMode, setViewMode] = useState('cards');
   const selected = state.projects.find((project) => project.id === selectedId);
   const visibleProjects = state.projects
     .filter((project) => (
@@ -480,6 +477,10 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
           />
           Import Project
         </label>
+        <div className="view-toggle" aria-label="Project view">
+          <button type="button" className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')}>Cards</button>
+          <button type="button" className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')}>List</button>
+        </div>
         <button onClick={openNewProjectDialog}>New Project</button>
       </Header>
       {!lockedFilter && (
@@ -502,7 +503,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
           No projects found.
         </section>
       ) : (
-        <div className="project-grid">
+        <div className={`project-grid ${viewMode === 'list' ? 'list-view' : ''}`}>
           {visibleProjects.map((project) => (
             <ProjectCard
               key={project.id}
@@ -981,7 +982,6 @@ function ProjectWorkspace({
   onDelete,
 }) {
   const [projectTab, setProjectTab] = useState('overview');
-  const [tabsCollapsed, setTabsCollapsed] = useState(false);
   const [imageBusy, setImageBusy] = useState(false);
   const [imagePreview, setImagePreview] = useState('');
   const [exportNotice, setExportNotice] = useState('');
@@ -1052,8 +1052,8 @@ function ProjectWorkspace({
   };
 
   return (
-    <div>
-      <button className="back-link" onClick={onBack}>Back to projects</button>
+    <div className="project-workspace">
+      <button className="secondary back-link" onClick={onBack}>Back to projects</button>
       <section className="project-hero">
         <div
           className={`project-image drop-target ${imageBusy ? 'drop-active' : ''}`}
@@ -1098,17 +1098,16 @@ function ProjectWorkspace({
       {showExportModal && <ProjectExportModal project={project} onCancel={() => setShowExportModal(false)} onExport={exportProject} />}
       {exportNotice && <p className="export-notice">{exportNotice}</p>}
       <ProjectTagControls project={project} steps={template.steps} onToggle={toggleStep} className="project-header-tags" />
-      <button className="tabs-collapse-button secondary" onClick={() => setTabsCollapsed((value) => !value)}>
-        {tabsCollapsed ? 'Show Tabs' : 'Hide Tabs'}
-      </button>
-      <button className="secondary project-tabs-button" onClick={() => setShowProjectTabs(true)}>Configure Tabs</button>
-      <div className={`tabs ${tabsCollapsed ? 'collapsed' : ''}`}>
-        {enabledTabs.includes('overview') && <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Overview</button>}
-        {enabledTabs.includes('instructions') && <button className={`tab ${projectTab === 'instructions' ? 'active' : ''}`} onClick={() => setProjectTab('instructions')}>Instructions</button>}
-        {enabledTabs.includes('photos') && <button className={`tab ${projectTab === 'photos' ? 'active' : ''}`} onClick={() => setProjectTab('photos')}>Photos ({(project.photoFolders || []).reduce((total, folder) => total + (folder.photos?.length || 0), 0)})</button>}
-        {enabledTabs.includes('parts') && <button className={`tab ${projectTab === 'parts' ? 'active' : ''}`} onClick={() => setProjectTab('parts')}>Parts ({linkedParts.length})</button>}
-        {enabledTabs.includes('files') && <button className={`tab ${projectTab === 'files' ? 'active' : ''}`} onClick={() => setProjectTab('files')}>Files ({project.files.length})</button>}
-        {enabledTabs.includes('ai') && <button className={`tab ${projectTab === 'ai' ? 'active' : ''}`} onClick={() => setProjectTab('ai')}>AI Chat</button>}
+      <div className="project-tab-bar">
+        <div className="tabs">
+          {enabledTabs.includes('overview') && <button className={`tab ${projectTab === 'overview' ? 'active' : ''}`} onClick={() => setProjectTab('overview')}>Overview</button>}
+          {enabledTabs.includes('instructions') && <button className={`tab ${projectTab === 'instructions' ? 'active' : ''}`} onClick={() => setProjectTab('instructions')}>Instructions</button>}
+          {enabledTabs.includes('photos') && <button className={`tab ${projectTab === 'photos' ? 'active' : ''}`} onClick={() => setProjectTab('photos')}>Photos ({(project.photoFolders || []).reduce((total, folder) => total + (folder.photos?.length || 0), 0)})</button>}
+          {enabledTabs.includes('parts') && <button className={`tab ${projectTab === 'parts' ? 'active' : ''}`} onClick={() => setProjectTab('parts')}>Parts ({linkedParts.length})</button>}
+          {enabledTabs.includes('files') && <button className={`tab ${projectTab === 'files' ? 'active' : ''}`} onClick={() => setProjectTab('files')}>Files ({project.files.length})</button>}
+          {enabledTabs.includes('ai') && <button className={`tab ${projectTab === 'ai' ? 'active' : ''}`} onClick={() => setProjectTab('ai')}>AI Chat</button>}
+        </div>
+        <button className="secondary project-tabs-button" onClick={() => setShowProjectTabs(true)}>Configure Tabs</button>
       </div>
       {showProjectTabs && (
         <ProjectTabsModal
@@ -1377,7 +1376,7 @@ function ProjectOverviewTab({ project, template, onUpdate }) {
           <h3>Latest Files</h3>
           {latestFiles.length ? latestFiles.map((file) => (
             <div key={file.id} className="latest">
-              <strong style={{ color: trackerColor(template.fileTrackers, file.trackerId) }}>{fileTrackerLabel(template.fileTrackers, file.trackerId)}</strong>
+              <strong className="tracked-file-name">{fileTrackerLabel(template.fileTrackers, file.trackerId)}</strong>
               <span>{file.name}</span>
               <div className="latest-file-actions">
                 {file.path && <button className="ghost" onClick={() => openStoredFile(file.path)}>Open</button>}
@@ -1541,7 +1540,11 @@ function ProjectPhotosTab({ project, onUpdate }) {
           <button onClick={addFolder}>Add</button>
         </div>
         {folders.map((folder) => (
-          <button key={folder.id} className={selectedFolder?.id === folder.id ? '' : 'secondary'} onClick={() => setSelectedFolderId(folder.id)}>
+          <button
+            key={folder.id}
+            className={`photo-folder-button ${selectedFolder?.id === folder.id ? 'active' : ''}`}
+            onClick={() => setSelectedFolderId(folder.id)}
+          >
             {folder.name} ({folder.photos?.length || 0})
           </button>
         ))}
@@ -1770,7 +1773,7 @@ async function createImageThumbnailDataUrl(path, width = 480, height = 270) {
   canvas.width = width;
   canvas.height = height;
   const context = canvas.getContext('2d');
-  context.fillStyle = cssColor('--surface-raised', '#21262d');
+  context.fillStyle = cssColor('--surface-raised', '#30373f');
   context.fillRect(0, 0, width, height);
   const scale = Math.max(width / bitmap.width, height / bitmap.height);
   const drawWidth = bitmap.width * scale;

@@ -7,7 +7,7 @@ import { clearSyncCheckout, cleanupOrphanedFiles, deleteManagedFiles, discoverBu
 import { buildFullBackupPackage, buildWebFullBackupPackage, readFullBackupPackage } from './compatibilityBackup';
 import { collectReferencedPaths } from './stateReferences';
 import { isRemoteBuildBookClient, webLogout } from './storage';
-import { cssColor, normalizeTheme, themeExportBytes, validHexColor } from './theme';
+import { cssColor, normalizeTheme, themeExportBytes } from './theme';
 import { GITHUB_LATEST_RELEASE_API, GITHUB_REPOSITORY_URL, appReleaseChannel, fetchReleaseSummary, isNewerVersion } from './update';
 import ThemeEditorModal from './ThemeEditorModal';
 import TemplatePreviewModal from './TemplatePreviewModal';
@@ -831,6 +831,7 @@ export default function Settings({ state, updateState, activeSection = 'workspac
             {availableReleaseUrl && <button className="secondary" onClick={() => openExternalUrl(availableReleaseUrl)}>Open Repo Page</button>}
           </div>
         </div>
+        <p className="settings-note">BuildBook v{APP_VERSION} is installed.</p>
         {updateBusy && <BusyNotice label={updateProgress || 'Checking for updates...'} />}
         {updateNotice && <p className="success-text">{updateNotice}</p>}
         {updateError && <p className="error-text">{updateError}</p>}
@@ -1331,7 +1332,7 @@ export default function Settings({ state, updateState, activeSection = 'workspac
 
 function RevisionSettingsModal({ revisionSettings, projects, template, onUpdateTemplate, onClose, onSave }) {
   const [draft, setDraft] = useState(() => normalizeRevisionSettings(revisionSettings));
-  const [newTracker, setNewTracker] = useState({ name: '', extensions: '', color: '#58a6ff' });
+  const [newTracker, setNewTracker] = useState({ name: '', extensions: '' });
   const [dragTrackerId, setDragTrackerId] = useState('');
   const [dragTrackerOverId, setDragTrackerOverId] = useState('');
   const [dragTrackerPosition, setDragTrackerPosition] = useState('before');
@@ -1353,10 +1354,10 @@ function RevisionSettingsModal({ revisionSettings, projects, template, onUpdateT
     onUpdateTemplate({
       fileTrackers: [
         ...template.fileTrackers,
-        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), color: newTracker.color || '#58a6ff', programPath: '' },
+        { id: makeId('tracker'), name: newTracker.name.trim(), extensions: newTracker.extensions.trim(), color: cssColor('--accent', '#4da3ff'), programPath: '' },
       ],
     });
-    setNewTracker({ name: '', extensions: '', color: '#58a6ff' });
+    setNewTracker({ name: '', extensions: '' });
   };
   const updateTracker = (trackerId, patch) => {
     onUpdateTemplate({
@@ -1481,7 +1482,6 @@ function RevisionSettingsModal({ revisionSettings, projects, template, onUpdateT
           <div className="tracker-row">
             <input value={newTracker.name} onChange={(event) => setNewTracker((current) => ({ ...current, name: event.target.value }))} placeholder="Tracker name" />
             <input value={newTracker.extensions} onChange={(event) => setNewTracker((current) => ({ ...current, extensions: event.target.value }))} placeholder=".pdf,.dxf" />
-            <input aria-label="Tracker color" type="color" value={validHexColor(newTracker.color) ? newTracker.color : '#58a6ff'} onChange={(event) => setNewTracker((current) => ({ ...current, color: event.target.value }))} />
             <button onClick={addTracker}>Add</button>
           </div>
           <div className="tracked-files-list">
@@ -1503,19 +1503,8 @@ function RevisionSettingsModal({ revisionSettings, projects, template, onUpdateT
                 </span>
                 <input value={tracker.name} onChange={(event) => updateTracker(tracker.id, { name: event.target.value })} placeholder="Tracker name" />
                 <input value={tracker.extensions || ''} onChange={(event) => updateTracker(tracker.id, { extensions: event.target.value })} placeholder=".pdf,.dxf" />
-                <input aria-label={`${tracker.name} color`} type="color" value={validHexColor(tracker.color) ? tracker.color : '#58a6ff'} onChange={(event) => updateTracker(tracker.id, { color: event.target.value })} />
                 <button className="ghost danger-button" onClick={() => onUpdateTemplate({ fileTrackers: template.fileTrackers.filter((item) => item.id !== tracker.id) })}>Delete</button>
               </div>
-            ))}
-          </div>
-        </section>
-        <section className="revision-card tracker-color-preview">
-          <h3>Tracked File Type Colors</h3>
-          <div>
-            {template.fileTrackers.map((tracker) => (
-              <strong key={tracker.id} style={{ color: validHexColor(tracker.color) ? tracker.color : '#58a6ff' }}>
-                {tracker.name || 'Untitled'}
-              </strong>
             ))}
           </div>
         </section>

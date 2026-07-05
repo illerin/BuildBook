@@ -551,6 +551,7 @@ function Parts({ state, updateState }) {
   const [showUnassigned, setShowUnassigned] = useState(false);
   const [editingCategories, setEditingCategories] = useState(false);
   const [creatingPart, setCreatingPart] = useState(false);
+  const [viewMode, setViewMode] = useState('cards');
   const [draggingPartId, setDraggingPartId] = useState('');
   const [partDragGhost, setPartDragGhost] = useState(null);
   const partDragRef = useRef(null);
@@ -803,6 +804,10 @@ function Parts({ state, updateState }) {
     <div className="parts-library-page">
       <Header title="Parts Library" subtitle="Reference parts, storage locations, specs, datasheets, and product links.">
         <button className="secondary" onClick={() => setEditingCategories(true)}>Edit Categories</button>
+        <div className="view-toggle" aria-label="Parts view">
+          <button type="button" className={viewMode === 'cards' ? 'active' : ''} onClick={() => setViewMode('cards')}>Cards</button>
+          <button type="button" className={viewMode === 'list' ? 'active' : ''} onClick={() => setViewMode('list')}>List</button>
+        </div>
         <button onClick={() => setCreatingPart(true)}>New Part</button>
       </Header>
       <div className="parts-library-toolbar">
@@ -863,7 +868,7 @@ function Parts({ state, updateState }) {
             </div>
           )}
           {visible.length === 0 ? <div className="panel empty-panel">No parts found.</div> : (
-            <div className="item-grid">
+            <div className={`item-grid ${viewMode === 'list' ? 'list-view' : ''}`}>
               {visible.map((part) => (
                 <div
                   key={part.id}
@@ -1159,11 +1164,17 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               else setImageUrl(url);
             }}
           >
-            <label>Image<input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} /></label>
+            <span className="new-part-drop-label">Image</span>
+            <div className="new-part-image-actions">
+              <button className="ghost" type="button" disabled={!draft.name.trim()} onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(draft.name)}`)}>Search web for Image</button>
+              <label className="file-picker header-picker">
+                <input type="file" accept="image/*" onChange={(event) => setImageFile(event.target.files?.[0])} />
+                Choose Image
+              </label>
+            </div>
             <div className="new-part-file-actions">
               <span>{draft.imageFile?.name || (draft.imageUrl ? fileNameFromUrl(draft.imageUrl) : 'Drag image here')}</span>
               {(draft.imageFile || draft.imageUrl) && <button className="ghost" type="button" onClick={clearImageSource}>Remove</button>}
-              <button className="ghost" type="button" disabled={!draft.name.trim()} onClick={() => openExternalUrl(`https://www.google.com/search?tbm=isch&q=${encodeURIComponent(draft.name)}`)}>Search web for Image</button>
             </div>
             {imageError && <p className="error-text inline-error">{imageError}</p>}
           </div>

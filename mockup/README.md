@@ -23,3 +23,16 @@ production implementation.
 
 Projects and Parts Library both include **Cards** and **List** view toggles. The
 sidebar, system font stack, and base type sizes mirror the live desktop app.
+
+The project workspace mirrors the live project hero, tags, note sheets,
+checklist, and latest-file layout. Overview, Instructions, Photos, Parts, Files,
+and AI Chat contain fake data for design refinement.
+
+Settings mirrors the live Workspace Setup, Maintenance, and Network & Sync
+sections. The project template, tracked-files, and five-color theme editors use
+fake data and remain disconnected from application storage.
+
+Completed Projects, Search, Imports, project and part creation, category
+management, file-preview states, AI settings and draft review, export/import
+reviews, confirmations, sync conflict review, and common system states are also
+available for layout refinement.

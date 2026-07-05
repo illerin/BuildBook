@@ -570,7 +570,7 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = cssColor('--field', '#0d1117');
+  context.fillStyle = cssColor('--field', '#151a20');
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!triangles.length) return;
 
@@ -608,9 +608,9 @@ function drawStl(canvas, triangles, view = { rotationX: -0.55, rotationY: 0.65, 
     context.lineTo(pts[1][0], pts[1][1]);
     context.lineTo(pts[2][0], pts[2][1]);
     context.closePath();
-    context.fillStyle = cssColor('--accent', '#58a6ff');
+    context.fillStyle = cssColor('--accent', '#4da3ff');
     context.fill();
-    context.strokeStyle = cssColor('--text-soft', '#c9d1d9');
+    context.strokeStyle = cssColor('--text-soft', '#c9d0d7');
     context.stroke();
   });
 }
@@ -619,7 +619,7 @@ function drawDxf(canvas, shapes) {
   if (!canvas) return;
   const context = canvas.getContext('2d');
   context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = cssColor('--field', '#0d1117');
+  context.fillStyle = cssColor('--field', '#151a20');
   context.fillRect(0, 0, canvas.width, canvas.height);
   if (!shapes.length) return;
 
@@ -643,7 +643,7 @@ function drawDxf(canvas, shapes) {
   const scale = Math.min((canvas.width - margin * 2) / width, (canvas.height - margin * 2) / height);
   const map = ([x, y]) => [margin + (x - minX) * scale, margin + (maxY - y) * scale];
 
-  context.strokeStyle = cssColor('--accent', '#58a6ff');
+  context.strokeStyle = cssColor('--accent', '#4da3ff');
   context.lineWidth = 2;
   shapes.forEach((shape) => {
     context.beginPath();
