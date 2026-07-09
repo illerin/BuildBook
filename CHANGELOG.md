@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.15 - 2026-07-09
+
+Changes since test-v0.4.0-test.14.
+
+### Changes
+
+- Refactor category suggestion and option labels
+
 ## 0.4.0-test.14 - 2026-07-05
 
 Changes since test-v0.4.0-test.13.
