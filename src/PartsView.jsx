@@ -1090,7 +1090,7 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               <option value="__new__">Create new category...</option>
               <option value="cat-unassigned">Uncategorized</option>
               {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
-                <option key={category.id} value={category.id}>{category.fullLabel}</option>
+                <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>
               ))}
             </select>
           </label>
@@ -1100,7 +1100,7 @@ function NewPartDialog({ categories, projects, storageLocations = [], onCreate, 
               <select value={draft.newCategoryParentId} onChange={(event) => setDraft((current) => ({ ...current, newCategoryParentId: event.target.value }))}>
                 <option value="">Root category</option>
                 {categoryOptions.filter((category) => category.id !== 'cat-unassigned').map((category) => (
-                  <option key={category.id} value={category.id}>{category.fullLabel}</option>
+                  <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>
                 ))}
               </select>
             </div>

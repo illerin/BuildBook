@@ -1657,7 +1657,7 @@ function ProjectInstructionsTab({ project, parts, categories, onUpdate, onCreate
           <input value={newPart.name} onChange={(event) => setNewPart((current) => ({ ...current, name: event.target.value }))} placeholder="Create and link part" />
           <input type="number" min="1" value={newPart.quantity} onChange={(event) => setNewPart((current) => ({ ...current, quantity: Number(event.target.value) || 1 }))} />
           <select value={newPart.categoryId} onChange={(event) => setNewPart((current) => ({ ...current, categoryId: event.target.value }))}>
-            {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{category.fullLabel}</option>)}
+            {flattenCategoryOptions(categories).map((category) => <option key={category.id} value={category.id}>{nestedCategoryLabel(category)}</option>)}
           </select>
           <button onClick={createInstructionPart}>Add Part</button>
         </div>

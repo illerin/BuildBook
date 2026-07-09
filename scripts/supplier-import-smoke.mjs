@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { DEFAULT_STATE, categoryLabel } from '../src/data.js';
+import { suggestCategoryId } from '../src/categoryHelpers.js';
 import {
   createSupplierRowsFromText,
+  createImportItemsFromRows,
   parseCsv,
   parseImportQuantity,
   pickColumn,
@@ -28,5 +31,39 @@ assert.equal(supplierRows.length, 3);
 assert.equal(supplierRows[1][0], '296-6501-1-ND');
 assert.match(supplierRows[1][1], /NE555P Timer IC/);
 assert.equal(supplierRows[2][0], '732-4989-ND');
+
+const motorCategoryId = suggestCategoryId('DRV8833 motor driver module', DEFAULT_STATE.categories);
+assert.equal(categoryLabel(DEFAULT_STATE.categories, motorCategoryId), 'Motors & Motion');
+
+const customCategories = [
+  { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
+  { id: 'custom-modules', name: 'Modules', parentId: null, sortOrder: 1 },
+  { id: 'custom-motors', name: 'Motors & Motion', parentId: null, sortOrder: 2 },
+];
+assert.equal(suggestCategoryId('N20 gearmotor module', customCategories), 'custom-motors');
+
+const renamedDefaultCategories = [
+  { id: 'cat-unassigned', name: 'Unassigned', parentId: null, sortOrder: 0 },
+  { id: 'cat-web-5', name: 'Modules', parentId: null, sortOrder: 1 },
+  { id: 'live-motors', name: 'Motors & Motion', parentId: null, sortOrder: 2 },
+];
+assert.equal(suggestCategoryId('servo motor controller module', renamedDefaultCategories), 'live-motors');
+
+const commonSuggestions = [
+  ['ESP32 development board', 'Microcontrollers & Development Boards / ESP32'],
+  ['WS2812 addressable LED strip', 'Circuit Board Parts / LEDs / LED Strings'],
+  ['NE555 timer IC', "Circuit Board Parts / IC's"],
+  ['Schottky diode', 'Circuit Board Parts / Diodes'],
+  ['MOSFET breakout module', 'Circuit Board Parts'],
+  ['JST connector cable', 'Connectors & Wiring'],
+  ['18650 battery holder', 'Power / Battery'],
+  ['M3 socket head screw', 'Mechanical & Hardware / Nuts, Bolts & Screws / Screws'],
+];
+commonSuggestions.forEach(([name, expectedCategory]) => {
+  assert.equal(categoryLabel(DEFAULT_STATE.categories, suggestCategoryId(name, DEFAULT_STATE.categories)), expectedCategory);
+});
+
+const importItems = createImportItemsFromRows(parseCsv('Description\n"Motor Driver Module"\n'), [], customCategories);
+assert.equal(importItems[0].categoryId, 'custom-motors');
 
 console.log('Supplier import smoke check passed.');
