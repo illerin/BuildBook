@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0-test.16 - 2026-07-12
+
+Changes since test-v0.4.0-test.15.
+
+### Changes
+
+- Implement session-only API keys and progressive rendering
+
 ## 0.4.0-test.15 - 2026-07-09
 
 Changes since test-v0.4.0-test.14.
