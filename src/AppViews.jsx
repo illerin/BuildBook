@@ -1,9 +1,11 @@
+import { lazy } from 'react';
 import { BusyNotice, Header } from './sharedUi';
-import Imports from './ImportsView';
-import Parts from './PartsView';
-import Projects from './ProjectsView';
-import Search from './SearchView';
-import Settings from './SettingsView';
+
+const Imports = lazy(() => import('./ImportsView'));
+const Parts = lazy(() => import('./PartsView'));
+const Projects = lazy(() => import('./ProjectsView'));
+const Search = lazy(() => import('./SearchView'));
+const Settings = lazy(() => import('./SettingsView'));
 
 export {
   BusyNotice,

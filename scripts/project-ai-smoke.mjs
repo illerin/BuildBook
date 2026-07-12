@@ -9,8 +9,10 @@ import {
   applyAiActions,
   buildAiProviderRequest,
   filterAiActions,
+  loadAiConnections,
   parseAiProviderResponse,
   parseAiResponse,
+  saveAiConnections,
   sendProjectAiMessage,
 } from '../src/projectAi.js';
 import {
@@ -18,6 +20,29 @@ import {
   aiToolsForPermissions,
   executeAiTool,
 } from '../src/projectAiTools.js';
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem: (key) => values.get(key) || null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key),
+    clear: () => values.clear(),
+  };
+}
+
+globalThis.localStorage = memoryStorage();
+globalThis.sessionStorage = memoryStorage();
+
+const savedProfiles = saveAiConnections({
+  activeProfileId: 'ai-profile-test',
+  profiles: [{ id: 'ai-profile-test', name: 'Test', provider: 'openai', endpoint: 'https://api.openai.com/v1/chat/completions', apiKey: 'restricted-key' }],
+});
+assert.equal(savedProfiles.profiles[0].apiKey, 'restricted-key');
+assert.doesNotMatch(localStorage.getItem('buildbook-personal-ai-connections-v2'), /restricted-key/);
+assert.equal(loadAiConnections().profiles[0].apiKey, 'restricted-key');
+sessionStorage.clear();
+assert.equal(loadAiConnections().profiles[0].apiKey, '');
 
 assert.deepEqual(normalizeProjectTabs(undefined), DEFAULT_PROJECT_TABS);
 assert.equal(normalizeProjectTabs(['overview', 'ai', 'unknown']).join(','), 'overview,ai');

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useProgressiveList } from './useProgressiveList';
 import {
   DEFAULT_PROJECT_AI_PERMISSIONS,
   DEFAULT_PROJECT_TABS,
@@ -140,6 +141,7 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
       const order = { active: 0, waiting: 1, paused: 2, completed: 3, archived: 4 };
       return ((order[a.status] ?? 99) - (order[b.status] ?? 99)) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
     });
+  const projectList = useProgressiveList(visibleProjects, filter, 60);
 
   useEffect(() => {
     if (selected && !visibleProjects.some((project) => project.id === selected.id)) setSelectedId('');
@@ -504,13 +506,18 @@ function Projects({ state, updateState, initialFilter = 'open', lockedFilter = f
         </section>
       ) : (
         <div className={`project-grid ${viewMode === 'list' ? 'list-view' : ''}`}>
-          {visibleProjects.map((project) => (
+          {projectList.visibleItems.map((project) => (
             <ProjectCard
               key={project.id}
               project={project}
               onOpen={() => setSelectedId(project.id)}
             />
           ))}
+          {projectList.hasMore && (
+            <button ref={projectList.sentinelRef} className="secondary progressive-list-more" onClick={projectList.loadMore}>
+              Load more projects
+            </button>
+          )}
         </div>
       )}
       {pendingImport && (
@@ -2488,7 +2495,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
 
   const checkAllAttachmentIntegrity = async () => {
     const currentFiles = projectFilesRef.current;
-    if (autoIntegrityBusyRef.current || !currentFiles.some(autoIntegrityCheckable)) return;
+    if (document.hidden || autoIntegrityBusyRef.current || !currentFiles.some(autoIntegrityCheckable)) return;
     autoIntegrityBusyRef.current = true;
     try {
       let nextFiles = [...currentFiles];
@@ -2558,7 +2565,7 @@ function ProjectFilesTab({ project, template, revisionSettings, onUpdate }) {
 
   useEffect(() => {
     checkAllAttachmentIntegrity();
-    const timer = window.setInterval(checkAllAttachmentIntegrity, 60000);
+    const timer = window.setInterval(checkAllAttachmentIntegrity, 5 * 60 * 1000);
     return () => window.clearInterval(timer);
   }, [project.id]);
   const downloadProjectFile = async (file) => {

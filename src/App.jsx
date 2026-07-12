@@ -1,4 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   APP_VERSION,
   DEFAULT_WEB_AUTH,
@@ -8,6 +10,7 @@ import {
   isHostSyncClient,
   listStateBackups,
   currentSyncConfig,
+  exitApp,
   readSyncConflictSummary,
   readStoredFile,
   resolveSyncConflict,
@@ -28,6 +31,7 @@ import { fetchWebAuthStatus, getLastSyncStatus, isRemoteBuildBookClient, loadApp
 import { THEME_CSS_VARS, normalizeTheme } from './theme';
 import { ConfirmProvider } from './ConfirmDialog';
 import SyncConflictReviewModal from './SyncConflictReviewModal';
+import ViewErrorBoundary from './ViewErrorBoundary';
 import {
   BusyNotice,
   Header,
@@ -151,9 +155,11 @@ export default function App() {
       ? { stage: 'Connecting to host', detail: 'Loading notes and settings...', current: 0, total: 0, complete: false }
       : null;
   });
-  const saveTimerRef = useRef(null);
   const saveSequenceRef = useRef(0);
-  const saveChainRef = useRef(Promise.resolve());
+  const pendingSaveRef = useRef(null);
+  const saveRunningRef = useRef(false);
+  const saveDrainRef = useRef(Promise.resolve());
+  const refreshInFlightRef = useRef(false);
   const stateRef = useRef(null);
   const saveStateRef = useRef('saved');
   const bootstrapStartedRef = useRef(false);
@@ -315,10 +321,6 @@ export default function App() {
     });
   }, [state?.theme]);
 
-  useEffect(() => () => {
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-  }, []);
-
   const updateState = (recipe) => {
     setState((current) => {
       const next = normalizeState(typeof recipe === 'function' ? recipe(current) : recipe);
@@ -326,50 +328,74 @@ export default function App() {
       saveSequenceRef.current = saveSequence;
       saveStateRef.current = 'saving';
       setSaveState('saving');
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = window.setTimeout(() => {
-        saveChainRef.current = saveChainRef.current
-          .catch(() => {})
-          .then(() => saveAppState(next))
-          .then(() => {
-            if (saveSequenceRef.current === saveSequence) {
+      pendingSaveRef.current = { state: next, sequence: saveSequence };
+      if (!saveRunningRef.current) {
+        saveRunningRef.current = true;
+        saveDrainRef.current = (async () => {
+          while (pendingSaveRef.current) {
+            const pending = pendingSaveRef.current;
+            pendingSaveRef.current = null;
+            try {
+              await saveAppState(pending.state);
+              if (saveSequenceRef.current !== pending.sequence) continue;
               applyDesktopSyncStatus();
               if (getLastSyncStatus()?.status === 'conflict') {
                 const message = 'error: Sync conflict. Resolve before host sync can continue.';
                 saveStateRef.current = message;
                 setSaveState(message);
                 setShowConflictReview(true);
-                return;
+                continue;
               }
-              lastPersistedStateRef.current = persistedStateText(next);
+              lastPersistedStateRef.current = persistedStateText(pending.state);
               saveStateRef.current = 'saved';
               setSaveState('saved');
               if (isRemoteBuildBookClient()) {
                 setRemoteUnsaved(false);
                 setConnectionState('connected');
               }
-            }
-          })
-          .catch((error) => {
-            console.error(error);
-            if (saveSequenceRef.current === saveSequence) {
+            } catch (error) {
+              console.error(error);
+              if (saveSequenceRef.current !== pending.sequence) continue;
               const message = `error: ${String(error?.message || error).slice(0, 160)}`;
               saveStateRef.current = message;
               setSaveState(message);
               applyDesktopSyncStatus();
-              if (window.__TAURI_INTERNALS__ && getLastSyncStatus()?.status === 'conflict') {
-                setShowConflictReview(true);
-              }
+              if (window.__TAURI_INTERNALS__ && getLastSyncStatus()?.status === 'conflict') setShowConflictReview(true);
               if (isRemoteBuildBookClient()) {
                 setRemoteUnsaved(true);
                 setConnectionState('disconnected');
               }
             }
-          });
-      }, 450);
+          }
+          saveRunningRef.current = false;
+        })();
+      }
       return next;
     });
   };
+
+  useEffect(() => {
+    if (!window.__TAURI_INTERNALS__) return undefined;
+    let active = true;
+    let closing = false;
+    const finishAndExit = async () => {
+      if (closing) return;
+      closing = true;
+      await saveDrainRef.current.catch(() => {});
+      if (active) await exitApp();
+    };
+    const unlisteners = [];
+    getCurrentWindow().onCloseRequested(async (event) => {
+      if (stateRef.current?.closeToTray) return;
+      event.preventDefault();
+      await finishAndExit();
+    }).then((unlisten) => unlisteners.push(unlisten));
+    listen('buildbook-quit-requested', finishAndExit).then((unlisten) => unlisteners.push(unlisten));
+    return () => {
+      active = false;
+      unlisteners.forEach((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     if (!state) return;
@@ -492,28 +518,32 @@ export default function App() {
   useEffect(() => {
     if (!window.__TAURI_INTERNALS__ && !isRemoteBuildBookClient()) return undefined;
     const timer = window.setInterval(async () => {
-      if (!stateRef.current || saveStateRef.current === 'saving') return;
-      if (isRemoteBuildBookClient() && saveStateRef.current.startsWith('error')) {
-        try {
-          await refreshConnectionStatus();
-        } catch {
-          // Keep unsaved browser edits visible until the user retries or refreshes intentionally.
-        }
-        return;
-      }
+      if (!stateRef.current || saveStateRef.current === 'saving' || refreshInFlightRef.current) return;
+      refreshInFlightRef.current = true;
       try {
-        await refreshConnectionStatus();
-        const loaded = await loadAppState();
-        const loadedText = persistedStateText(loaded);
-        if (loadedText === lastPersistedStateRef.current) return;
-        lastPersistedStateRef.current = loadedText;
-        setState(loaded);
-        setSaveState('saved');
+        if (isRemoteBuildBookClient() && saveStateRef.current.startsWith('error')) {
+          try {
+            await refreshConnectionStatus();
+          } catch {
+            // Keep unsaved browser edits visible until the user retries or refreshes intentionally.
+          }
+        } else {
+          await refreshConnectionStatus();
+          const loaded = await loadAppState();
+          const loadedText = persistedStateText(loaded);
+          if (loadedText !== lastPersistedStateRef.current) {
+            lastPersistedStateRef.current = loadedText;
+            setState(loaded);
+            setSaveState('saved');
+          }
+        }
       } catch (error) {
         console.error(error);
         if (isRemoteBuildBookClient()) {
           setConnectionState('disconnected');
         }
+      } finally {
+        refreshInFlightRef.current = false;
       }
     }, 2000);
     return () => window.clearInterval(timer);
@@ -750,12 +780,16 @@ export default function App() {
             <button className="ghost" onClick={() => setDesktopNotice('')}>Dismiss</button>
           </div>
         )}
-        {tab === 'projects' && <Projects state={state} updateState={updateState} />}
-        {tab === 'completed-projects' && <Projects state={state} updateState={updateState} initialFilter="completed" lockedFilter />}
-        {tab === 'parts' && <Parts state={state} updateState={updateState} />}
-        {tab === 'search' && <Search state={state} setTab={setTab} />}
-        {tab === 'imports' && <Imports state={state} updateState={updateState} />}
-        {tab === 'settings' && <Settings state={state} updateState={updateState} activeSection={settingsSection} />}
+        <ViewErrorBoundary key={tab}>
+        <Suspense fallback={<BusyNotice label="Loading view..." />}>
+          {tab === 'projects' && <Projects state={state} updateState={updateState} />}
+          {tab === 'completed-projects' && <Projects state={state} updateState={updateState} initialFilter="completed" lockedFilter />}
+          {tab === 'parts' && <Parts state={state} updateState={updateState} />}
+          {tab === 'search' && <Search state={state} setTab={setTab} />}
+          {tab === 'imports' && <Imports state={state} updateState={updateState} />}
+          {tab === 'settings' && <Settings state={state} updateState={updateState} activeSection={settingsSection} />}
+        </Suspense>
+        </ViewErrorBoundary>
       </main>
     </div>
     </ConfirmProvider>

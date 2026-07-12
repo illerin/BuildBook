@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-const LAN_REQUEST_BODY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
+const LAN_REQUEST_BODY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 fn decode_url_value(value: &str) -> String {
     let bytes = value.as_bytes();
@@ -100,6 +100,7 @@ pub(crate) fn send_response_with_headers(
     let _ = write!(stream, "X-Content-Type-Options: nosniff\r\n");
     let _ = write!(stream, "X-Frame-Options: DENY\r\n");
     let _ = write!(stream, "Referrer-Policy: no-referrer\r\n");
+    let _ = write!(stream, "Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob:; frame-src 'self' blob: data:; connect-src 'self' http: https:\r\n");
     let _ = write!(
         stream,
         "Permissions-Policy: camera=(), microphone=(), geolocation=()\r\n"

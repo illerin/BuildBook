@@ -48,3 +48,7 @@ export function sanitizePastedRichText(html, plainText = '') {
   });
   return doc.body.innerHTML;
 }
+
+export function sanitizeStoredRichText(html) {
+  return sanitizePastedRichText(String(html || ''));
+}

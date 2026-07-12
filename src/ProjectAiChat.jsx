@@ -282,7 +282,7 @@ export default function ProjectAiChat({
           {settingsView === 'connection' && (
             <div className="ai-connection-form">
               <p>Each device can keep its own named AI profiles. Credentials and profile selection are not synchronized.</p>
-              <p>API keys are currently stored in this device's application/browser storage. Use restricted keys and do not share the device profile.</p>
+              <p>API keys are kept only for this app session and must be entered again after restart. Use restricted keys and do not share the device profile.</p>
               <div className="ai-profile-row">
                 <label>
                   Connection profile

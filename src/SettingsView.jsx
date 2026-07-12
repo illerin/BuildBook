@@ -103,6 +103,7 @@ export default function Settings({ state, updateState, activeSection = 'workspac
   const [syncError, setSyncError] = useState('');
   const [syncDashboard, setSyncDashboard] = useState(null);
   const [syncPrefetchProgress, setSyncPrefetchProgress] = useState('');
+  const dashboardLoadBusyRef = useRef(false);
   const syncClientMode = syncConfig?.mode === 'client';
   const syncHostMode = syncConfig?.mode === 'host';
   const networkControlledByHost = remoteClient || hostSyncClient || syncClientMode;
@@ -144,11 +145,15 @@ export default function Settings({ state, updateState, activeSection = 'workspac
     if (remoteClient) return undefined;
     let active = true;
     const loadDashboard = async () => {
+      if (dashboardLoadBusyRef.current) return;
+      dashboardLoadBusyRef.current = true;
       try {
         const dashboard = await readSyncStatusDashboard();
         if (active) setSyncDashboard(dashboard);
       } catch {
         if (active) setSyncDashboard(null);
+      } finally {
+        dashboardLoadBusyRef.current = false;
       }
     };
     loadDashboard();
@@ -420,6 +425,44 @@ export default function Settings({ state, updateState, activeSection = 'workspac
     downloadBytes(
       `buildbook-theme-v${APP_VERSION}.json`,
       themeExportBytes(state.theme),
+      'application/json',
+    );
+  };
+
+  const exportDiagnostics = () => {
+    const report = {
+      generatedAt: new Date().toISOString(),
+      appVersion: APP_VERSION,
+      runtime: window.__TAURI_INTERNALS__ ? 'tauri' : isRemoteBuildBookClient() ? 'lan-browser' : 'vite-browser',
+      userAgent: navigator.userAgent,
+      online: navigator.onLine,
+      visibility: document.visibilityState,
+      workspace: {
+        projects: state.projects?.length || 0,
+        parts: state.parts?.length || 0,
+        categories: state.categories?.length || 0,
+        imports: state.importBatches?.length || 0,
+        referencedFiles: collectReferencedPaths(state).length,
+      },
+      sync: syncDashboard ? {
+        mode: syncDashboard.mode,
+        status: syncDashboard.status,
+        pendingSync: syncDashboard.pendingSync,
+        lastConnectedAt: syncDashboard.lastConnectedAt,
+        lastSyncError: syncDashboard.lastSyncError,
+        cacheFileCount: syncDashboard.cacheFileCount,
+        cacheBytes: syncDashboard.cacheBytes,
+      } : null,
+      storage: storageScan ? {
+        fileCount: storageScan.fileCount,
+        totalBytes: storageScan.totalBytes,
+        orphanCount: storageScan.orphanCount,
+        orphanBytes: storageScan.orphanBytes,
+      } : null,
+    };
+    downloadBytes(
+      `buildbook-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+      new TextEncoder().encode(JSON.stringify(report, null, 2)),
       'application/json',
     );
   };
@@ -819,6 +862,17 @@ export default function Settings({ state, updateState, activeSection = 'workspac
       )}
       {activeSection === 'maintenance' && (
         <>
+      <section className="panel settings-section">
+        <div className="settings-section-row">
+          <div className="settings-copy">
+            <h2>Diagnostics</h2>
+            <p>Export a troubleshooting report with runtime, workspace, sync, and storage status. Secrets and workspace content are excluded.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="secondary" onClick={exportDiagnostics}>Export Diagnostics</button>
+          </div>
+        </div>
+      </section>
       <section className="panel settings-section">
         <div className="settings-section-row">
           <div className="settings-copy">

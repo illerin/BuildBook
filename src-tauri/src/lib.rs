@@ -2,14 +2,14 @@ use pbkdf2::pbkdf2_hmac;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 
 mod file_access;
@@ -66,7 +66,13 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show_main_window(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.emit("buildbook-quit-requested", ());
+                        } else {
+                            app.exit(0);
+                        }
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -138,7 +144,8 @@ pub fn run() {
             sync_download_url_to_host,
             sync_delete_host_files,
             sync_file_checkout,
-            set_close_to_tray
+            set_close_to_tray,
+            exit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running BuildBook");
@@ -158,6 +165,11 @@ fn set_close_to_tray(app: tauri::AppHandle, enabled: bool) {
     if let Some(tray) = app.tray_by_id("buildbook-tray") {
         let _ = tray.set_visible(enabled);
     }
+}
+
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 // These files share the crate-root namespace so Tauri command names stay stable.

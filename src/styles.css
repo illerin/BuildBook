@@ -76,6 +76,40 @@ button:disabled {
   opacity: 0.7;
 }
 
+.view-error {
+  margin: 24px;
+  max-width: 720px;
+}
+
+.view-error pre {
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.project-card,
+.part-card,
+.search-result,
+.file-row,
+.orphan-file-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 140px;
+}
+
+.progressive-list-more {
+  align-self: center;
+  justify-self: center;
+  min-width: 180px;
+}
+
 button.secondary,
 button.ghost {
   background: transparent;

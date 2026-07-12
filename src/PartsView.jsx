@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useProgressiveList } from './useProgressiveList';
 import { categoryLabel, makeId } from './data';
 import { downloadBytes, isHostSyncClient, openExternalUrl, openStoredFile, savePickedFile } from './desktop';
 import { fileHash } from './fileHash';
@@ -573,6 +574,7 @@ function Parts({ state, updateState }) {
         .some((value) => String(value || '').toLowerCase().includes(q));
     });
   }, [query, state.parts, state.categories, categoryFilter, showUnassigned]);
+  const partList = useProgressiveList(visible, `${query}\0${categoryFilter}\0${showUnassigned}`, 80);
 
   const categoryOptions = useMemo(() => flattenCategoryOptions(state.categories), [state.categories]);
   const categoryTree = useMemo(() => buildCategoryTree(state.categories.filter((category) => category.id !== 'cat-unassigned')), [state.categories]);
@@ -869,7 +871,7 @@ function Parts({ state, updateState }) {
           )}
           {visible.length === 0 ? <div className="panel empty-panel">No parts found.</div> : (
             <div className={`item-grid ${viewMode === 'list' ? 'list-view' : ''}`}>
-              {visible.map((part) => (
+              {partList.visibleItems.map((part) => (
                 <div
                   key={part.id}
                   className={`part-card ${draggingPartId === part.id ? 'dragging' : ''}`}
@@ -907,6 +909,11 @@ function Parts({ state, updateState }) {
                   </div>
                 </div>
               ))}
+              {partList.hasMore && (
+                <button ref={partList.sentinelRef} className="secondary progressive-list-more" onClick={partList.loadMore}>
+                  Load more parts
+                </button>
+              )}
             </div>
           )}
         </div>

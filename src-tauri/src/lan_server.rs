@@ -196,10 +196,6 @@ fn request_auth_error(method: &str, path: &str, headers: &str) -> Option<&'stati
             return Some("BuildBook access code is required.");
         }
     }
-    let device_id = query_value(path, "device");
-    if token_matches && !device_id.trim().is_empty() {
-        return None;
-    }
     if web_auth_requires_login(&web_auth, headers) {
         if !request_has_web_session(&web_auth, headers) {
             return Some("BuildBook login is required.");
@@ -209,6 +205,65 @@ fn request_auth_error(method: &str, path: &str, headers: &str) -> Option<&'stati
         }
     }
     None
+}
+
+#[derive(Clone, Copy)]
+struct WebLoginAttempt {
+    failed_attempts: u32,
+    locked_until: u64,
+    last_attempt: u64,
+}
+
+static WEB_LOGIN_ATTEMPTS: OnceLock<Mutex<HashMap<String, WebLoginAttempt>>> = OnceLock::new();
+
+fn web_login_attempts() -> &'static Mutex<HashMap<String, WebLoginAttempt>> {
+    WEB_LOGIN_ATTEMPTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn login_source(stream: &TcpStream) -> String {
+    stream
+        .peer_addr()
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn web_login_locked(source: &str) -> bool {
+    let now = now_seconds();
+    let Ok(mut attempts) = web_login_attempts().lock() else {
+        return true;
+    };
+    attempts.retain(|_, attempt| now.saturating_sub(attempt.last_attempt) <= 15 * 60);
+    attempts
+        .get(source)
+        .is_some_and(|attempt| attempt.locked_until > now)
+}
+
+fn record_web_login_failure(source: &str) {
+    let now = now_seconds();
+    let Ok(mut attempts) = web_login_attempts().lock() else {
+        return;
+    };
+    attempts.retain(|_, attempt| now.saturating_sub(attempt.last_attempt) <= 15 * 60);
+    if attempts.len() >= 1024 && !attempts.contains_key(source) {
+        return;
+    }
+    let attempt = attempts.entry(source.to_string()).or_insert(WebLoginAttempt {
+        failed_attempts: 0,
+        locked_until: 0,
+        last_attempt: now,
+    });
+    attempt.failed_attempts = attempt.failed_attempts.saturating_add(1);
+    attempt.last_attempt = now;
+    if attempt.failed_attempts >= 5 {
+        attempt.failed_attempts = 0;
+        attempt.locked_until = now + 5 * 60;
+    }
+}
+
+fn clear_web_login_failures(source: &str) {
+    if let Ok(mut attempts) = web_login_attempts().lock() {
+        attempts.remove(source);
+    }
 }
 
 fn paired_device_auth_error(
@@ -325,7 +380,13 @@ fn blocked_public_fetch_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn validate_public_web_url(url: &str) -> Result<String, String> {
+struct ValidatedPublicWebUrl {
+    url: String,
+    hostname: Option<String>,
+    addresses: Vec<SocketAddr>,
+}
+
+fn validate_public_web_url(url: &str) -> Result<ValidatedPublicWebUrl, String> {
     let trimmed = url.trim();
     let parsed = reqwest::Url::parse(trimmed)
         .map_err(|_| "Paste a public http or https product link.".to_string())?;
@@ -345,7 +406,11 @@ fn validate_public_web_url(url: &str) -> Result<String, String> {
         if blocked_public_fetch_ip(ip) {
             return Err("Only public product web links can be read.".to_string());
         }
-        return Ok(trimmed.to_string());
+        return Ok(ValidatedPublicWebUrl {
+            url: trimmed.to_string(),
+            hostname: None,
+            addresses: Vec::new(),
+        });
     }
 
     let port = parsed
@@ -362,7 +427,11 @@ fn validate_public_web_url(url: &str) -> Result<String, String> {
     {
         return Err("Only public product web links can be read.".to_string());
     }
-    Ok(trimmed.to_string())
+    Ok(ValidatedPublicWebUrl {
+        url: trimmed.to_string(),
+        hostname: Some(host.to_string()),
+        addresses,
+    })
 }
 
 fn collect_state_file_paths(value: &serde_json::Value, paths: &mut HashSet<String>) {
@@ -523,7 +592,7 @@ fn send_web_auth_status(stream: &mut TcpStream, headers: &str) {
     );
 }
 
-fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
+fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str, source: &str) {
     let auth = current_web_auth();
     if !web_auth_requires_login(&auth, headers) {
         send_response(
@@ -543,6 +612,15 @@ fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
             "403 Forbidden",
             "text/plain; charset=utf-8",
             b"Web login is enabled but no admin password is configured.",
+        );
+        return;
+    }
+    if web_login_locked(source) {
+        send_response(
+            stream,
+            "429 Too Many Requests",
+            "text/plain; charset=utf-8",
+            b"Too many failed login attempts. Try again in a few minutes.",
         );
         return;
     }
@@ -566,6 +644,7 @@ fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
     };
     let expected_hash = password_hash(&request.password, &auth);
     if request.username.trim() != expected_user || expected_hash != auth.password_hash {
+        record_web_login_failure(source);
         send_response(
             stream,
             "401 Unauthorized",
@@ -574,6 +653,7 @@ fn handle_web_login(stream: &mut TcpStream, body: &[u8], headers: &str) {
         );
         return;
     }
+    clear_web_login_failures(source);
     let remember_days = auth.remember_days.unwrap_or(30).clamp(1, 365) as u64;
     let max_age = remember_days * 24 * 60 * 60;
     let expires = now_seconds() + max_age;
@@ -698,7 +778,8 @@ fn handle_web_session_routes(
             let Some(body) = request_body_or_bad_request(stream, initial, headers) else {
                 return true;
             };
-            handle_web_login(stream, &body, headers);
+            let source = login_source(stream);
+            handle_web_login(stream, &body, headers, &source);
             return true;
         }
         return false;
@@ -1497,11 +1578,16 @@ fn serve_lan_static_request(app: &tauri::AppHandle, path: &str, stream: &mut Tcp
         dist.join("index.html")
     };
     match std::fs::read(&file_path) {
-        Ok(bytes) => send_response(
+        Ok(bytes) => send_response_with_headers(
             stream,
             "200 OK",
             content_type(file_path.to_string_lossy().as_ref()),
             &bytes,
+            &[if file_path.extension().is_some_and(|extension| extension != "html") {
+                "Cache-Control: public, max-age=31536000, immutable".to_string()
+            } else {
+                "Cache-Control: no-cache".to_string()
+            }],
         ),
         Err(_) => send_response(
             stream,
@@ -1650,17 +1736,44 @@ fn start_lan_server(
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
     let discovery_stop = stop.clone();
-    let app_thread = app.clone();
     let discovery_app = app.clone();
     let url = format!("http://{}:{}/", local_lan_ip(), port);
     let discovery_url = url.clone();
+    let (connection_sender, connection_receiver) = std::sync::mpsc::sync_channel::<TcpStream>(32);
+    let connection_receiver = Arc::new(Mutex::new(connection_receiver));
+    for _ in 0..8 {
+        let receiver = connection_receiver.clone();
+        let worker_stop = stop.clone();
+        let worker_app = app.clone();
+        std::thread::spawn(move || {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let received = receiver
+                    .lock()
+                    .ok()
+                    .and_then(|receiver| receiver.recv_timeout(std::time::Duration::from_millis(250)).ok());
+                let Some(stream) = received else {
+                    continue;
+                };
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                serve_lan_request(worker_app.clone(), stream);
+            }
+        });
+    }
     let thread = std::thread::spawn(move || {
         while !stop_thread.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(false);
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(15)));
-                    serve_lan_request(app_thread.clone(), stream);
+                    match connection_sender.try_send(stream) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::TrySendError::Full(mut stream)) => send_response(
+                            &mut stream,
+                            "503 Service Unavailable",
+                            "text/plain; charset=utf-8",
+                            b"BuildBook is busy. Try again shortly.",
+                        ),
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => break,
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(80))
@@ -1752,4 +1865,30 @@ fn lan_server_status() -> Result<LanServerInfo, String> {
         url: String::new(),
         port: 0,
     })
+}
+
+#[cfg(test)]
+mod lan_server_tests {
+    use super::*;
+
+    #[test]
+    fn web_login_locks_after_five_failures_and_clears() {
+        let source = "test-login-source";
+        clear_web_login_failures(source);
+        for _ in 0..4 {
+            record_web_login_failure(source);
+            assert!(!web_login_locked(source));
+        }
+        record_web_login_failure(source);
+        assert!(web_login_locked(source));
+        clear_web_login_failures(source);
+        assert!(!web_login_locked(source));
+    }
+
+    #[test]
+    fn public_web_url_validation_blocks_private_addresses() {
+        assert!(validate_public_web_url("http://127.0.0.1/file.png").is_err());
+        assert!(validate_public_web_url("http://[::1]/file.png").is_err());
+        assert!(validate_public_web_url("file:///tmp/file.png").is_err());
+    }
 }

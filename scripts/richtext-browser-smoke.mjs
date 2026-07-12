@@ -28,7 +28,7 @@ writeFileSync(
 <html>
   <body>
     <script type="module">
-      import { sanitizePastedRichText } from ${JSON.stringify(sanitizerUrl)};
+      import { sanitizePastedRichText, sanitizeStoredRichText } from ${JSON.stringify(sanitizerUrl)};
 
       function assert(condition, message) {
         if (!condition) throw new Error(message);
@@ -44,6 +44,9 @@ writeFileSync(
       assert(goodLink?.getAttribute('target') === '_blank', 'safe link target was not applied');
       assert(goodLink?.getAttribute('rel') === 'noopener noreferrer', 'safe link rel was not applied');
       assert(!doc.querySelector('a[href^="javascript:"]'), 'unsafe link href was preserved');
+
+      const stored = sanitizeStoredRichText('<p><img src=x onerror="alert(1)"><a href="javascript:alert(1)">bad</a>safe</p>');
+      assert(!/onerror|javascript:/i.test(stored), 'unsafe stored rich text was not sanitized');
 
       const plain = sanitizePastedRichText('', 'Line 1\\nLine <2>\\n\\nNext');
       assert(plain === '<p>Line 1<br>Line &lt;2&gt;</p><p>Next</p>', 'plain text paste fallback changed');

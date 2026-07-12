@@ -206,7 +206,7 @@ fn download_url_to_file(
     library: String,
     name: String,
 ) -> Result<StoredFile, String> {
-    let url = validate_public_web_url(&url)?;
+    let validated_url = validate_public_web_url(&url)?;
     let app_dir = app
         .path()
         .app_data_dir()
@@ -222,66 +222,56 @@ fn download_url_to_file(
     let stored_name = format!("{timestamp}-{}", safe_file_name(&name));
     let target = target_dir.join(&stored_name);
 
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = std::process::Command::new("curl.exe");
-        cmd.args([
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "60",
-            "--user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
-            "--referer",
-            "https://www.google.com/",
-        ])
-            .arg(&url)
-            .args(["--output"])
-            .arg(&target);
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let mut command = {
-        let mut cmd = std::process::Command::new("curl");
-        cmd.args([
-            "-L",
-            "--fail",
-            "--silent",
-            "--show-error",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "60",
-            "--user-agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36",
-            "--referer",
-            "https://www.google.com/",
-        ])
-            .arg(&url)
-            .args(["--output"])
-            .arg(&target);
-        cmd
-    };
-
-    let output = command
-        .output()
-        .map_err(|error| format!("Could not download file: {error}"))?;
-
-    if !output.status.success() {
+    let mut client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(60));
+    if let Some(hostname) = validated_url.hostname.as_deref() {
+        client = client.resolve_to_addrs(hostname, &validated_url.addresses);
+    }
+    let client = client
+        .build()
+        .map_err(|error| format!("Could not prepare the download request: {error}"))?;
+    let mut response = client
+        .get(&validated_url.url)
+        .send()
+        .map_err(|error| format!("Could not download remote file: {error}"))?;
+    if response.status().is_redirection() {
+        return Err("Redirecting product links are not supported for security reasons. Use the final public file URL instead.".to_string());
+    }
+    if !response.status().is_success() {
+        return Err(format!("Could not download remote file: {}", response.status()));
+    }
+    const MAX_REMOTE_DOWNLOAD_BYTES: u64 = 64 * 1024 * 1024;
+    if response.content_length().is_some_and(|length| length > MAX_REMOTE_DOWNLOAD_BYTES) {
+        return Err("The remote file is larger than the 64 MB download limit.".to_string());
+    }
+    let mut output = std::fs::File::create(&target)
+        .map_err(|error| format!("Could not create the downloaded file: {error}"))?;
+    let download_result = (|| -> Result<(), String> {
+        let mut downloaded = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = std::io::Read::read(&mut response, &mut buffer)
+                .map_err(|error| format!("Could not read the remote file: {error}"))?;
+            if count == 0 {
+                break;
+            }
+            downloaded = downloaded.saturating_add(count as u64);
+            if downloaded > MAX_REMOTE_DOWNLOAD_BYTES {
+                return Err("The remote file is larger than the 64 MB download limit.".to_string());
+            }
+            std::io::Write::write_all(&mut output, &buffer[..count])
+                .map_err(|error| format!("Could not save the downloaded file: {error}"))?;
+        }
+        std::io::Write::flush(&mut output)
+            .map_err(|error| format!("Could not finish the downloaded file: {error}"))
+    })();
+    if let Err(error) = download_result {
+        drop(output);
         let _ = std::fs::remove_file(&target);
-        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if details.is_empty() {
-            "Could not download remote file.".to_string()
-        } else {
-            format!("Could not download remote file: {details}")
-        });
+        return Err(error);
     }
 
     let size = target

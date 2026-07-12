@@ -41,21 +41,22 @@ export async function savePickedFile(file, library) {
 }
 
 export async function saveBytesFile(name, library, bytes) {
-  const data = Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  const byteView = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (isLanWebClient()) {
     const response = await fetch(`/api/files?library=${encodeURIComponent(library)}&name=${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: apiHeaders(),
-      body: bytes,
+      body: byteView,
     });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
   if (!isTauri()) {
-    return { name, path: URL.createObjectURL(new Blob([bytes])), size: data.length };
+    return { name, path: URL.createObjectURL(new Blob([byteView])), size: byteView.byteLength };
   }
 
+  const data = Array.from(byteView);
   if (cachedSyncConfig().mode === 'client') {
     return invoke('sync_save_host_file', { name, library, bytes: data });
   }
@@ -63,17 +64,18 @@ export async function saveBytesFile(name, library, bytes) {
 }
 
 export async function overwriteBytesFile(path, bytes, name = 'updated-file') {
-  const data = Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  const byteView = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (isLanWebClient()) {
-    const response = await fetch(fileApiUrl(path), { method: 'PUT', headers: apiHeaders(), body: bytes });
+    const response = await fetch(fileApiUrl(path), { method: 'PUT', headers: apiHeaders(), body: byteView });
     if (!response.ok) throw new Error(await response.text());
     return response.json();
   }
 
   if (!isTauri()) {
-    return { name, path: URL.createObjectURL(new Blob([bytes])), size: data.length };
+    return { name, path: URL.createObjectURL(new Blob([byteView])), size: byteView.byteLength };
   }
 
+  const data = Array.from(byteView);
   if (cachedSyncConfig().mode === 'client') {
     return invoke('sync_overwrite_host_file', { path, bytes: data });
   }
@@ -426,6 +428,11 @@ export async function fileCheckout(path, action = 'acquire') {
 export async function setCloseToTray(enabled) {
   if (!isTauri()) return;
   await invoke('set_close_to_tray', { enabled: Boolean(enabled) });
+}
+
+export async function exitApp() {
+  if (!isTauri()) return;
+  await invoke('exit_app');
 }
 
 export async function listStateBackups() {

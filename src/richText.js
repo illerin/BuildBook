@@ -6,7 +6,7 @@ import {
   repairStoredImageSourcesWithAssetUrl,
   richTextStorageHtmlWithAssetUrl,
 } from './richTextPolicy';
-import { sanitizePastedRichText } from './richTextSanitizer';
+import { sanitizePastedRichText, sanitizeStoredRichText } from './richTextSanitizer';
 
 export { escapeHtml } from './richTextPolicy';
 export { sanitizePastedRichText } from './richTextSanitizer';
@@ -53,7 +53,7 @@ export function richTextStorageHtml(html) {
 }
 
 export function normalizeRichText(value) {
-  return normalizeRichTextWithAssetUrl(value, assetUrl);
+  return normalizeRichTextWithAssetUrl(sanitizeStoredRichText(value), assetUrl);
 }
 
 export async function hydrateRichTextForEditor(html) {

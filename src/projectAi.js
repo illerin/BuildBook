@@ -11,6 +11,7 @@ const PROJECT_CONNECTION_PREFIX = 'buildbook-project-ai-connection-v1:';
 const CHAT_PREFIX = 'buildbook-project-ai-chat-v1:';
 const MEMORY_PREFIX = 'buildbook-project-ai-memory-v1:';
 const AUDIT_PREFIX = 'buildbook-project-ai-audit-v1:';
+const API_KEY_SESSION_PREFIX = 'buildbook-project-ai-api-key-v1:';
 
 export const AI_PROVIDER_OPTIONS = [
   { id: 'openai', label: 'OpenAI' },
@@ -74,18 +75,100 @@ export function createAiConnection(provider = 'openai-compatible', name = '') {
   }, 1);
 }
 
-export function loadAiConnections() {
+function apiKeySessionKey(profileId) {
+  return `${API_KEY_SESSION_PREFIX}${profileId}`;
+}
+
+function sessionApiKey(profileId) {
+  try {
+    return sessionStorage.getItem(apiKeySessionKey(profileId)) || '';
+  } catch {
+    return '';
+  }
+}
+
+function storeSessionApiKey(profileId, value) {
+  try {
+    const key = String(value || '').trim();
+    if (key) sessionStorage.setItem(apiKeySessionKey(profileId), key);
+    else sessionStorage.removeItem(apiKeySessionKey(profileId));
+  } catch {
+    // Browser storage is unavailable. Keep the key in memory for this render.
+  }
+}
+
+function hydrateProfileApiKey(profile) {
+  const legacyKey = String(profile.apiKey || '').trim();
+  const key = sessionApiKey(profile.id) || legacyKey;
+  if (legacyKey) storeSessionApiKey(profile.id, legacyKey);
+  return { ...profile, apiKey: key };
+}
+
+function profileWithoutApiKey(profile) {
+  return { ...profile, apiKey: '' };
+}
+
+function migratePersistedAiApiKeys() {
+  if (typeof localStorage === 'undefined') return;
   try {
     const saved = JSON.parse(localStorage.getItem(CONNECTIONS_KEY) || 'null');
     if (saved?.profiles?.length) {
       const profiles = saved.profiles.map(normalizeAiConnection);
+      if (profiles.some((profile) => profile.apiKey)) {
+        profiles.forEach((profile) => storeSessionApiKey(profile.id, profile.apiKey));
+        localStorage.setItem(CONNECTIONS_KEY, JSON.stringify({
+          activeProfileId: profiles.some((profile) => profile.id === saved.activeProfileId)
+            ? saved.activeProfileId
+            : profiles[0].id,
+          profiles: profiles.map(profileWithoutApiKey),
+        }));
+      }
+    }
+    const legacy = JSON.parse(localStorage.getItem(LEGACY_CONNECTION_KEY) || 'null');
+    if (legacy?.apiKey) {
+      const profile = normalizeAiConnection({ ...DEFAULT_AI_CONNECTION, ...legacy });
+      storeSessionApiKey(profile.id, profile.apiKey);
+      localStorage.removeItem(LEGACY_CONNECTION_KEY);
+      if (!saved?.profiles?.length) {
+        localStorage.setItem(CONNECTIONS_KEY, JSON.stringify({
+          activeProfileId: profile.id,
+          profiles: [profileWithoutApiKey(profile)],
+        }));
+      }
+    }
+  } catch {
+    // Leave storage untouched when it is unavailable or malformed.
+  }
+}
+
+migratePersistedAiApiKeys();
+
+export function loadAiConnections() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CONNECTIONS_KEY) || 'null');
+    if (saved?.profiles?.length) {
+      const rawProfiles = saved.profiles.map(normalizeAiConnection);
+      const profiles = rawProfiles.map(hydrateProfileApiKey);
       const activeProfileId = profiles.some((profile) => profile.id === saved.activeProfileId)
         ? saved.activeProfileId
         : profiles[0].id;
+      if (rawProfiles.some((profile) => profile.apiKey)) {
+        localStorage.setItem(CONNECTIONS_KEY, JSON.stringify({
+          activeProfileId,
+          profiles: rawProfiles.map(profileWithoutApiKey),
+        }));
+      }
       return { activeProfileId, profiles };
     }
     const legacy = JSON.parse(localStorage.getItem(LEGACY_CONNECTION_KEY) || 'null');
-    const profile = normalizeAiConnection({ ...DEFAULT_AI_CONNECTION, ...(legacy || {}) });
+    const profile = hydrateProfileApiKey(normalizeAiConnection({ ...DEFAULT_AI_CONNECTION, ...(legacy || {}) }));
+    if (legacy?.apiKey) {
+      localStorage.removeItem(LEGACY_CONNECTION_KEY);
+      localStorage.setItem(CONNECTIONS_KEY, JSON.stringify({
+        activeProfileId: profile.id,
+        profiles: [profileWithoutApiKey(profile)],
+      }));
+    }
     return { activeProfileId: profile.id, profiles: [profile] };
   } catch {
     return { activeProfileId: DEFAULT_AI_CONNECTION.id, profiles: [{ ...DEFAULT_AI_CONNECTION }] };
@@ -100,7 +183,12 @@ export function saveAiConnections(settings) {
       : profiles[0].id,
     profiles,
   };
-  localStorage.setItem(CONNECTIONS_KEY, JSON.stringify(normalized));
+  normalized.profiles.forEach((profile) => storeSessionApiKey(profile.id, profile.apiKey));
+  localStorage.setItem(CONNECTIONS_KEY, JSON.stringify({
+    ...normalized,
+    profiles: normalized.profiles.map(profileWithoutApiKey),
+  }));
+  localStorage.removeItem(LEGACY_CONNECTION_KEY);
   return normalized;
 }
 

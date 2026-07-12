@@ -100,8 +100,10 @@ retrieval dates, specifications, notes, quantity, and optional project linking.
 Evidence is retained in the created part's notes.
 
 Each computer or browser can select a different connection profile for the same
-project. Profiles, API keys, chat history, and the selected profile stay on that
-device and are not synchronized. The OpenAI-compatible option supports servers
+project. Profiles, chat history, and the selected profile stay on that device
+and are not synchronized. API keys are kept only for the current app session
+and must be entered again after restarting BuildBook or the browser. The
+OpenAI-compatible option supports servers
 such as Ollama, LM Studio, vLLM, llama.cpp, and compatible gateways when their
 Chat Completions endpoint permits requests from BuildBook.
 
@@ -276,6 +278,13 @@ longer referenced by workspace state.
 - Deletion is permanent.
 - Storage cleanup must run on the host in a host/client setup.
 
+### Diagnostics
+
+Use **Settings > Maintenance > Diagnostics > Export Diagnostics** to save a
+troubleshooting report containing application, runtime, workspace-count, sync,
+and storage-health information. The report excludes credentials and workspace
+content.
+
 ## Operating Modes
 
 ### Standalone local
@@ -305,6 +314,9 @@ the displayed QR code or address from a device that can reach the host.
 Keep the access token enabled unless another trusted security layer protects
 access. A browser can remember the token after opening the access URL.
 
+When saving an image from a web link, use its final public HTTP or HTTPS URL.
+BuildBook does not follow redirects for these downloads.
+
 ## Network Security
 
 BuildBook is intended for trusted personal or workshop networks.
@@ -321,6 +333,9 @@ See [Security Notes](../SECURITY.md) for the current security model and limits.
 
 Enable **Keep running in tray** when the host or browser service must remain
 available after the main window closes.
+
+When quitting instead of closing to the tray, BuildBook waits for the active
+workspace save to finish before terminating.
 
 Use **Settings > Maintenance > Software Updates** to check for and install a
 published update. BuildBook restarts after installing an update.
